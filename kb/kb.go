@@ -277,18 +277,21 @@ func (l *KB) openConfiguredDB(ctx context.Context, dbPath string) (*sql.DB, erro
 		}
 	}
 
-	if _, err := db.Exec(`LOAD vss`); err != nil {
-		if l.OfflineExt {
+	if l.OfflineExt {
+		if _, err := db.Exec(`LOAD vss`); err != nil {
 			db.Close()
-			return nil, fmt.Errorf("failed to load vss extension (offline mode): %w", err)
+			return nil, fmt.Errorf("failed to load vss extension in offline mode (check extension_directory %q): %w", l.ExtensionDir, err)
 		}
-		if _, installErr := db.Exec(`INSTALL vss`); installErr != nil {
-			db.Close()
-			return nil, fmt.Errorf("failed to install vss: %w", installErr)
-		}
-		if _, loadErr := db.Exec(`LOAD vss`); loadErr != nil {
-			db.Close()
-			return nil, fmt.Errorf("failed to load vss after install: %w", loadErr)
+	} else {
+		if _, err := db.Exec(`LOAD vss`); err != nil {
+			if _, installErr := db.Exec(`INSTALL vss`); installErr != nil {
+				db.Close()
+				return nil, fmt.Errorf("failed to install vss: %w", installErr)
+			}
+			if _, loadErr := db.Exec(`LOAD vss`); loadErr != nil {
+				db.Close()
+				return nil, fmt.Errorf("failed to load vss after install: %w", loadErr)
+			}
 		}
 	}
 
