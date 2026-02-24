@@ -278,20 +278,26 @@ func (l *KB) openConfiguredDB(ctx context.Context, dbPath string) (*sql.DB, erro
 	}
 
 	if l.OfflineExt {
-		if _, err := db.Exec(`LOAD vss`); err != nil {
+		// Disable autoinstall to prevent DuckDB from downloading extensions
+		// behind the scenes when LOAD can't find them locally.
+		if _, err := db.Exec(`SET autoinstall_known_extensions = false`); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("disable autoinstall: %w", err)
+		}
+	}
+
+	if _, err := db.Exec(`LOAD vss`); err != nil {
+		if l.OfflineExt {
 			db.Close()
 			return nil, fmt.Errorf("failed to load vss extension in offline mode (check extension_directory %q): %w", l.ExtensionDir, err)
 		}
-	} else {
-		if _, err := db.Exec(`LOAD vss`); err != nil {
-			if _, installErr := db.Exec(`INSTALL vss`); installErr != nil {
-				db.Close()
-				return nil, fmt.Errorf("failed to install vss: %w", installErr)
-			}
-			if _, loadErr := db.Exec(`LOAD vss`); loadErr != nil {
-				db.Close()
-				return nil, fmt.Errorf("failed to load vss after install: %w", loadErr)
-			}
+		if _, installErr := db.Exec(`INSTALL vss`); installErr != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to install vss: %w", installErr)
+		}
+		if _, loadErr := db.Exec(`LOAD vss`); loadErr != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to load vss after install: %w", loadErr)
 		}
 	}
 

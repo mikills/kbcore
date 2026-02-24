@@ -231,3 +231,82 @@ func (e simpleTokenEmbedder) Embed(_ context.Context, input string) ([]float32, 
 	}
 	return normalizeVector(vec), nil
 }
+
+// TestOfflineExtensionLoad verifies openConfiguredDB behavior with offline
+// extension loading. This catches regressions where DuckDB's autoinstall
+// silently downloads extensions
+func TestOfflineExtensionLoad(t *testing.T) {
+	// Resolve the repo-root .duckdb/extensions directory.
+	// The test binary's working directory is the package directory (kb/),
+	// so the repo-level extensions are one level up.
+	localExtDir := filepath.Join("..", ".duckdb", "extensions")
+
+	tests := []struct {
+		name         string
+		extDir       string
+		offline      bool
+		wantErr      bool
+		errContains  string
+		skipIfNoExts bool
+	}{
+		{
+			name:         "offline with valid local extensions",
+			extDir:       localExtDir,
+			offline:      true,
+			wantErr:      false,
+			skipIfNoExts: true,
+		},
+		{
+			name:        "offline with empty extension dir fails",
+			extDir:      "", // replaced with t.TempDir() below
+			offline:     true,
+			wantErr:     true,
+			errContains: "offline mode",
+		},
+		{
+			name:         "online with valid local extensions",
+			extDir:       localExtDir,
+			offline:      false,
+			wantErr:      false,
+			skipIfNoExts: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.skipIfNoExts {
+				if _, err := os.Stat(filepath.Join(localExtDir, "v1.1.3")); err != nil {
+					t.Skipf("pre-downloaded extensions not found at %s: %v", localExtDir, err)
+				}
+			}
+
+			tmpDir := t.TempDir()
+			dbPath := filepath.Join(tmpDir, "test.duckdb")
+
+			extDir := tt.extDir
+			if extDir == "" {
+				extDir = t.TempDir()
+			}
+
+			k := &KB{
+				MemoryLimit:  "128MB",
+				ExtensionDir: extDir,
+				OfflineExt:   tt.offline,
+			}
+
+			db, err := k.openConfiguredDB(context.Background(), dbPath)
+			if tt.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.errContains)
+				return
+			}
+			require.NoError(t, err)
+			defer db.Close()
+
+			var loaded bool
+			err = db.QueryRow(`SELECT installed FROM duckdb_extensions() WHERE extension_name = 'vss'`).Scan(&loaded)
+			require.NoError(t, err)
+			require.True(t, loaded, "vss extension should be loaded")
+		})
+	}
+}
