@@ -35,7 +35,10 @@ func main() {
 	cacheEvictInterval := getenvDurationDefault(logger, "KBCORE_CACHE_EVICT_INTERVAL", 30*time.Second)
 
 	store := &kb.LocalBlobStore{Root: blobRoot}
-	embedder := kb.NewOllamaEmbedder(ollamaURL, ollamaModel)
+
+	embedProvider := getenvDefault("KBCORE_EMBEDDER_PROVIDER", "local")
+	embedder := getEmbedder(logger, embedProvider, ollamaURL, ollamaModel)
+
 	kbOpts := []kb.KBOption{
 		kb.WithMemoryLimit(memLimit),
 		kb.WithEmbedder(embedder),
@@ -54,7 +57,6 @@ func main() {
 	}
 	loader := kb.NewKB(store, cacheDir, kbOpts...)
 
-	logger.Info("configured ollama embedder", "url", ollamaURL, "model", ollamaModel)
 	logger.Info(
 		"configured sharding policy",
 		"shard_trigger_bytes", shardingPolicy.ShardTriggerBytes,
@@ -267,4 +269,28 @@ func parseShardingPolicyFromEnv(getenv func(string) string) (kb.ShardingPolicy, 
 	}
 
 	return policy, nil
+}
+
+func getEmbedder(logger *slog.Logger, embedProvider, ollamaURL, ollamaModel string) kb.Embedder {
+	var embedder kb.Embedder
+
+	switch embedProvider {
+	case "ollama":
+		embedder = kb.NewOllamaEmbedder(ollamaURL, ollamaModel)
+		logger.Info("configured ollama embedder", "url", ollamaURL, "model", ollamaModel)
+	case "local":
+		localDim := getenvIntDefault(logger, "KBCORE_LOCAL_EMBED_DIM", 384)
+		le, err := kb.NewLocalEmbedder(localDim)
+		if err != nil {
+			logger.Error("failed to create local embedder", "error", err)
+			os.Exit(1)
+		}
+		embedder = le
+		logger.Info("configured local embedder", "dim", localDim)
+	default:
+		logger.Error("unknown embedder provider", "provider", embedProvider, "valid", "ollama, local")
+		os.Exit(1)
+	}
+
+	return embedder
 }

@@ -1,6 +1,10 @@
 package kb
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 var (
 	ErrBlobVersionMismatch = errors.New("blob version mismatch")
@@ -11,5 +15,46 @@ var (
 	ErrGraphQueryUnavailable = errors.New("graph query requested but graph data is unavailable")
 	ErrKBUninitialized       = errors.New("kb is not initialized")
 
+	ErrInvalidEmbeddingDimension  = errors.New("invalid embedding dimension")
+	ErrEmbeddingDimensionMismatch = errors.New("embedding dimension mismatch")
+
 	ErrWriteLeaseConflict = errors.New("write lease conflict")
 )
+
+func wrapEmbeddingDimensionMismatch(err error, operation string) error {
+	if err == nil {
+		return nil
+	}
+	if !isEmbeddingDimensionMismatchErr(err) {
+		return err
+	}
+	detail := strings.TrimSpace(operation)
+	if detail == "" {
+		detail = "embedding dimension mismatch"
+	}
+	return fmt.Errorf("%w: %s; existing KB vectors were built with a different embedding configuration, rebuild/re-ingest this KB: %v", ErrEmbeddingDimensionMismatch, detail, err)
+}
+
+func isEmbeddingDimensionMismatchErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	hasFloatArray := strings.Contains(msg, "float[")
+	if !hasFloatArray {
+		return false
+	}
+	if strings.Contains(msg, "array_distance") && (strings.Contains(msg, "cast") || strings.Contains(msg, "size")) {
+		return true
+	}
+	if strings.Contains(msg, "cannot cast") {
+		return true
+	}
+	if strings.Contains(msg, "array") && strings.Contains(msg, "mismatch") {
+		return true
+	}
+	if strings.Contains(msg, "different") && strings.Contains(msg, "size") {
+		return true
+	}
+	return false
+}

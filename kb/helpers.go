@@ -141,7 +141,10 @@ func queryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int)
 		LIMIT %d
 	`, vecStr, len(queryVec), k))
 	if err != nil {
-		return nil, fmt.Errorf("query failed: %w", err)
+		return nil, wrapEmbeddingDimensionMismatch(
+			fmt.Errorf("query failed: %w", err),
+			"vector query dimension is incompatible with stored vectors",
+		)
 	}
 	defer rows.Close()
 
@@ -185,7 +188,10 @@ func queryDocMatchesForIDs(ctx context.Context, db *sql.DB, queryVec []float32, 
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("distance query failed: %w", err)
+		return nil, wrapEmbeddingDimensionMismatch(
+			fmt.Errorf("distance query failed: %w", err),
+			"distance query vector dimension is incompatible with stored vectors",
+		)
 	}
 	defer rows.Close()
 
