@@ -50,6 +50,8 @@ type KB struct {
 	BlobStore    BlobStore
 	CacheDir     string
 	MemoryLimit  string
+	ExtensionDir string
+	OfflineExt   bool
 	Embedder     Embedder
 	GraphBuilder *GraphBuilder
 
@@ -88,6 +90,21 @@ func WithMemoryLimit(limit string) KBOption {
 func WithEmbedder(embedder Embedder) KBOption {
 	return func(kb *KB) {
 		kb.Embedder = embedder
+	}
+}
+
+// WithDuckDBExtensionDir sets the root directory for pre-downloaded DuckDB extensions.
+func WithDuckDBExtensionDir(dir string) KBOption {
+	return func(kb *KB) {
+		kb.ExtensionDir = dir
+	}
+}
+
+// WithDuckDBOfflineExtensions controls offline extension mode.
+// When true, extensions are only LOADed (never INSTALLed at runtime).
+func WithDuckDBOfflineExtensions(offline bool) KBOption {
+	return func(kb *KB) {
+		kb.OfflineExt = offline
 	}
 }
 
@@ -253,14 +270,26 @@ func (l *KB) openConfiguredDB(ctx context.Context, dbPath string) (*sql.DB, erro
 		return nil, err
 	}
 
-	if _, err := db.Exec(`INSTALL vss`); err != nil {
-		db.Close()
-		return nil, err
+	if l.ExtensionDir != "" {
+		if _, err := db.Exec(fmt.Sprintf(`SET extension_directory = '%s'`, l.ExtensionDir)); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("set extension_directory: %w", err)
+		}
 	}
 
 	if _, err := db.Exec(`LOAD vss`); err != nil {
-		db.Close()
-		return nil, err
+		if l.OfflineExt {
+			db.Close()
+			return nil, fmt.Errorf("failed to load vss extension (offline mode): %w", err)
+		}
+		if _, installErr := db.Exec(`INSTALL vss`); installErr != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to install vss: %w", installErr)
+		}
+		if _, loadErr := db.Exec(`LOAD vss`); loadErr != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to load vss after install: %w", loadErr)
+		}
 	}
 
 	if _, err := db.Exec(`SET hnsw_enable_experimental_persistence = true`); err != nil {

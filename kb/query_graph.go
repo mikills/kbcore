@@ -21,6 +21,7 @@ type ExpansionOptions struct {
 	EdgeTypes           []string
 	UseDuckPGQ          bool
 	MaxEntityResults    int
+	OfflineExt          bool
 }
 
 // ExpandedResult represents a blended result combining vector and graph scores.
@@ -67,6 +68,7 @@ func (k *KB) SearchExpanded(ctx context.Context, kbID string, queryVec []float32
 		return nil, err
 	}
 	options := normalizeExpansionOptions(topK, opts)
+	options.OfflineExt = k.OfflineExt
 	selection, err := k.resolveVectorQuerySelection(ctx, kbID, queryVec)
 	if err != nil {
 		return nil, fmt.Errorf("select vector query path: %w", err)
