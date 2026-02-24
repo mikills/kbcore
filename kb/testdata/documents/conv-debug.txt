@@ -1,0 +1,13 @@
+Alice: Hey, my Go service is leaking memory. The heap keeps growing even though I'm closing all my HTTP response bodies.
+
+Bob: Are you reading the full response body before closing? If you just close it without reading, the connection can't be reused and the transport keeps it around.
+
+Alice: Oh wait, I'm doing resp.Body.Close() immediately after checking the status code. I skip reading the body when it's a 204.
+
+Bob: That's the issue. Even for 204s, you should do io.Copy(io.Discard, resp.Body) before closing. The HTTP transport needs to drain the body to recycle the connection. Otherwise the underlying TCP connection stays open.
+
+Alice: That makes sense. I just added the drain and the heap is flat now. Thanks! One more thing - should I be setting a timeout on the HTTP client?
+
+Bob: Absolutely. The default client has no timeout. Use http.Client{Timeout: 10 * time.Second} at minimum. Without it, a slow server can cause goroutine leaks because the request blocks forever.
+
+Alice: Good point. I was using http.DefaultClient everywhere. Let me fix that too.

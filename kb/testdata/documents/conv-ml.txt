@@ -1,0 +1,13 @@
+Ivy: Our recommendation model's precision dropped 15% after the last retrain. The recall is actually higher though.
+
+Jake: Sounds like the decision threshold shifted. When recall goes up and precision drops, you're probably predicting more positives overall. Did the training data distribution change?
+
+Ivy: We added three months of new interaction data. There's more click data from the holiday season which tends to be noisier - people click on things they'd never normally look at.
+
+Jake: That explains it. The model learned that more things are "relevant" because holiday browsing is more exploratory. You could try downsampling the holiday period or adding a time-decay weight.
+
+Ivy: I was thinking about A/B testing the new model anyway. Even if precision dropped offline, the higher recall might mean users see more diverse recommendations which could improve engagement.
+
+Jake: Good idea. Just make sure you track the full funnel - clicks, add-to-cart, and purchase. A model that gets more clicks but fewer purchases is just showing clickbait.
+
+Ivy: True. I'll set up the experiment with conversion as the primary metric and click-through as secondary.

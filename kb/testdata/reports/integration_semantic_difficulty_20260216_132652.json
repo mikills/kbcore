@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-02-16T13:26:52.315847Z",
+  "test_name": "semantic_difficulty",
+  "results": {
+    "num_docs": 20,
+    "num_tests": 12,
+    "test_names": [
+      "direct match",
+      "synonym - no keyword overlap",
+      "pizza vs pasta",
+      "tomato bridges food and garden",
+      "abstract: memory management without GC",
+      "python data science vs deep learning",
+      "image classification with CNNs",
+      "async JS vs Go concurrency",
+      "JS promises and callbacks",
+      "perennials vs vegetables",
+      "planets outside solar system",
+      "unrelated: query far from all docs"
+    ]
+  }
+}

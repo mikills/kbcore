@@ -1,0 +1,915 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>KBCore</title>
+        <style>
+            * {
+                box-sizing: border-box;
+            }
+
+            body {
+                margin: 0;
+                font-family:
+                    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                    sans-serif;
+                background: #f5f5f5;
+                color: #111827;
+            }
+
+            .container {
+                max-width: 900px;
+                margin: 32px auto;
+                padding: 0 16px;
+            }
+
+            h1 {
+                margin: 0 0 8px;
+                font-size: 28px;
+                font-weight: 700;
+            }
+
+            .kb-bar {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+                margin-bottom: 20px;
+                flex-wrap: wrap;
+            }
+
+            .kb-bar label {
+                font-size: 14px;
+                font-weight: 600;
+                color: #374151;
+                margin: 0;
+            }
+
+            .kb-bar select {
+                padding: 6px 10px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                font: inherit;
+                font-size: 14px;
+                background: #fff;
+                min-width: 180px;
+            }
+
+            .kb-bar button {
+                padding: 6px 12px;
+                border: 0;
+                border-radius: 4px;
+                background: #6b7280;
+                color: #fff;
+                font-size: 13px;
+                font-weight: 600;
+                cursor: pointer;
+                margin: 0;
+            }
+
+            .kb-bar button:hover {
+                background: #4b5563;
+            }
+
+            .grid {
+                display: flex;
+                gap: 16px;
+                align-items: flex-start;
+            }
+
+            .section {
+                flex: 1;
+                background: #fff;
+                border: 1px solid #e5e5e5;
+                border-radius: 8px;
+                padding: 16px;
+            }
+
+            h2 {
+                margin: 0 0 12px;
+                font-size: 18px;
+                font-weight: 600;
+            }
+
+            label {
+                display: block;
+                margin: 10px 0 6px;
+                font-size: 13px;
+                color: #4b5563;
+            }
+
+            .checkbox-row {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-top: 10px;
+            }
+
+            .checkbox-row label {
+                margin: 0;
+                font-size: 13px;
+                color: #4b5563;
+            }
+
+            .checkbox-row input[type="checkbox"] {
+                width: auto;
+                margin: 0;
+            }
+
+            input,
+            select,
+            textarea {
+                width: 100%;
+                padding: 8px 12px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                font: inherit;
+                background: #fff;
+            }
+
+            textarea {
+                resize: vertical;
+                min-height: 120px;
+            }
+
+            .action-btn {
+                margin-top: 12px;
+                padding: 8px 14px;
+                border: 0;
+                border-radius: 4px;
+                background: #2563eb;
+                color: #fff;
+                font-weight: 600;
+                cursor: pointer;
+            }
+
+            .action-btn:hover:not(:disabled) {
+                background: #1d4ed8;
+            }
+            .action-btn:disabled {
+                opacity: 0.7;
+                cursor: wait;
+            }
+
+            .status-msg {
+                min-height: 20px;
+                margin-top: 10px;
+                font-size: 14px;
+            }
+
+            .status-msg.success {
+                color: #16a34a;
+            }
+            .status-msg.error {
+                color: #dc2626;
+            }
+
+            #results {
+                margin-top: 12px;
+            }
+
+            .result-card {
+                background: #fff;
+                border: 1px solid #e5e5e5;
+                padding: 8px;
+                border-radius: 4px;
+                margin-bottom: 8px;
+            }
+
+            .result-id {
+                margin: 0 0 6px;
+                font-size: 12px;
+                color: #6b7280;
+            }
+
+            .result-content {
+                margin: 0 0 8px;
+                font-size: 14px;
+                white-space: pre-wrap;
+            }
+
+            .distance-badge {
+                display: inline-block;
+                background: #f0f9ff;
+                color: #1e40af;
+                border-radius: 999px;
+                padding: 2px 8px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+
+            .metrics-section {
+                margin-top: 16px;
+                background: #fff;
+                border: 1px solid #e5e5e5;
+                border-radius: 8px;
+                padding: 16px;
+            }
+
+            .metrics-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                flex-wrap: wrap;
+                margin-bottom: 12px;
+            }
+
+            .metrics-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                gap: 10px;
+            }
+
+            .metric-panel {
+                border: 1px solid #e5e5e5;
+                border-radius: 6px;
+                padding: 10px;
+                background: #fafafa;
+                min-width: 0;
+            }
+
+            .metric-panel h3 {
+                margin: 0 0 8px;
+                font-size: 14px;
+            }
+
+            .metric-lines {
+                margin: 0;
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: 12px;
+                line-height: 1.45;
+                white-space: pre-wrap;
+                overflow-wrap: anywhere;
+            }
+
+            .metric-unavailable {
+                color: #6b7280;
+                font-style: italic;
+            }
+
+            @media (max-width: 600px) {
+                .grid {
+                    flex-direction: column;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <main class="container">
+            <h1>KBCore</h1>
+
+            <div class="kb-bar">
+                <label for="kb-select">Knowledge Base:</label>
+                <select id="kb-select"></select>
+                <button id="kb-new-btn" type="button">+ New KB</button>
+            </div>
+
+            <div class="grid">
+                <section class="section">
+                    <h2>Ingest Documents</h2>
+
+                    <label for="ingest-text">Document Text</label>
+                    <textarea
+                        id="ingest-text"
+                        rows="8"
+                        placeholder="paste document text here..."
+                    ></textarea>
+                    <div class="checkbox-row">
+                        <input id="ingest-graph-enabled" type="checkbox" />
+                        <label for="ingest-graph-enabled"
+                            >Enable graph extraction (Ollama)</label
+                        >
+                    </div>
+
+                    <button id="ingest-btn" class="action-btn" type="button">
+                        Ingest
+                    </button>
+                    <div id="ingest-status" class="status-msg"></div>
+                </section>
+
+                <section class="section">
+                    <h2>Ask a Question</h2>
+
+                    <label for="query-input">Query</label>
+                    <input
+                        id="query-input"
+                        type="text"
+                        placeholder="ask a question..."
+                    />
+
+                    <label for="query-k">Number of results</label>
+                    <input id="query-k" type="number" placeholder="default 5" />
+
+                    <label for="query-mode">Search Mode</label>
+                    <select id="query-mode">
+                        <option value="vector" selected>Vector</option>
+                        <option value="graph">Graph</option>
+                        <option value="adaptive">Adaptive</option>
+                    </select>
+
+                    <button id="query-btn" class="action-btn" type="button">
+                        Search
+                    </button>
+                    <div id="query-status" class="status-msg"></div>
+
+                    <div id="results"></div>
+                </section>
+            </div>
+
+            <section class="metrics-section">
+                <div class="metrics-header">
+                    <h2>Metrics</h2>
+                    <span
+                        id="metrics-poll-status"
+                        style="font-size: 12px; color: #9ca3af"
+                    ></span>
+                </div>
+                <div class="metrics-grid">
+                    <div class="metric-panel">
+                        <h3>Requests</h3>
+                        <pre id="metrics-requests" class="metric-lines"></pre>
+                    </div>
+                    <div class="metric-panel">
+                        <h3>Embedding</h3>
+                        <pre id="metrics-embed" class="metric-lines"></pre>
+                    </div>
+                    <div class="metric-panel">
+                        <h3>Queries</h3>
+                        <pre id="metrics-query" class="metric-lines"></pre>
+                    </div>
+                    <div class="metric-panel">
+                        <h3>Ingestion</h3>
+                        <pre id="metrics-ingest" class="metric-lines"></pre>
+                    </div>
+                    <div class="metric-panel">
+                        <h3>Cache Eviction</h3>
+                        <pre id="metrics-cache" class="metric-lines"></pre>
+                    </div>
+                    <div class="metric-panel">
+                        <h3>Runtime</h3>
+                        <pre id="metrics-runtime" class="metric-lines"></pre>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <script>
+            // -- state --
+            var knownKBs = ["default"];
+
+            // -- dom refs --
+            var kbSelect = document.getElementById("kb-select");
+            var kbNewBtn = document.getElementById("kb-new-btn");
+            var ingestText = document.getElementById("ingest-text");
+            var ingestGraphEnabled = document.getElementById(
+                "ingest-graph-enabled",
+            );
+            var ingestBtn = document.getElementById("ingest-btn");
+            var ingestStatus = document.getElementById("ingest-status");
+            var queryInput = document.getElementById("query-input");
+            var queryK = document.getElementById("query-k");
+            var queryMode = document.getElementById("query-mode");
+            var queryBtn = document.getElementById("query-btn");
+            var queryStatus = document.getElementById("query-status");
+            var resultsEl = document.getElementById("results");
+            var metricsPollStatus = document.getElementById(
+                "metrics-poll-status",
+            );
+            var metricsRequests = document.getElementById("metrics-requests");
+            var metricsEmbed = document.getElementById("metrics-embed");
+            var metricsQuery = document.getElementById("metrics-query");
+            var metricsIngest = document.getElementById("metrics-ingest");
+            var metricsCache = document.getElementById("metrics-cache");
+            var metricsRuntime = document.getElementById("metrics-runtime");
+
+            // -- kb management --
+            function refreshKBSelect() {
+                var prev = kbSelect.value;
+                kbSelect.innerHTML = "";
+                for (var i = 0; i < knownKBs.length; i++) {
+                    var opt = document.createElement("option");
+                    opt.value = knownKBs[i];
+                    opt.textContent = knownKBs[i];
+                    kbSelect.appendChild(opt);
+                }
+                if (knownKBs.indexOf(prev) !== -1) {
+                    kbSelect.value = prev;
+                }
+            }
+
+            function generateKBName() {
+                var ts = Date.now();
+                var hex = Math.floor(Math.random() * 0xffffff).toString(16);
+                while (hex.length < 6) hex = "0" + hex;
+                return "kb-" + ts + "-" + hex;
+            }
+
+            function selectedKB() {
+                return kbSelect.value || "default";
+            }
+
+            kbNewBtn.addEventListener("click", function () {
+                var name = generateKBName();
+                knownKBs.push(name);
+                refreshKBSelect();
+                kbSelect.value = name;
+            });
+
+            // -- helpers --
+            function setStatus(el, kind, message) {
+                el.textContent = message || "";
+                el.classList.remove("success", "error");
+                if (kind) el.classList.add(kind);
+            }
+
+            function jsonFetch(url, body) {
+                return fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                }).then(function (resp) {
+                    return resp
+                        .json()
+                        .catch(function () {
+                            return {};
+                        })
+                        .then(function (data) {
+                            if (!resp.ok) {
+                                throw new Error(
+                                    data && data.error
+                                        ? data.error
+                                        : "request failed (" +
+                                          resp.status +
+                                          ")",
+                                );
+                            }
+                            return data;
+                        });
+                });
+            }
+
+            function parseOpenMetrics(text) {
+                var out = {};
+                var lines = String(text || "").split(/\r?\n/);
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i].trim();
+                    if (!line || line[0] === "#") {
+                        continue;
+                    }
+                    var parts = line.split(/\s+/);
+                    if (parts.length < 2) {
+                        continue;
+                    }
+                    var name = parts[0];
+                    var value = Number(parts[parts.length - 1]);
+                    out[name] = Number.isFinite(value)
+                        ? value
+                        : parts[parts.length - 1];
+                }
+                return out;
+            }
+
+            function renderLines(el, lines, unavailable) {
+                if (unavailable) {
+                    el.textContent = "unavailable";
+                    el.classList.add("metric-unavailable");
+                    return;
+                }
+                el.classList.remove("metric-unavailable");
+                el.textContent = lines.length ? lines.join("\n") : "no data";
+            }
+
+            function avg(sum, count) {
+                if (!count) {
+                    return 0;
+                }
+                return sum / count;
+            }
+
+            function renderRequests(data) {
+                var stats = (data && data.route_stats) || {};
+                var keys = Object.keys(stats).sort();
+                var lines = [];
+                for (var i = 0; i < keys.length; i++) {
+                    var s = stats[keys[i]];
+                    lines.push(
+                        keys[i] +
+                            ": count=" +
+                            (s.count || 0) +
+                            " errors=" +
+                            (s.error_count || 0) +
+                            " avg_ms=" +
+                            avg(s.latency_sum_ms || 0, s.count || 0).toFixed(
+                                1,
+                            ) +
+                            " max_ms=" +
+                            (s.latency_max_ms || 0),
+                    );
+                }
+                renderLines(metricsRequests, lines, false);
+            }
+
+            function renderEmbed(data) {
+                var stats = (data && data.embed_stats) || {};
+                var keys = Object.keys(stats).sort();
+                var lines = [];
+                for (var i = 0; i < keys.length; i++) {
+                    var s = stats[keys[i]];
+                    lines.push(
+                        keys[i] +
+                            ": count=" +
+                            (s.count || 0) +
+                            " errors=" +
+                            (s.error_count || 0) +
+                            " avg_ms=" +
+                            avg(s.latency_sum_ms || 0, s.count || 0).toFixed(
+                                1,
+                            ) +
+                            " max_ms=" +
+                            (s.latency_max_ms || 0),
+                    );
+                }
+                renderLines(metricsEmbed, lines, false);
+            }
+
+            function renderQuery(data) {
+                var stats = (data && data.query_stats) || {};
+                var keys = Object.keys(stats).sort();
+                var lines = [];
+                for (var i = 0; i < keys.length; i++) {
+                    var s = stats[keys[i]];
+                    lines.push(
+                        keys[i] +
+                            ": count=" +
+                            (s.count || 0) +
+                            " errors=" +
+                            (s.error_count || 0) +
+                            " avg_ms=" +
+                            avg(s.latency_sum_ms || 0, s.count || 0).toFixed(
+                                1,
+                            ) +
+                            " max_ms=" +
+                            (s.latency_max_ms || 0) +
+                            " avg_top1=" +
+                            avg(s.top_distance_sum || 0, s.count || 0).toFixed(
+                                4,
+                            ),
+                    );
+                }
+                renderLines(metricsQuery, lines, false);
+            }
+
+            function renderIngest(data) {
+                var stats = (data && data.ingest_stats) || {};
+                var keys = Object.keys(stats).sort();
+                var lines = [];
+                for (var i = 0; i < keys.length; i++) {
+                    var s = stats[keys[i]];
+                    lines.push(
+                        keys[i] +
+                            ": count=" +
+                            (s.count || 0) +
+                            " docs=" +
+                            (s.total_docs || 0) +
+                            " chunks=" +
+                            (s.total_chunks || 0) +
+                            " avg_ms=" +
+                            avg(s.latency_sum_ms || 0, s.count || 0).toFixed(
+                                1,
+                            ) +
+                            " max_ms=" +
+                            (s.latency_max_ms || 0),
+                    );
+                }
+                renderLines(metricsIngest, lines, false);
+            }
+
+            function renderRuntime(data) {
+                var r = (data && data.runtime) || {};
+                var lines = [
+                    "heap_alloc_bytes=" + (r.heap_alloc_bytes || 0),
+                    "goroutines=" + (r.goroutines || 0),
+                    "num_gc=" + (r.num_gc || 0),
+                    "gc_pause_ns=" + (r.gc_pause_ns || 0),
+                    "uptime_seconds=" + ((data && data.uptime_seconds) || 0),
+                ];
+                renderLines(metricsRuntime, lines, false);
+            }
+
+            function formatMetricNumber(value) {
+                if (!Number.isFinite(value)) {
+                    return String(value);
+                }
+                if (Math.floor(value) === value) {
+                    return value.toLocaleString("en-US");
+                }
+                if (Math.abs(value) < 1) {
+                    return value
+                        .toFixed(4)
+                        .replace(/0+$/, "")
+                        .replace(/\.$/, "");
+                }
+                return value.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+            }
+
+            function formatOpenMetricKey(rawKey, stripPrefixes) {
+                var m = String(rawKey || "").match(
+                    /^([^\{]+)(?:\{([^\}]*)\})?$/,
+                );
+                if (!m) {
+                    return String(rawKey || "");
+                }
+
+                var base = m[1] || "";
+                for (var i = 0; i < stripPrefixes.length; i++) {
+                    if (base.indexOf(stripPrefixes[i]) === 0) {
+                        base = base.slice(stripPrefixes[i].length);
+                        break;
+                    }
+                }
+                base = base.replace(/_/g, " ");
+
+                var labelText = "";
+                if (m[2]) {
+                    var parts = m[2].split(",");
+                    var labelParts = [];
+                    for (var j = 0; j < parts.length; j++) {
+                        var p = parts[j].trim();
+                        if (!p) {
+                            continue;
+                        }
+                        labelParts.push(p.replace(/\"/g, ""));
+                    }
+                    if (labelParts.length) {
+                        labelText = " [" + labelParts.join(", ") + "]";
+                    }
+                }
+
+                return base + labelText;
+            }
+
+            function metricPriority(key, priorityTerms) {
+                if (!priorityTerms || !priorityTerms.length) {
+                    return priorityTerms ? priorityTerms.length : 0;
+                }
+                var lower = String(key || "").toLowerCase();
+                for (var i = 0; i < priorityTerms.length; i++) {
+                    if (lower.indexOf(priorityTerms[i]) !== -1) {
+                        return i;
+                    }
+                }
+                return priorityTerms.length;
+            }
+
+            function renderOpenMetricPanel(el, metrics, opts) {
+                opts = opts || {};
+                var stripPrefixes = opts.stripPrefixes || [];
+                var priorityTerms = opts.priorityTerms || [];
+                var keys = Object.keys(metrics || {}).sort();
+                keys.sort(function (a, b) {
+                    var pa = metricPriority(a, priorityTerms);
+                    var pb = metricPriority(b, priorityTerms);
+                    if (pa !== pb) {
+                        return pa - pb;
+                    }
+                    return a.localeCompare(b);
+                });
+
+                var lines = [];
+                for (var i = 0; i < keys.length; i++) {
+                    lines.push(
+                        formatOpenMetricKey(keys[i], stripPrefixes) +
+                            ": " +
+                            formatMetricNumber(metrics[keys[i]]),
+                    );
+                }
+                renderLines(el, lines, false);
+            }
+
+            function fetchText(url) {
+                return fetch(url).then(function (resp) {
+                    if (!resp.ok) {
+                        throw new Error("status " + resp.status);
+                    }
+                    return resp.text();
+                });
+            }
+
+            var metricsPollInterval = 5000;
+            var metricsPollTimer = null;
+
+            function refreshMetrics() {
+                metricsPollStatus.textContent = "refreshing...";
+
+                Promise.allSettled([
+                    fetch("/metrics/app").then(function (resp) {
+                        if (!resp.ok) {
+                            throw new Error("status " + resp.status);
+                        }
+                        return resp.json();
+                    }),
+                    fetchText("/metrics/cache"),
+                ])
+                    .then(function (results) {
+                        if (results[0].status === "fulfilled") {
+                            var appData = results[0].value;
+                            renderRequests(appData);
+                            renderEmbed(appData);
+                            renderQuery(appData);
+                            renderIngest(appData);
+                            renderRuntime(appData);
+                        } else {
+                            renderLines(metricsRequests, [], true);
+                            renderLines(metricsEmbed, [], true);
+                            renderLines(metricsQuery, [], true);
+                            renderLines(metricsIngest, [], true);
+                            renderLines(metricsRuntime, [], true);
+                        }
+
+                        if (results[1].status === "fulfilled") {
+                            renderOpenMetricPanel(
+                                metricsCache,
+                                parseOpenMetrics(results[1].value),
+                                {
+                                    stripPrefixes: ["kbcore_cache_", "cache_"],
+                                    priorityTerms: [
+                                        "evict",
+                                        "expire",
+                                        "ttl",
+                                        "lru",
+                                        "size",
+                                        "capacity",
+                                        "hit",
+                                        "miss",
+                                    ],
+                                },
+                            );
+                        } else {
+                            renderLines(metricsCache, [], true);
+                        }
+                    })
+                    .finally(function () {
+                        var now = new Date();
+                        var ts =
+                            now.getHours().toString().padStart(2, "0") +
+                            ":" +
+                            now.getMinutes().toString().padStart(2, "0") +
+                            ":" +
+                            now.getSeconds().toString().padStart(2, "0");
+                        metricsPollStatus.textContent =
+                            "updated " +
+                            ts +
+                            " (every " +
+                            metricsPollInterval / 1000 +
+                            "s)";
+                    });
+            }
+
+            // -- ingest --
+            ingestBtn.addEventListener("click", function () {
+                var text = ingestText.value.trim();
+                if (!text) {
+                    setStatus(
+                        ingestStatus,
+                        "error",
+                        "document text is required",
+                    );
+                    return;
+                }
+
+                var kbID = selectedKB();
+                ingestBtn.disabled = true;
+                ingestBtn.textContent = "Ingesting...";
+                setStatus(ingestStatus, "", "");
+
+                jsonFetch("/rag/ingest", {
+                    kb_id: kbID,
+                    graph_enabled: ingestGraphEnabled.checked,
+                    documents: [{ id: "", text: text }],
+                })
+                    .then(function (data) {
+                        var docIDs = Array.isArray(data.doc_ids)
+                            ? data.doc_ids.filter(function (id) {
+                                  return (
+                                      typeof id === "string" && id.trim() !== ""
+                                  );
+                              })
+                            : [];
+                        var idText =
+                            docIDs.length > 0
+                                ? " IDs: " + docIDs.join(", ") + "."
+                                : "";
+                        setStatus(
+                            ingestStatus,
+                            "success",
+                            "Ingested " +
+                                (data.ingested_docs || 0) +
+                                " docs, " +
+                                (data.ingested_chunks || 0) +
+                                ' chunks into "' +
+                                kbID +
+                                '".' +
+                                idText,
+                        );
+                        ingestText.value = "";
+                    })
+                    .catch(function (err) {
+                        setStatus(
+                            ingestStatus,
+                            "error",
+                            err.message || "ingest failed",
+                        );
+                    })
+                    .finally(function () {
+                        ingestBtn.disabled = false;
+                        ingestBtn.textContent = "Ingest";
+                    });
+            });
+
+            // -- query --
+            function runQuery() {
+                var query = queryInput.value.trim();
+                if (!query) {
+                    setStatus(queryStatus, "error", "query is required");
+                    return;
+                }
+
+                var kRaw = queryK.value.trim();
+                var mode = (queryMode.value || "vector").trim();
+                var kbID = selectedKB();
+
+                queryBtn.disabled = true;
+                queryBtn.textContent = "Searching...";
+                setStatus(queryStatus, "", "");
+                resultsEl.innerHTML = "";
+
+                jsonFetch("/rag/query", {
+                    kb_id: kbID,
+                    query: query,
+                    k: kRaw === "" ? 5 : Number(kRaw),
+                    search_mode: mode,
+                })
+                    .then(function (data) {
+                        var results = Array.isArray(data.results)
+                            ? data.results
+                            : [];
+                        if (results.length === 0) {
+                            setStatus(queryStatus, "", "No results found.");
+                            return;
+                        }
+
+                        for (var i = 0; i < results.length; i++) {
+                            var r = results[i];
+                            var card = document.createElement("div");
+                            card.className = "result-card";
+
+                            var id = document.createElement("p");
+                            id.className = "result-id";
+                            id.textContent = r.id || "";
+
+                            var content = document.createElement("p");
+                            content.className = "result-content";
+                            content.textContent = r.content || "";
+
+                            var badge = document.createElement("span");
+                            badge.className = "distance-badge";
+                            var dist = Number(r.distance);
+                            badge.textContent = Number.isFinite(dist)
+                                ? "distance " + dist.toFixed(4)
+                                : "distance n/a";
+
+                            card.appendChild(id);
+                            card.appendChild(content);
+                            card.appendChild(badge);
+                            resultsEl.appendChild(card);
+                        }
+                    })
+                    .catch(function (err) {
+                        setStatus(
+                            queryStatus,
+                            "error",
+                            err.message || "query failed",
+                        );
+                    })
+                    .finally(function () {
+                        queryBtn.disabled = false;
+                        queryBtn.textContent = "Search";
+                    });
+            }
+
+            queryBtn.addEventListener("click", runQuery);
+            queryInput.addEventListener("keydown", function (e) {
+                if (e.key === "Enter") {
+                    e.preventDefault();
+                    runQuery();
+                }
+            });
+
+            // -- init --
+            refreshKBSelect();
+            refreshMetrics();
+            metricsPollTimer = setInterval(refreshMetrics, metricsPollInterval);
+        </script>
+    </body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "generated_at": "2026-02-18T12:02:58.256161Z",
+  "test_name": "ollama_semantic_search",
+  "results": {
+    "num_docs": 5,
+    "num_tests": 2,
+    "test_names": [
+      "go concurrency",
+      "pasta with fresh ingredients"
+    ]
+  }
+}

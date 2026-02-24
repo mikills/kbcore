@@ -1,0 +1,16 @@
+How Text Embeddings Work
+
+Text embedding models convert text into dense vectors in a high-dimensional space. Similar
+texts are mapped to nearby points, enabling semantic search, clustering, and classification.
+Modern embedding models like Sentence-BERT use transformer architectures fine-tuned with
+contrastive learning objectives.
+
+The training process uses pairs of texts labeled as similar or dissimilar. The model learns to
+minimize distance between similar pairs and maximize distance between dissimilar ones. This is
+called metric learning. Common loss functions include contrastive loss and triplet loss.
+
+At inference time, a text is tokenized and fed through the transformer. The output token
+embeddings are pooled (typically mean pooling over non-padding tokens) to produce a single
+fixed-length vector. These vectors are normalized to unit length so cosine similarity equals
+dot product. A 384-dimensional all-MiniLM model can encode a sentence in under a millisecond
+on modern hardware, making it practical for real-time applications.

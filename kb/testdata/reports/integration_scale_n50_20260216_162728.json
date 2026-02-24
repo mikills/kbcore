@@ -1,0 +1,13 @@
+{
+  "generated_at": "2026-02-16T16:27:28.880164Z",
+  "test_name": "scale_n50",
+  "results": {
+    "avg_query_ms": 1,
+    "blob_size_mb": 0.76171875,
+    "build_time_ms": 572,
+    "cold_load_ms": 18,
+    "go_variants_in_top10": 2,
+    "num_docs": 50,
+    "query_time_ms": 24
+  }
+}

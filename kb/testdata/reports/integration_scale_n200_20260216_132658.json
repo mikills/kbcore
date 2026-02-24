@@ -1,0 +1,12 @@
+{
+  "generated_at": "2026-02-16T13:26:58.362717Z",
+  "test_name": "scale_n200",
+  "results": {
+    "avg_query_ms": 1,
+    "build_time_ms": 2158,
+    "cold_load_ms": 22,
+    "go_variants_in_top10": 5,
+    "num_docs": 200,
+    "query_time_ms": 27
+  }
+}

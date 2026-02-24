@@ -1,0 +1,126 @@
+{
+  "generated_at": "2026-02-16T22:55:26.654709Z",
+  "test_name": "duckdb_vs_libsql",
+  "results": {
+    "duckdb": {
+      "avg_query_time_ms": 4,
+      "build_time_ms": 64,
+      "total_query_time_ms": 37
+    },
+    "duckdb_blob_size_mb": 0.76171875,
+    "libsql": {
+      "avg_query_time_ms": 4,
+      "build_time_ms": 380,
+      "total_query_time_ms": 34
+    },
+    "libsql_db_size_mb": 0.22265625,
+    "num_docs": 92,
+    "num_queries": 8,
+    "queries": [
+      {
+        "avg_distance_diff": 1.877952075179934e-7,
+        "duckdb_query_time_ms": 28,
+        "duckdb_top1_dist": 1.0456061,
+        "duckdb_top1_id": "conv-debug-chunk-002",
+        "jaccard_top_k": 1,
+        "libsql_query_time_ms": 4,
+        "libsql_top1_dist": 1.0456064423933953,
+        "libsql_top1_id": "conv-debug-chunk-002",
+        "query_name": "Go concurrency",
+        "shared_results": 10,
+        "top1_mismatch": false
+      },
+      {
+        "avg_distance_diff": 1.5078720593253437e-7,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 0.73445797,
+        "duckdb_top1_id": "conv-recipe-chunk-002",
+        "jaccard_top_k": 1,
+        "libsql_query_time_ms": 3,
+        "libsql_top1_dist": 0.7344579041131466,
+        "libsql_top1_id": "conv-recipe-chunk-002",
+        "query_name": "Italian cooking",
+        "shared_results": 10,
+        "top1_mismatch": false
+      },
+      {
+        "avg_distance_diff": 1.906789931283015e-7,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 1.2412218,
+        "duckdb_top1_id": "finance-aapl-10k-chunk-072",
+        "jaccard_top_k": 1,
+        "libsql_query_time_ms": 4,
+        "libsql_top1_dist": 1.241221598197481,
+        "libsql_top1_id": "finance-aapl-10k-chunk-072",
+        "query_name": "Raft consensus",
+        "shared_results": 10,
+        "top1_mismatch": false
+      },
+      {
+        "avg_distance_diff": 1.763034598534219e-7,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 1.3351629,
+        "duckdb_top1_id": "finance-aapl-10k-chunk-045",
+        "jaccard_top_k": 1,
+        "libsql_query_time_ms": 3,
+        "libsql_top1_dist": 1.3351626909970031,
+        "libsql_top1_id": "finance-aapl-10k-chunk-045",
+        "query_name": "Mars exploration",
+        "shared_results": 10,
+        "top1_mismatch": false
+      },
+      {
+        "avg_distance_diff": 1.5584443107119484e-7,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 1.1008488,
+        "duckdb_top1_id": "prose-embeddings-chunk-001",
+        "jaccard_top_k": 1,
+        "libsql_query_time_ms": 4,
+        "libsql_top1_dist": 1.100848785126383,
+        "libsql_top1_id": "prose-embeddings-chunk-001",
+        "query_name": "Neural networks",
+        "shared_results": 10,
+        "top1_mismatch": false
+      },
+      {
+        "avg_distance_diff": 1.2785766101419682e-7,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 1.1108549,
+        "duckdb_top1_id": "conv-deploy-chunk-001",
+        "jaccard_top_k": 1,
+        "libsql_query_time_ms": 4,
+        "libsql_top1_dist": 1.1108549749999672,
+        "libsql_top1_id": "conv-deploy-chunk-001",
+        "query_name": "Kubernetes",
+        "shared_results": 10,
+        "top1_mismatch": false
+      },
+      {
+        "avg_distance_diff": 9.750531657637395e-8,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 1.3189824,
+        "duckdb_top1_id": "finance-aapl-10k-chunk-013",
+        "jaccard_top_k": 1,
+        "libsql_query_time_ms": 4,
+        "libsql_top1_dist": 1.3189825097081984,
+        "libsql_top1_id": "finance-aapl-10k-chunk-013",
+        "query_name": "Sourdough",
+        "shared_results": 10,
+        "top1_mismatch": false
+      },
+      {
+        "avg_distance_diff": 1.0674498928109344e-7,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 0.78857964,
+        "duckdb_top1_id": "finance-aapl-10k-chunk-010",
+        "jaccard_top_k": 1,
+        "libsql_query_time_ms": 4,
+        "libsql_top1_dist": 0.7885794719131336,
+        "libsql_top1_id": "finance-aapl-10k-chunk-010",
+        "query_name": "Apple revenue",
+        "shared_results": 10,
+        "top1_mismatch": false
+      }
+    ]
+  }
+}

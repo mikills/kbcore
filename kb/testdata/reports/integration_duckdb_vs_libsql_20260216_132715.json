@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-02-16T13:27:15.08368Z",
+  "test_name": "duckdb_vs_libsql",
+  "results": {
+    "duckdb": {
+      "avg_query_time_ms": 5,
+      "build_time_ms": 77,
+      "total_query_time_ms": 41
+    },
+    "libsql": {
+      "avg_query_time_ms": 4,
+      "build_time_ms": 406,
+      "total_query_time_ms": 37
+    },
+    "num_docs": 92,
+    "num_queries": 8
+  }
+}

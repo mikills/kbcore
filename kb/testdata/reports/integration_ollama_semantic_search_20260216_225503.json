@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-02-16T22:55:03.731299Z",
+  "test_name": "ollama_semantic_search",
+  "results": {
+    "num_docs": 5,
+    "query_1": {
+      "query": "golang concurrent programming",
+      "top_1_dist": 0.6366439,
+      "top_1_id": "go"
+    },
+    "query_2": {
+      "garden_in_top_3": true,
+      "query": "making spaghetti with fresh ingredients",
+      "top_1_dist": 0.871673,
+      "top_1_id": "cooking"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "generated_at": "2026-02-16T13:26:55.435938Z",
+  "test_name": "real_documents",
+  "results": {
+    "cache_hits": 0,
+    "cache_misses": 92,
+    "num_chunks": 92,
+    "num_tests": 13
+  }
+}

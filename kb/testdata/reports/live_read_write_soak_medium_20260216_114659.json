@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-02-16T11:46:59.93348Z",
+  "test_name": "live_read_write_soak",
+  "config": {
+    "name": "medium",
+    "num_docs": 10000,
+    "embedding_dim": 384,
+    "content_length": 500,
+    "batch_size": 500,
+    "num_clusters": 200,
+    "index_m": 16,
+    "index_ef_construct": 128
+  },
+  "results": {
+    "duration_ms": 8130,
+    "first_reader_error": "",
+    "first_writer_error": "",
+    "generation_delta": 31,
+    "generation_end": 32,
+    "generation_start": 1,
+    "memory_limit": "256MB",
+    "read_ops": 5984,
+    "read_qps": 736.0143249523447,
+    "reader_errors": 0,
+    "reader_latency": {
+      "max_ms": 33.784333,
+      "p50_ms": 7.071375000000001,
+      "p95_ms": 15.061375,
+      "p99_ms": 24.373625
+    },
+    "readers": 6,
+    "write_qps": 3.8129084347464386,
+    "writer_errors": 0,
+    "writer_latency": {
+      "max_ms": 193.577709,
+      "p50_ms": 166.805875,
+      "p95_ms": 184.831833,
+      "p99_ms": 193.577709
+    },
+    "writer_workers": 1,
+    "writes": 31
+  }
+}

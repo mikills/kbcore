@@ -1,0 +1,15 @@
+Carlos: The deploy to staging failed. The pods are in CrashLoopBackOff.
+
+Diana: What do the logs say? Try kubectl logs -p on one of the crashed pods to see the previous run's output.
+
+Carlos: It says "connection refused" trying to reach the database. But the database is definitely up, I checked.
+
+Diana: Is the service name correct in your config? We renamed the postgres service last sprint from "db" to "postgres-primary". Check your DATABASE_URL env var.
+
+Carlos: Found it. Still pointing to "db:5432". Updating the configmap now.
+
+Diana: After you update it, you need to restart the deployment to pick up the configmap change. Pods don't auto-reload configmaps unless you're using a sidecar that watches for changes.
+
+Carlos: Right, doing a rollout restart. Pods are coming up healthy now. Thanks Diana.
+
+Diana: No problem. We should probably add a readiness probe that checks the DB connection so this kind of thing fails fast instead of crash-looping.

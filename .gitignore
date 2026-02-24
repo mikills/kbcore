@@ -1,0 +1,6 @@
+testdata/fixtures/*.duckdb
+testdata/fixtures/*.json
+testdata/fixtures/*.duckdb
+testdata/reports/
+.temp/
+*.DS_Store

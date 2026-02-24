@@ -1,0 +1,59 @@
+{
+  "generated_at": "2026-02-16T13:25:12.474129Z",
+  "test_name": "raw_file_ingestion_rag",
+  "results": {
+    "num_chunks": 132,
+    "num_docs": 3,
+    "per_file": {
+      "conv-debug": {
+        "chunk_count": 4,
+        "hit": true,
+        "top_ids": [
+          "conv-debug-chunk-000",
+          "conv-debug-chunk-001",
+          "conv-debug-chunk-002",
+          "conv-debug-chunk-003",
+          "finance-aapl-10k-chunk-041",
+          "finance-aapl-10k-chunk-056",
+          "finance-aapl-10k-chunk-033",
+          "finance-aapl-10k-chunk-039",
+          "finance-aapl-10k-chunk-034",
+          "finance-aapl-10k-chunk-097"
+        ]
+      },
+      "conv-recipe": {
+        "chunk_count": 6,
+        "hit": true,
+        "top_ids": [
+          "conv-recipe-chunk-000",
+          "conv-recipe-chunk-003",
+          "conv-recipe-chunk-004",
+          "conv-recipe-chunk-001",
+          "conv-recipe-chunk-005",
+          "conv-recipe-chunk-002",
+          "finance-aapl-10k-chunk-028",
+          "finance-aapl-10k-chunk-010",
+          "finance-aapl-10k-chunk-050",
+          "finance-aapl-10k-chunk-000"
+        ]
+      },
+      "finance-aapl-10k": {
+        "chunk_count": 122,
+        "hit": true,
+        "top_ids": [
+          "finance-aapl-10k-chunk-016",
+          "finance-aapl-10k-chunk-019",
+          "finance-aapl-10k-chunk-014",
+          "finance-aapl-10k-chunk-010",
+          "finance-aapl-10k-chunk-079",
+          "finance-aapl-10k-chunk-015",
+          "finance-aapl-10k-chunk-009",
+          "finance-aapl-10k-chunk-026",
+          "finance-aapl-10k-chunk-017",
+          "finance-aapl-10k-chunk-025"
+        ]
+      }
+    },
+    "top_k_hit_rate": 1
+  }
+}

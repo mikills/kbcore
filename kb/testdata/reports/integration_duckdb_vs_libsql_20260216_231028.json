@@ -1,0 +1,113 @@
+{
+  "generated_at": "2026-02-16T23:10:28.074082Z",
+  "test_name": "duckdb_vs_libsql",
+  "results": {
+    "duckdb": {
+      "avg_query_time_ms": 4,
+      "build_time_ms": 72,
+      "total_query_time_ms": 33
+    },
+    "duckdb_blob_size_mb": 0.76171875,
+    "libsql": {
+      "avg_query_time_ms": 4,
+      "build_time_ms": 379,
+      "total_query_time_ms": 30
+    },
+    "libsql_db_size_mb": 0.22265625,
+    "num_docs": 92,
+    "num_queries": 7,
+    "queries": [
+      {
+        "duckdb_contains_expected": true,
+        "duckdb_query_time_ms": 25,
+        "duckdb_top1_dist": 0.7496979,
+        "duckdb_top1_id": "conv-debug-chunk-000",
+        "expected_base_id": "conv-debug",
+        "jaccard_top_k": 1,
+        "libsql_contains_expected": true,
+        "libsql_query_time_ms": 3,
+        "libsql_top1_dist": 0.7496978628023542,
+        "libsql_top1_id": "conv-debug-chunk-000",
+        "query_name": "Go HTTP memory leak"
+      },
+      {
+        "duckdb_contains_expected": true,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 0.77399135,
+        "duckdb_top1_id": "conv-deploy-chunk-000",
+        "expected_base_id": "conv-deploy",
+        "jaccard_top_k": 1,
+        "libsql_contains_expected": true,
+        "libsql_query_time_ms": 4,
+        "libsql_top1_dist": 0.7739913575702737,
+        "libsql_top1_id": "conv-deploy-chunk-000",
+        "query_name": "Kubernetes deploy"
+      },
+      {
+        "duckdb_contains_expected": true,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 0.74360174,
+        "duckdb_top1_id": "conv-recipe-chunk-002",
+        "expected_base_id": "conv-recipe",
+        "jaccard_top_k": 1,
+        "libsql_contains_expected": true,
+        "libsql_query_time_ms": 4,
+        "libsql_top1_dist": 0.7436018467650892,
+        "libsql_top1_id": "conv-recipe-chunk-002",
+        "query_name": "Carbonara recipe"
+      },
+      {
+        "duckdb_contains_expected": true,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 0.85046136,
+        "duckdb_top1_id": "prose-embeddings-chunk-002",
+        "expected_base_id": "prose-embeddings",
+        "jaccard_top_k": 1,
+        "libsql_contains_expected": true,
+        "libsql_query_time_ms": 4,
+        "libsql_top1_dist": 0.8504612652829305,
+        "libsql_top1_id": "prose-embeddings-chunk-002",
+        "query_name": "Text embeddings"
+      },
+      {
+        "duckdb_contains_expected": true,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 0.78857964,
+        "duckdb_top1_id": "finance-aapl-10k-chunk-010",
+        "expected_base_id": "finance-aapl-10k",
+        "jaccard_top_k": 1,
+        "libsql_contains_expected": true,
+        "libsql_query_time_ms": 3,
+        "libsql_top1_dist": 0.7885794719131336,
+        "libsql_top1_id": "finance-aapl-10k-chunk-010",
+        "query_name": "Apple revenue"
+      },
+      {
+        "duckdb_contains_expected": true,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 0.7295368,
+        "duckdb_top1_id": "conv-ml-chunk-000",
+        "expected_base_id": "conv-ml",
+        "jaccard_top_k": 1,
+        "libsql_contains_expected": true,
+        "libsql_query_time_ms": 4,
+        "libsql_top1_dist": 0.7295366347737794,
+        "libsql_top1_id": "conv-ml-chunk-000",
+        "query_name": "Recommendation model"
+      },
+      {
+        "duckdb_contains_expected": true,
+        "duckdb_query_time_ms": 1,
+        "duckdb_top1_dist": 0.8138262,
+        "duckdb_top1_id": "conv-review-chunk-000",
+        "expected_base_id": "conv-review",
+        "jaccard_top_k": 1,
+        "libsql_contains_expected": true,
+        "libsql_query_time_ms": 4,
+        "libsql_top1_dist": 0.8138262122073989,
+        "libsql_top1_id": "conv-review-chunk-000",
+        "query_name": "Vector search PR"
+      }
+    ]
+  }
+}
