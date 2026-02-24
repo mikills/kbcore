@@ -56,6 +56,7 @@ func setupAppTestWithOptions(t *testing.T, embedder kb.Embedder, kbID string, op
 		kb.WithEmbedder(embedder),
 		kb.WithWriteLeaseManager(leaseMgr),
 		kb.WithWriteLeaseTTL(3 * time.Second),
+		kb.WithDuckDBExtensionDir(kb.TestExtensionDir()),
 	}
 	kbOpts = append(kbOpts, opts...)
 

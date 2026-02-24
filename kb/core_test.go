@@ -55,15 +55,8 @@ func buildDemoKB(kbID, blobRoot string, embedder Embedder) error {
 	}
 	defer db.Close()
 
-	// Install and load VSS extension
-	_, err = db.Exec(`INSTALL vss`)
-	if err != nil {
-		return fmt.Errorf("failed to install vss: %w", err)
-	}
-
-	_, err = db.Exec(`LOAD vss`)
-	if err != nil {
-		return fmt.Errorf("failed to load vss: %w", err)
+	if err := testLoadVSS(db); err != nil {
+		return err
 	}
 
 	// Enable HNSW experimental persistence
@@ -127,6 +120,7 @@ func buildDemoKB(kbID, blobRoot string, embedder Embedder) error {
 		filepath.Join(buildDir, "publisher-cache"),
 		WithMemoryLimit("128MB"),
 		WithEmbedder(embedder),
+		WithDuckDBExtensionDir(TestExtensionDir()),
 	)
 	if _, err := publisher.UploadSnapshotShardedIfMatch(context.Background(), kbID, dbPath, "", defaultSnapshotShardSize); err != nil {
 		return fmt.Errorf("publish sharded snapshot: %w", err)
@@ -234,12 +228,9 @@ func (e simpleTokenEmbedder) Embed(_ context.Context, input string) ([]float32, 
 
 // TestOfflineExtensionLoad verifies openConfiguredDB behavior with offline
 // extension loading. This catches regressions where DuckDB's autoinstall
-// silently downloads extensions
+// silently downloads extensions.
 func TestOfflineExtensionLoad(t *testing.T) {
-	// Resolve the repo-root .duckdb/extensions directory.
-	// The test binary's working directory is the package directory (kb/),
-	// so the repo-level extensions are one level up.
-	localExtDir := filepath.Join("..", ".duckdb", "extensions")
+	localExtDir := TestExtensionDir()
 
 	tests := []struct {
 		name         string
@@ -274,10 +265,8 @@ func TestOfflineExtensionLoad(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.skipIfNoExts {
-				if _, err := os.Stat(filepath.Join(localExtDir, "v1.1.3")); err != nil {
-					t.Skipf("pre-downloaded extensions not found at %s: %v", localExtDir, err)
-				}
+			if tt.skipIfNoExts && localExtDir == "" {
+				t.Skip("pre-downloaded extensions not found")
 			}
 
 			tmpDir := t.TempDir()

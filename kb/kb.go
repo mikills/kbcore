@@ -93,6 +93,10 @@ func WithEmbedder(embedder Embedder) KBOption {
 	}
 }
 
+// DefaultExtensionDir is the default path for pre-downloaded DuckDB extensions
+// relative to the working directory.
+const DefaultExtensionDir = ".duckdb/extensions"
+
 // WithDuckDBExtensionDir sets the root directory for pre-downloaded DuckDB extensions.
 func WithDuckDBExtensionDir(dir string) KBOption {
 	return func(kb *KB) {
@@ -164,6 +168,7 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 		BlobStore:         bs,
 		CacheDir:          cacheDir,
 		MemoryLimit:       "128MB",
+		OfflineExt:        true,
 		WriteLeaseManager: NewInMemoryWriteLeaseManager(),
 		WriteLeaseTTL:     defaultWriteLeaseTTL,
 		ShardingPolicy:    normalizeShardingPolicy(ShardingPolicy{}),

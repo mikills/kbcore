@@ -124,11 +124,8 @@ func buildGraphKB(kbID, blobRoot string, embedder Embedder, edges []graphEdge) e
 	}
 	defer db.Close()
 
-	if _, err := db.Exec(`INSTALL vss`); err != nil {
-		return fmt.Errorf("failed to install vss: %w", err)
-	}
-	if _, err := db.Exec(`LOAD vss`); err != nil {
-		return fmt.Errorf("failed to load vss: %w", err)
+	if err := testLoadVSS(db); err != nil {
+		return err
 	}
 	if _, err := db.Exec(`SET hnsw_enable_experimental_persistence = true`); err != nil {
 		return fmt.Errorf("failed to enable hnsw persistence: %w", err)
@@ -259,6 +256,7 @@ func buildGraphKB(kbID, blobRoot string, embedder Embedder, edges []graphEdge) e
 		filepath.Join(buildDir, "publisher-cache"),
 		WithMemoryLimit("128MB"),
 		WithEmbedder(embedder),
+		WithDuckDBExtensionDir(TestExtensionDir()),
 	)
 	if _, err := publisher.UploadSnapshotShardedIfMatch(context.Background(), kbID, dbPath, "", defaultSnapshotShardSize); err != nil {
 		return fmt.Errorf("publish sharded graph snapshot: %w", err)

@@ -28,7 +28,7 @@ func main() {
 	graphURL := getenvDefault("KBCORE_GRAPH_URL", "http://localhost:11434")
 	graphModel := getenvDefault("KBCORE_GRAPH_MODEL", "gemma3:4b")
 	graphParallelism := getenvIntDefault(logger, "KBCORE_GRAPH_PARALLELISM", 4)
-	extDir := getenvDefault("KBCORE_DUCKDB_EXTENSION_DIR", "./.duckdb/extensions")
+	extDir := getenvDefault("KBCORE_DUCKDB_EXTENSION_DIR", kb.DefaultExtensionDir)
 	extOffline := getenvBoolDefault(logger, "KBCORE_DUCKDB_EXTENSION_OFFLINE", true)
 	shardingPolicy := shardingPolicyFromEnv(logger)
 	addr := getenvDefault("KBCORE_HTTP_ADDR", "127.0.0.1:8080")
