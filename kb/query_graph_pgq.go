@@ -12,7 +12,7 @@ func expandEntityScoresDuckPGQ(ctx context.Context, db *sql.DB, scores map[strin
 	if err := ensureEntitiesTable(ctx, db); err != nil {
 		return nil, err
 	}
-	if err := ensureDuckPGQLoaded(ctx, db); err != nil {
+	if err := ensureDuckPGQLoaded(ctx, db, options.OfflineExt); err != nil {
 		return nil, err
 	}
 
@@ -33,9 +33,12 @@ func expandEntityScoresDuckPGQ(ctx context.Context, db *sql.DB, scores map[strin
 	return scores, nil
 }
 
-func ensureDuckPGQLoaded(ctx context.Context, db *sql.DB) error {
+func ensureDuckPGQLoaded(ctx context.Context, db *sql.DB, offline bool) error {
 	if _, err := db.ExecContext(ctx, `LOAD duckpgq`); err == nil {
 		return nil
+	}
+	if offline {
+		return fmt.Errorf("failed to load duckpgq extension (offline mode)")
 	}
 	if _, err := db.ExecContext(ctx, `INSTALL duckpgq FROM community`); err != nil {
 		return fmt.Errorf("failed to install duckpgq: %w", err)

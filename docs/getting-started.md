@@ -4,7 +4,7 @@
 
 - Go toolchain matching module requirements (`go.mod`)
 - CGO-capable environment for DuckDB driver
-- Network access on first run (DuckDB `vss` extension install)
+- Pre-downloaded DuckDB extensions in `.duckdb/extensions/` (shipped with the repo; no network access needed by default)
 
 ## Run Locally
 
@@ -35,6 +35,11 @@ Expected:
 - `KBCORE_CACHE_DIR` (default `./.temp/cache`)
 - `KBCORE_MEMORY_LIMIT` (default `128MB`)
 - `KBCORE_HTTP_ADDR` (default `127.0.0.1:8080`)
+
+## DuckDB Extension Env
+
+- `KBCORE_DUCKDB_EXTENSION_DIR` (default `./.duckdb/extensions`) — root directory for pre-downloaded DuckDB extensions
+- `KBCORE_DUCKDB_EXTENSION_OFFLINE` (default `true`) — when `true`, extensions are only `LOAD`ed from the local directory (no runtime `INSTALL`); set to `false` to allow downloading extensions on first use
 
 ## Sharding and Query Planner Env
 

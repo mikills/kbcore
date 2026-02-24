@@ -28,6 +28,8 @@ func main() {
 	graphURL := getenvDefault("KBCORE_GRAPH_URL", "http://localhost:11434")
 	graphModel := getenvDefault("KBCORE_GRAPH_MODEL", "gemma3:4b")
 	graphParallelism := getenvIntDefault(logger, "KBCORE_GRAPH_PARALLELISM", 4)
+	extDir := getenvDefault("KBCORE_DUCKDB_EXTENSION_DIR", "./.duckdb/extensions")
+	extOffline := getenvBoolDefault(logger, "KBCORE_DUCKDB_EXTENSION_OFFLINE", true)
 	shardingPolicy := shardingPolicyFromEnv(logger)
 	addr := getenvDefault("KBCORE_HTTP_ADDR", "127.0.0.1:8080")
 	cacheEvictInterval := getenvDurationDefault(logger, "KBCORE_CACHE_EVICT_INTERVAL", 30*time.Second)
@@ -38,6 +40,8 @@ func main() {
 		kb.WithMemoryLimit(memLimit),
 		kb.WithEmbedder(embedder),
 		kb.WithShardingPolicy(shardingPolicy),
+		kb.WithDuckDBExtensionDir(extDir),
+		kb.WithDuckDBOfflineExtensions(extOffline),
 	}
 	if graphEnabled {
 		grapher := kb.NewOllamaGrapher(graphURL, graphModel)
