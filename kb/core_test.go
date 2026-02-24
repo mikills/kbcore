@@ -120,7 +120,6 @@ func buildDemoKB(kbID, blobRoot string, embedder Embedder) error {
 		filepath.Join(buildDir, "publisher-cache"),
 		WithMemoryLimit("128MB"),
 		WithEmbedder(embedder),
-		WithDuckDBExtensionDir(TestExtensionDir()),
 	)
 	if _, err := publisher.UploadSnapshotShardedIfMatch(context.Background(), kbID, dbPath, "", defaultSnapshotShardSize); err != nil {
 		return fmt.Errorf("publish sharded snapshot: %w", err)
@@ -230,7 +229,7 @@ func (e simpleTokenEmbedder) Embed(_ context.Context, input string) ([]float32, 
 // extension loading. This catches regressions where DuckDB's autoinstall
 // silently downloads extensions.
 func TestOfflineExtensionLoad(t *testing.T) {
-	localExtDir := TestExtensionDir()
+	localExtDir := resolveExtensionDir()
 
 	tests := []struct {
 		name         string

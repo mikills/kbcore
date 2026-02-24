@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -93,9 +94,28 @@ func WithEmbedder(embedder Embedder) KBOption {
 	}
 }
 
-// DefaultExtensionDir is the default path for pre-downloaded DuckDB extensions
-// relative to the working directory.
+// DefaultExtensionDir is the directory name for pre-downloaded DuckDB extensions.
 const DefaultExtensionDir = ".duckdb/extensions"
+
+// resolveExtensionDir walks up from the working directory to find a
+// DefaultExtensionDir directory. Returns the absolute path if found, or "".
+func resolveExtensionDir() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		candidate := filepath.Join(dir, DefaultExtensionDir)
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
 
 // WithDuckDBExtensionDir sets the root directory for pre-downloaded DuckDB extensions.
 func WithDuckDBExtensionDir(dir string) KBOption {
@@ -168,6 +188,7 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 		BlobStore:         bs,
 		CacheDir:          cacheDir,
 		MemoryLimit:       "128MB",
+		ExtensionDir:      resolveExtensionDir(),
 		OfflineExt:        true,
 		WriteLeaseManager: NewInMemoryWriteLeaseManager(),
 		WriteLeaseTTL:     defaultWriteLeaseTTL,

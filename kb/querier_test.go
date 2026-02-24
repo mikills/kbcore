@@ -256,7 +256,6 @@ func buildGraphKB(kbID, blobRoot string, embedder Embedder, edges []graphEdge) e
 		filepath.Join(buildDir, "publisher-cache"),
 		WithMemoryLimit("128MB"),
 		WithEmbedder(embedder),
-		WithDuckDBExtensionDir(TestExtensionDir()),
 	)
 	if _, err := publisher.UploadSnapshotShardedIfMatch(context.Background(), kbID, dbPath, "", defaultSnapshotShardSize); err != nil {
 		return fmt.Errorf("publish sharded graph snapshot: %w", err)

@@ -156,12 +156,8 @@ func (h *TestHarness) Setup() *TestHarness {
 	// Create KB instance
 	blobStore := &LocalBlobStore{Root: h.blobRoot}
 
-	// Build options list — resolve extension dir relative to repo root
-	// so tests find the pre-downloaded extensions regardless of working directory.
+	// Build options list
 	opts := []KBOption{WithMemoryLimit(h.memLimit)}
-	if extDir := TestExtensionDir(); extDir != "" {
-		opts = append(opts, WithDuckDBExtensionDir(extDir))
-	}
 	if h.embedder != nil {
 		opts = append(opts, WithEmbedder(h.embedder))
 	}
@@ -275,7 +271,7 @@ func copyHarnessFixture(src, dst string) error {
 // builders that bypass openConfiguredDB. It uses the local extension directory
 // so no network access is needed.
 func testLoadVSS(db *sql.DB) error {
-	extDir := TestExtensionDir()
+	extDir := resolveExtensionDir()
 	if extDir != "" {
 		if _, err := db.Exec(fmt.Sprintf(`SET extension_directory = '%s'`, extDir)); err != nil {
 			return fmt.Errorf("set extension_directory: %w", err)
@@ -288,25 +284,4 @@ func testLoadVSS(db *sql.DB) error {
 		return fmt.Errorf("load vss: %w", err)
 	}
 	return nil
-}
-
-// TestExtensionDir walks up from the current working directory to find the
-// repo-root .duckdb/extensions directory. Returns "" if not found.
-// Exported so cmd/ tests can also use it.
-func TestExtensionDir() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	for {
-		candidate := filepath.Join(dir, DefaultExtensionDir)
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
-		}
-		dir = parent
-	}
 }
