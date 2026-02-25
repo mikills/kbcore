@@ -78,6 +78,16 @@ KBCORE_QUERY_SHARD_FANOUT=4 \
 go run .
 ```
 
+## Manifest Store
+
+By default, manifests are stored alongside shard data in the blob store. To use MongoDB instead, set:
+
+- `KBCORE_MANIFEST_MONGO_URI` (default empty) — MongoDB connection string (e.g. `mongodb://localhost:27017`). When set, enables the Mongo-backed manifest store.
+- `KBCORE_MANIFEST_MONGO_DB` (default `kbcore`) — database name.
+- `KBCORE_MANIFEST_MONGO_COLLECTION` (default `manifests`) — collection name.
+
+When `KBCORE_MANIFEST_MONGO_URI` is empty, the blob-backed default is used and no MongoDB connection is made.
+
 ## For Multi-Pod Deployments
 
 - Use shared blob storage (for example S3) and keep `KBCORE_CACHE_DIR` pod-local (ephemeral or node-local PVC).

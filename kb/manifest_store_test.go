@@ -8,6 +8,18 @@ import (
 )
 
 func TestBlobManifestStore(t *testing.T) {
+	runManifestStoreTests(t, func(t *testing.T) ManifestStore {
+		blobRoot := t.TempDir()
+		blobStore := &LocalBlobStore{Root: blobRoot}
+		return &BlobManifestStore{Store: blobStore}
+	})
+}
+
+// runManifestStoreTests exercises the full ManifestStore contract.
+// Each subtest receives a fresh, empty store instance via newStore.
+func runManifestStoreTests(t *testing.T, newStore func(t *testing.T) ManifestStore) {
+	t.Helper()
+
 	ctx := context.Background()
 	kbID := "test-manifest-store"
 
@@ -167,9 +179,7 @@ func TestBlobManifestStore(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			blobRoot := t.TempDir()
-			blobStore := &LocalBlobStore{Root: blobRoot}
-			store := &BlobManifestStore{Store: blobStore}
+			store := newStore(t)
 			tc.run(t, store)
 		})
 	}
