@@ -13,6 +13,8 @@ import (
 
 	appcmd "github.com/mikills/kbcore/cmd"
 	kb "github.com/mikills/kbcore/kb"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	mongooptions "go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 func main() {
@@ -39,12 +41,46 @@ func main() {
 	embedProvider := getenvDefault("KBCORE_EMBEDDER_PROVIDER", "local")
 	embedder := getEmbedder(logger, embedProvider, ollamaURL, ollamaModel)
 
+	// Manifest store: MongoDB or blob-backed (default).
+	mongoManifestURI := os.Getenv("KBCORE_MANIFEST_MONGO_URI")
+	var manifestStoreOpt kb.KBOption
+	if mongoManifestURI != "" {
+		mongoManifestDB := getenvDefault("KBCORE_MANIFEST_MONGO_DB", "kbcore")
+		mongoManifestColl := getenvDefault("KBCORE_MANIFEST_MONGO_COLLECTION", "manifests")
+
+		mongoClient, err := mongo.Connect(mongooptions.Client().ApplyURI(mongoManifestURI))
+		if err != nil {
+			logger.Error("mongo connect", "error", err)
+			os.Exit(1)
+		}
+		pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer pingCancel()
+		if err := mongoClient.Ping(pingCtx, nil); err != nil {
+			logger.Error("mongo ping", "error", err)
+			os.Exit(1)
+		}
+		defer func() {
+			disconnectCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = mongoClient.Disconnect(disconnectCtx)
+		}()
+		coll := mongoClient.Database(mongoManifestDB).Collection(mongoManifestColl)
+		manifestStoreOpt = kb.WithManifestStore(kb.NewMongoManifestStore(coll))
+		logger.Info("configured mongo manifest store",
+			"db", mongoManifestDB,
+			"collection", mongoManifestColl,
+		)
+	}
+
 	kbOpts := []kb.KBOption{
 		kb.WithMemoryLimit(memLimit),
 		kb.WithEmbedder(embedder),
 		kb.WithShardingPolicy(shardingPolicy),
 		kb.WithDuckDBExtensionDir(extDir),
 		kb.WithDuckDBOfflineExtensions(extOffline),
+	}
+	if manifestStoreOpt != nil {
+		kbOpts = append(kbOpts, manifestStoreOpt)
 	}
 	if graphEnabled {
 		grapher := kb.NewOllamaGrapher(graphURL, graphModel)

@@ -195,8 +195,12 @@ func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSwe
 
 		activeKeys, ok := activeKeysByKB[entry.KBID]
 		if !ok {
-			manifest, err := l.downloadShardManifest(ctx, entry.KBID)
-			if err != nil {
+			doc, err := l.ManifestStore.Get(ctx, entry.KBID)
+			if errors.Is(err, ErrManifestNotFound) {
+				// Manifest is gone (KB deleted). Shards are safe to delete.
+				activeKeys = make(map[string]struct{})
+				activeKeysByKB[entry.KBID] = activeKeys
+			} else if err != nil {
 				slog.Default().WarnContext(ctx, "deferred shard GC manifest download failed", "kb_id", entry.KBID, "reason", "manifest_download_failed", "shard_key", entry.Shard.Key, "error", err)
 				if firstErr == nil {
 					firstErr = fmt.Errorf("download manifest for shard gc: %w", err)
@@ -205,14 +209,16 @@ func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSwe
 				next = append(next, entry)
 				result.Retried++
 				continue
-			}
-			activeKeys = make(map[string]struct{}, len(manifest.Shards))
-			for _, shard := range manifest.Shards {
-				if shard.Key != "" {
-					activeKeys[shard.Key] = struct{}{}
+			} else {
+				manifest := &doc.Manifest
+				activeKeys = make(map[string]struct{}, len(manifest.Shards))
+				for _, shard := range manifest.Shards {
+					if shard.Key != "" {
+						activeKeys[shard.Key] = struct{}{}
+					}
 				}
+				activeKeysByKB[entry.KBID] = activeKeys
 			}
-			activeKeysByKB[entry.KBID] = activeKeys
 		}
 
 		if _, stillReferenced := activeKeys[entry.Shard.Key]; stillReferenced {

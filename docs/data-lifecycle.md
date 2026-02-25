@@ -37,7 +37,7 @@ Graph rows are doc-scoped to the docs present in each shard.
    - Row assignment uses `LIMIT/OFFSET` ordered by doc ID — deterministic for a given snapshot.
    - Tombstoned rows are excluded at shard build time, reclaiming storage without a compaction pass.
 6. Upload shard files unconditionally (content-addressed; idempotent).
-7. Publish new manifest via CAS (`UploadIfMatch(expectedVersion)`).
+7. Publish new manifest via CAS (`ManifestStore.UpsertIfMatch(kbID, manifest, expectedVersion)`).
 8. Best-effort delete legacy keys (`<kb_id>.duckdb`, `<kb_id>.snapshot.json`).
 9. Run cache eviction sweep.
 
@@ -46,11 +46,11 @@ re-read the manifest version and re-run with quadratic backoff.
 
 ## Query Path
 
-Vector and graph queries download the manifest, select shards, and execute against
+Vector and graph queries fetch the manifest, select shards, and execute against
 shard DuckDB files only.
 
-**Manifest download** is a single `BlobStore.Download` call. A 404 response maps
-directly to `ErrKBUninitialized` — there is no pre-flight `Head` call.
+**Manifest fetch** uses `ManifestStore.Get(kbID)`. An absent manifest returns
+`ErrManifestNotFound`, which callers map to `ErrKBUninitialized`.
 
 **Shard selection:**
 
@@ -109,7 +109,7 @@ for delayed GC (grace window) to allow in-flight readers to finish before deleti
 
 `DownloadSnapshotFromShards` reconstructs a single DuckDB file from the manifest:
 
-1. Download manifest.
+1. Fetch manifest via `ManifestStore.Get`.
 2. For each shard: download, verify size, verify SHA256 (skipped if no checksum in manifest).
 3. ATTACH each shard read-only; INSERT docs and graph tables into a new combined DB.
 4. Build HNSW index over the combined `docs` table.

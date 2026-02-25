@@ -87,7 +87,7 @@ func (l *KB) ensureMutableShardDBLocked(
 		return fmt.Errorf("kbID cannot be empty")
 	}
 
-	manifestVersion, err := l.currentShardManifestVersion(ctx, kbID)
+	manifestVersion, err := l.ManifestStore.HeadVersion(ctx, kbID)
 	if err != nil {
 		return err
 	}

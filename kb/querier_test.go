@@ -663,19 +663,12 @@ func testKBShardExecutionFallback(t *testing.T) {
 			}
 			require.NoError(t, harness.KB().UpsertDocsAndUpload(ctx, kbID, docs))
 
-			manifest, err := harness.KB().downloadShardManifest(ctx, kbID)
+			doc, err := harness.KB().ManifestStore.Get(ctx, kbID)
 			require.NoError(t, err)
-			require.NotEmpty(t, manifest.Shards)
-			manifest.Shards[0].Key = kbID + "/missing-shard-file.duckdb"
+			require.NotEmpty(t, doc.Manifest.Shards)
+			doc.Manifest.Shards[0].Key = kbID + "/missing-shard-file.duckdb"
 
-			tmpPath := filepath.Join(t.TempDir(), "manifest.json")
-			data, err := json.Marshal(manifest)
-			require.NoError(t, err)
-			require.NoError(t, os.WriteFile(tmpPath, data, 0o644))
-
-			head, err := harness.KB().BlobStore.Head(ctx, shardManifestKey(kbID))
-			require.NoError(t, err)
-			_, err = harness.KB().BlobStore.UploadIfMatch(ctx, shardManifestKey(kbID), tmpPath, head.Version)
+			_, err = harness.KB().ManifestStore.UpsertIfMatch(ctx, kbID, doc.Manifest, doc.Version)
 			require.NoError(t, err)
 
 			queryVec, err := harness.KB().Embed(ctx, "alpha text")

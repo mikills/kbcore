@@ -18,6 +18,7 @@ var (
 	ErrInvalidEmbeddingDimension  = errors.New("invalid embedding dimension")
 	ErrEmbeddingDimensionMismatch = errors.New("embedding dimension mismatch")
 
+	ErrManifestNotFound   = errors.New("manifest not found")
 	ErrWriteLeaseConflict = errors.New("write lease conflict")
 )
 

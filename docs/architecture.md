@@ -38,7 +38,7 @@ sequenceDiagram
     participant L as WriteLeaseManager
     participant D as Mutable DuckDB
     participant B as Blob Store
-    participant M as Manifest Key
+    participant M as ManifestStore
     participant E as Cache Eviction
 
     C->>A: POST /rag/ingest
@@ -48,7 +48,7 @@ sequenceDiagram
     K->>D: begin tx + apply docs/graph rows
     K->>D: commit + checkpoint
     K->>B: upload shard files
-    K->>M: UploadIfMatch(manifest, expectedVersion)
+    K->>M: ManifestStore.UpsertIfMatch(kbID, manifest, expectedVersion)
     alt CAS success
         M-->>K: new manifest version
         K->>B: best-effort delete legacy keys
@@ -72,14 +72,15 @@ sequenceDiagram
     participant C as Client
     participant A as KB App
     participant K as KB Runtime
+    participant M as ManifestStore
     participant B as Blob Store
     participant S as Shard DuckDB Files
 
     C->>A: POST /rag/query
     A->>K: TopK / SearchByDistance
-    K->>B: Download manifest (single call, 404 -> ErrKBUninitialized)
-    alt missing manifest
-        B-->>K: not found
+    K->>M: Get(kbID)
+    alt missing manifest (ErrManifestNotFound)
+        M-->>K: ErrManifestNotFound
         K-->>A: ErrKBUninitialized
         A-->>C: 400
     else manifest exists
@@ -163,17 +164,17 @@ Two layers work together to prevent lost updates:
 | Layer | Mechanism | Scope |
 |---|---|---|
 | Coarse | Write lease (`WriteLeaseManager`) | Per KB ID, cluster-wide |
-| Fine | CAS on manifest (`UploadIfMatch`) | Atomic blob swap |
+| Fine | CAS on manifest (`ManifestStore.UpsertIfMatch`) | Atomic manifest swap |
 
 **Write lease** prevents most concurrent write attempts from running simultaneously.
 Only one writer holds a lease for a given KB at a time. Lease acquisition fails fast
 with `ErrWriteLeaseConflict`.
 
-**CAS (`UploadIfMatch`)** is the safety net. The writer reads the current manifest
-version before doing work, then passes that version to `UploadIfMatch`. If another
-writer published in between, the store returns `ErrBlobVersionMismatch` and the
-operation aborts. Retry-capable callers (`UpsertDocsAndUploadWithRetry`) re-read
-and re-run with quadratic backoff.
+**CAS (`ManifestStore.UpsertIfMatch`)** is the safety net. The writer reads the current
+manifest version via `ManifestStore.HeadVersion` before doing work, then passes that
+version to `UpsertIfMatch`. If another writer published in between, the store returns
+`ErrBlobVersionMismatch` and the operation aborts. Retry-capable callers
+(`UpsertDocsAndUploadWithRetry`) re-read and re-run with quadratic backoff.
 
 Shard files are immutable and content-addressed (`<kb_id>.duckdb.shards/<hash>/…`),
 so concurrent uploads of the same shard are idempotent. A writer that loses the CAS
@@ -205,12 +206,15 @@ Squared distance is used for ordering — `math.Sqrt` is not needed and was remo
   - Ollama-backed embedder (HTTP API) and local subword n-gram embedder (pure Go, no external deps).
 - Blob store abstraction (`/kb/store_blob.go`)
   - CAS-protected publish (`UploadIfMatch`) and object lifecycle.
+- Manifest store abstraction (`/kb/manifest_store.go`, `/kb/manifest_store_blob.go`)
+  - pluggable manifest CRUD with CAS semantics. Default `BlobManifestStore` wraps `BlobStore`.
+  - `WithManifestStore(store)` option allows swapping backends (e.g. Mongo, Redis) without touching business logic.
 - Local/S3 blob implementations (`/kb/store_blob_local.go`, `/kb/store_blob_s3.go`)
   - filesystem or S3 storage backends behind one interface.
 - Write coordination (`/kb/store_lease.go`, `/kb/store_lease_memory.go`, `/kb/store_lease_redis.go`)
   - per-KB lease acquisition to reduce duplicate distributed write work.
 - Sharded snapshot runtime (`/kb/snapshot_sharded.go`, `/kb/shard_mutable.go`)
-  - shard-file generation, manifest publish/download, mutable DB bootstrap from manifest.
+  - shard-file generation, shard upload, mutable DB bootstrap from manifest.
 - Sharding policy (`/kb/sharding_policy.go`)
   - configurable thresholds for shard triggers, fanout, compaction, and query parallelism.
 - Mutation pipeline (`/kb/mutation_upsert.go`, `/kb/mutation_delete.go`, `/kb/mutation_retry.go`)
@@ -244,7 +248,7 @@ Shard DB tables:
 
 - No monolith fallback.
 - Missing manifest → `ErrKBUninitialized`.
-- Manifest download is a single `Download` call; a 404 is mapped to `ErrKBUninitialized` directly.
+- Manifest access goes through `ManifestStore.Get`; `ErrManifestNotFound` is mapped to `ErrKBUninitialized` by the caller.
 - `search_mode=graph` is strict and returns `ErrGraphQueryUnavailable` when graph data is absent.
 
 ## Mutation Behavior

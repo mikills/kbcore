@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"sync"
 )
@@ -398,13 +397,14 @@ func (k *KB) Search(ctx context.Context, kbID string, queryVec []float32, topK i
 }
 
 func (k *KB) ensureGraphModeAvailable(ctx context.Context, kbID string) error {
-	manifest, err := k.downloadShardManifest(ctx, kbID)
+	doc, err := k.ManifestStore.Get(ctx, kbID)
 	if err != nil {
-		if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, ErrManifestNotFound) {
 			return ErrKBUninitialized
 		}
 		return fmt.Errorf("download shard manifest: %w", err)
 	}
+	manifest := &doc.Manifest
 	if len(manifest.Shards) == 0 {
 		return ErrGraphQueryUnavailable
 	}
