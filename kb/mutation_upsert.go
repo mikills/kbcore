@@ -229,17 +229,6 @@ func (l *KB) cleanupLegacySnapshotObjectsBestEffort(ctx context.Context, kbID st
 	return nil
 }
 
-func (l *KB) currentShardManifestVersion(ctx context.Context, kbID string) (string, error) {
-	info, err := l.BlobStore.Head(ctx, shardManifestKey(kbID))
-	if err == nil {
-		return info.Version, nil
-	}
-	if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
-	return "", err
-}
-
 func (l *KB) shouldActivateShardingForUpsert(dbPath string, vectorRows int64) (bool, error) {
 	info, err := os.Stat(dbPath)
 	if err != nil {
@@ -293,7 +282,7 @@ func (l *KB) postMutationCommit(ctx context.Context, db *sql.DB, kbID string, up
 	dbClosed = true
 
 	if upload {
-		expectedManifestVersion, err := l.currentShardManifestVersion(ctx, kbID)
+		expectedManifestVersion, err := l.ManifestStore.HeadVersion(ctx, kbID)
 		if err != nil {
 			return err
 		}

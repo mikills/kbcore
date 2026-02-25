@@ -57,7 +57,6 @@ package kb
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -141,21 +140,7 @@ func (l *KB) UploadSnapshotShardedIfMatch(ctx context.Context, kbID, localDBPath
 		Shards:         parts,
 	}
 
-	tmpDir, err := os.MkdirTemp("", "kbcore-manifest-*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(tmpDir)
-	manifestPath := filepath.Join(tmpDir, "manifest.json")
-	data, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
-		return nil, err
-	}
-
-	info, err := l.BlobStore.UploadIfMatch(ctx, shardManifestKey(kbID), manifestPath, expectedManifestVersion)
+	newVersion, err := l.ManifestStore.UpsertIfMatch(ctx, kbID, manifest, expectedManifestVersion)
 	if err != nil {
 		if errors.Is(err, ErrBlobVersionMismatch) {
 			l.recordManifestCASConflict(kbID)
@@ -163,7 +148,10 @@ func (l *KB) UploadSnapshotShardedIfMatch(ctx context.Context, kbID, localDBPath
 		return nil, err
 	}
 	l.recordShardCount(kbID, len(parts))
-	return info, nil
+	return &BlobObjectInfo{
+		Key:     shardManifestKey(kbID),
+		Version: newVersion,
+	}, nil
 }
 
 // DownloadSnapshotFromShards downloads a sharded snapshot manifest and
@@ -176,28 +164,21 @@ func (l *KB) DownloadSnapshotFromShards(ctx context.Context, kbID, dest string) 
 		return nil, fmt.Errorf("dest cannot be empty")
 	}
 
-	tmpDir, err := os.MkdirTemp("", "kbcore-manifest-download-*")
+	doc, err := l.ManifestStore.Get(ctx, kbID)
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmpDir)
-	manifestPath := filepath.Join(tmpDir, "manifest.json")
-
-	if err := l.BlobStore.Download(ctx, shardManifestKey(kbID), manifestPath); err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return nil, err
-	}
-	var manifest SnapshotShardManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return nil, err
-	}
+	manifest := doc.Manifest
 	l.recordShardCount(kbID, len(manifest.Shards))
 	if len(manifest.Shards) == 0 {
 		return nil, fmt.Errorf("manifest has no shards")
 	}
+
+	tmpDir, err := os.MkdirTemp("", "kbcore-shard-download-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmpDir)
 
 	// CreateTemp in the same directory as dest keeps os.Rename atomic (same
 	// filesystem). Remove the 0-byte placeholder immediately — DuckDB requires

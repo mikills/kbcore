@@ -35,7 +35,6 @@ package kb
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -97,7 +96,7 @@ func (l *KB) CompactShardsIfNeeded(ctx context.Context, kbID string) (result *Co
 		_ = leaseManager.Release(context.Background(), lease)
 	}()
 
-	manifestVersion, err := l.currentShardManifestVersion(ctx, kbID)
+	manifestVersion, err := l.ManifestStore.HeadVersion(ctx, kbID)
 	if err != nil {
 		return nil, err
 	}
@@ -105,10 +104,11 @@ func (l *KB) CompactShardsIfNeeded(ctx context.Context, kbID string) (result *Co
 		return &CompactionPublishResult{Performed: false}, nil
 	}
 
-	manifest, err := l.downloadShardManifest(ctx, kbID)
+	doc, err := l.ManifestStore.Get(ctx, kbID)
 	if err != nil {
 		return nil, err
 	}
+	manifest := &doc.Manifest
 
 	candidates, candidateReason := selectCompactionCandidatesWithReason(l.ShardingPolicy, manifest)
 	slog.Default().InfoContext(ctx, "evaluated compaction candidates", "kb_id", kbID, "reason", candidateReason, "candidate_count", len(candidates), "shard_count", len(manifest.Shards))
@@ -122,23 +122,24 @@ func (l *KB) CompactShardsIfNeeded(ctx context.Context, kbID string) (result *Co
 	}
 
 	nextManifest := buildCompactedManifest(kbID, manifest, candidates, replacement)
-	nextInfo, err := l.uploadShardManifestIfMatch(ctx, kbID, nextManifest, manifestVersion)
+	newVersion, err := l.ManifestStore.UpsertIfMatch(ctx, kbID, nextManifest, manifestVersion)
 	if err != nil {
 		if errors.Is(err, ErrBlobVersionMismatch) {
+			l.recordManifestCASConflict(kbID)
 			slog.Default().WarnContext(ctx, "compaction manifest CAS conflict", "kb_id", kbID, "reason", "manifest_cas_conflict")
 		}
 		return nil, err
 	}
 	l.recordShardCount(kbID, len(nextManifest.Shards))
 	l.enqueueReplacedShardsForGC(kbID, candidates, time.Now().UTC())
-	slog.Default().InfoContext(ctx, "completed shard compaction", "kb_id", kbID, "reason", "publish_compaction", "replaced_count", len(candidates), "new_manifest_version", nextInfo.Version)
+	slog.Default().InfoContext(ctx, "completed shard compaction", "kb_id", kbID, "reason", "publish_compaction", "replaced_count", len(candidates), "new_manifest_version", newVersion)
 
 	return &CompactionPublishResult{
 		Performed:          true,
 		ReplacedShards:     append([]SnapshotShardMetadata(nil), candidates...),
 		ReplacementShards:  []SnapshotShardMetadata{replacement},
 		ManifestVersionOld: manifestVersion,
-		ManifestVersionNew: nextInfo.Version,
+		ManifestVersionNew: newVersion,
 	}, nil
 }
 
@@ -276,38 +277,6 @@ func buildCompactedManifest(kbID string, current *SnapshotShardManifest, replace
 		TotalSizeBytes: total,
 		Shards:         nextShards,
 	}
-}
-
-// uploadShardManifestIfMatch writes a new manifest to BlobStore only if the
-// current manifest version matches expectedVersion (compare-and-set).
-//
-// On version mismatch it returns ErrBlobVersionMismatch and records a CAS
-// conflict metric. This prevents lost updates when concurrent writers attempt
-// to publish manifests.
-func (l *KB) uploadShardManifestIfMatch(ctx context.Context, kbID string, manifest SnapshotShardManifest, expectedVersion string) (*BlobObjectInfo, error) {
-	tmpDir, err := os.MkdirTemp("", "kbcore-compaction-manifest-*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(tmpDir)
-
-	manifestPath := filepath.Join(tmpDir, "manifest.json")
-	data, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
-		return nil, err
-	}
-
-	info, err := l.BlobStore.UploadIfMatch(ctx, shardManifestKey(kbID), manifestPath, expectedVersion)
-	if err != nil {
-		if errors.Is(err, ErrBlobVersionMismatch) {
-			l.recordManifestCASConflict(kbID)
-		}
-		return nil, err
-	}
-	return info, nil
 }
 
 // selectCompactionCandidates returns shards eligible for compaction based on

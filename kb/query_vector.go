@@ -61,7 +61,6 @@ package kb
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -194,13 +193,14 @@ func (l *KB) selectVectorQueryPath(ctx context.Context, kbID string) (vectorQuer
 }
 
 func (l *KB) resolveVectorQuerySelection(ctx context.Context, kbID string, queryVec []float32) (*vectorQuerySelection, error) {
-	manifest, err := l.downloadShardManifest(ctx, kbID)
+	doc, err := l.ManifestStore.Get(ctx, kbID)
 	if err != nil {
-		if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, ErrManifestNotFound) {
 			return nil, ErrKBUninitialized
 		}
 		return nil, err
 	}
+	manifest := &doc.Manifest
 	l.recordShardCount(kbID, len(manifest.Shards))
 	if len(manifest.Shards) == 0 {
 		return nil, ErrKBUninitialized
@@ -232,31 +232,6 @@ func (l *KB) resolveVectorQuerySelection(ctx context.Context, kbID string, query
 		return nil, ErrKBUninitialized
 	}
 	return &vectorQuerySelection{Path: vectorQueryPathShardFanout, Plan: plan}, nil
-}
-
-func (l *KB) downloadShardManifest(ctx context.Context, kbID string) (*SnapshotShardManifest, error) {
-	tmpDir, err := os.MkdirTemp("", "kbcore-query-manifest-*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(tmpDir)
-
-	manifestPath := filepath.Join(tmpDir, "manifest.json")
-	if err := l.BlobStore.Download(ctx, shardManifestKey(kbID), manifestPath); err != nil {
-		return nil, err
-	}
-
-	data, err := os.ReadFile(manifestPath)
-	if err != nil {
-		return nil, err
-	}
-
-	var manifest SnapshotShardManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
-		return nil, err
-	}
-
-	return &manifest, nil
 }
 
 // TopK returns the K nearest neighbors to the query vector.

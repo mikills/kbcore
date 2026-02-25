@@ -48,13 +48,14 @@ type Chunker interface {
 // KB is the core knowledge base orchestrator for loading, querying,
 // mutating, uploading, and maintaining HNSW indices.
 type KB struct {
-	BlobStore    BlobStore
-	CacheDir     string
-	MemoryLimit  string
-	ExtensionDir string
-	OfflineExt   bool
-	Embedder     Embedder
-	GraphBuilder *GraphBuilder
+	BlobStore     BlobStore
+	ManifestStore ManifestStore
+	CacheDir      string
+	MemoryLimit   string
+	ExtensionDir  string
+	OfflineExt    bool
+	Embedder      Embedder
+	GraphBuilder  *GraphBuilder
 
 	WriteLeaseManager WriteLeaseManager
 	WriteLeaseTTL     time.Duration
@@ -132,6 +133,13 @@ func WithDuckDBOfflineExtensions(offline bool) KBOption {
 	}
 }
 
+// WithManifestStore sets a custom ManifestStore implementation.
+func WithManifestStore(store ManifestStore) KBOption {
+	return func(kb *KB) {
+		kb.ManifestStore = store
+	}
+}
+
 // WithGraphBuilder sets the graph builder for RAG functionality.
 func WithGraphBuilder(builder *GraphBuilder) KBOption {
 	return func(kb *KB) {
@@ -201,6 +209,10 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 		if opt != nil {
 			opt(kb)
 		}
+	}
+
+	if kb.ManifestStore == nil {
+		kb.ManifestStore = &BlobManifestStore{Store: kb.BlobStore}
 	}
 
 	return kb
