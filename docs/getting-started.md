@@ -82,7 +82,7 @@ go run .
 
 - Use shared blob storage (for example S3) and keep `KBCORE_CACHE_DIR` pod-local (ephemeral or node-local PVC).
 - For multi-pod writes and compaction, use `RedisWriteLeaseManager` so workers coordinate per KB ID.
-- Keep CAS semantics enabled on blob writes (`UploadIfMatch` path) as the final correctness guard during races.
+- Keep CAS semantics enabled on manifest writes (`ManifestStore.UpsertIfMatch` path) as the final correctness guard during races.
 
 # HNSW Maintenance
 
