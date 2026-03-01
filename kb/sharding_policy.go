@@ -77,6 +77,33 @@ func normalizeShardingPolicy(policy ShardingPolicy) ShardingPolicy {
 	return defaults
 }
 
+// ShardMetricsObserver receives shard-level metrics events from the DuckDB backend.
+// KB satisfies this interface via its record* methods.
+type ShardMetricsObserver interface {
+	RecordShardCount(kbID string, count int)
+	RecordShardExecutionFailure(kbID string)
+	RecordShardFanout(kbID string, fanout int, capped bool)
+	RecordShardExecution(kbID string, count int)
+	RecordShardCacheAccess(kbID string, hit bool)
+}
+
+// RecordShardCount implements ShardMetricsObserver.
+func (l *KB) RecordShardCount(kbID string, count int) { l.recordShardCount(kbID, count) }
+
+// RecordShardExecutionFailure implements ShardMetricsObserver.
+func (l *KB) RecordShardExecutionFailure(kbID string) { l.recordShardExecutionFailure(kbID) }
+
+// RecordShardFanout implements ShardMetricsObserver.
+func (l *KB) RecordShardFanout(kbID string, fanout int, capped bool) {
+	l.recordShardFanout(kbID, fanout, capped)
+}
+
+// RecordShardExecution implements ShardMetricsObserver.
+func (l *KB) RecordShardExecution(kbID string, count int) { l.recordShardExecution(kbID, count) }
+
+// RecordShardCacheAccess implements ShardMetricsObserver.
+func (l *KB) RecordShardCacheAccess(kbID string, hit bool) { l.recordShardCacheAccess(kbID, hit) }
+
 type shardMetrics struct {
 	ShardCount              int
 	FanoutUsedTotal         uint64

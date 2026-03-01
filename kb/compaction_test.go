@@ -161,7 +161,7 @@ func testCompactionPublish(t *testing.T) {
 	require.Len(t, updatedManifest.Shards, 1)
 	assert.Equal(t, result.ReplacementShards[0].ShardID, updatedManifest.Shards[0].ShardID)
 	assert.Equal(t, int64(30+35+40), updatedManifest.Shards[0].VectorRows)
-	db, err := harness.KB().openConfiguredDB(ctx, reconstructed)
+	db, err := testOpenConfiguredDB(harness.KB(), ctx, reconstructed)
 	require.NoError(t, err)
 	defer db.Close()
 	var mergedRows int64
@@ -399,7 +399,7 @@ func seedManifestWithShards(t *testing.T, ctx context.Context, kb *KB, kbID stri
 }
 
 func writeTestShardDB(ctx context.Context, kb *KB, path, shardID string, startDoc, rows int) error {
-	db, err := kb.openConfiguredDB(ctx, path)
+	db, err := testOpenConfiguredDB(kb, ctx, path)
 	if err != nil {
 		return err
 	}

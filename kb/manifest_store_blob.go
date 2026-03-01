@@ -54,6 +54,14 @@ func (s *BlobManifestStore) Get(ctx context.Context, kbID string) (*ManifestDocu
 		return nil, err
 	}
 
+	if manifest.FormatKind == "" {
+		manifest.FormatKind = DuckDBFormatKind
+	}
+
+	if manifest.FormatVersion <= 0 {
+		manifest.FormatVersion = DuckDBFormatVersion
+	}
+
 	return &ManifestDocument{
 		Manifest: manifest,
 		Version:  info.Version,

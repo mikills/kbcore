@@ -1,6 +1,6 @@
 // Vector query execution for sharded knowledge bases.
 //
-// This file implements TopK and SearchByDistance across a sharded DuckDB layout.
+// This file implements DuckDB vector retrieval across a sharded layout.
 // Each shard is an independent DuckDB file containing a docs table and an HNSW
 // vector index. Queries fan out across a subset of shards in parallel, then
 // merge results into a single globally-ranked list.
@@ -41,9 +41,6 @@
 //     all shard results, sorts globally by distance (ascending), and returns the
 //     global top-K. Ties are broken deterministically by ID, content, shard
 //     index, and local index.
-//   - SearchByDistance is implemented as TopK(1000) followed by a distance
-//     threshold filter on the merged results.
-//
 // Failure modes:
 //
 //   - Download errors (network, checksum, size mismatch) abort the query for
@@ -90,7 +87,7 @@ type vectorQuerySelection struct {
 	Plan shardQueryPlan
 }
 
-func (l *KB) planShardFanout(policy ShardingPolicy, manifest *SnapshotShardManifest, queryVec []float32) shardQueryPlan {
+func (f *DuckDBArtifactFormat) planShardFanout(policy ShardingPolicy, manifest *SnapshotShardManifest, queryVec []float32) shardQueryPlan {
 	if manifest == nil || len(manifest.Shards) == 0 {
 		return shardQueryPlan{}
 	}
@@ -184,16 +181,16 @@ func shardRankScore(shard SnapshotShardMetadata, queryVec []float32) float64 {
 	return 0
 }
 
-func (l *KB) selectVectorQueryPath(ctx context.Context, kbID string) (vectorQueryPath, error) {
-	selection, err := l.resolveVectorQuerySelection(ctx, kbID, nil)
+func (f *DuckDBArtifactFormat) selectVectorQueryPath(ctx context.Context, kbID string) (vectorQueryPath, error) {
+	selection, err := f.resolveVectorQuerySelection(ctx, kbID, nil)
 	if err != nil {
 		return vectorQueryPathShardFanout, err
 	}
 	return selection.Path, nil
 }
 
-func (l *KB) resolveVectorQuerySelection(ctx context.Context, kbID string, queryVec []float32) (*vectorQuerySelection, error) {
-	doc, err := l.ManifestStore.Get(ctx, kbID)
+func (f *DuckDBArtifactFormat) resolveVectorQuerySelection(ctx context.Context, kbID string, queryVec []float32) (*vectorQuerySelection, error) {
+	doc, err := f.deps.ManifestStore.Get(ctx, kbID)
 	if err != nil {
 		if errors.Is(err, ErrManifestNotFound) {
 			return nil, ErrKBUninitialized
@@ -201,12 +198,15 @@ func (l *KB) resolveVectorQuerySelection(ctx context.Context, kbID string, query
 		return nil, err
 	}
 	manifest := &doc.Manifest
-	l.recordShardCount(kbID, len(manifest.Shards))
+	if err := f.validateManifestFormat(manifest); err != nil {
+		return nil, err
+	}
+	f.deps.Metrics.RecordShardCount(kbID, len(manifest.Shards))
 	if len(manifest.Shards) == 0 {
 		return nil, ErrKBUninitialized
 	}
 
-	policy := normalizeShardingPolicy(l.ShardingPolicy)
+	policy := normalizeShardingPolicy(f.deps.ShardingPolicy)
 	if len(manifest.Shards) <= policy.SmallKBMaxShards {
 		parallelism := policy.QueryShardParallelism
 		if parallelism <= 0 {
@@ -227,17 +227,17 @@ func (l *KB) resolveVectorQuerySelection(ctx context.Context, kbID string, query
 		}, nil
 	}
 
-	plan := l.planShardFanout(policy, manifest, queryVec)
+	plan := f.planShardFanout(policy, manifest, queryVec)
 	if plan.Fanout <= 0 {
 		return nil, ErrKBUninitialized
 	}
 	return &vectorQuerySelection{Path: vectorQueryPathShardFanout, Plan: plan}, nil
 }
 
-// TopK returns the K nearest neighbors to the query vector.
+// searchTopK returns the K nearest neighbors to the query vector.
 // Results are ordered by distance (ascending).
 // Returns empty slice if no results found or K <= 0.
-func (l *KB) TopK(ctx context.Context, kbID string, queryVec []float32, k int) ([]QueryResult, error) {
+func (f *DuckDBArtifactFormat) searchTopK(ctx context.Context, kbID string, queryVec []float32, k int) ([]QueryResult, error) {
 	if k <= 0 {
 		return []QueryResult{}, nil
 	}
@@ -245,33 +245,33 @@ func (l *KB) TopK(ctx context.Context, kbID string, queryVec []float32, k int) (
 		return nil, fmt.Errorf("query vector cannot be empty")
 	}
 
-	selection, err := l.resolveVectorQuerySelection(ctx, kbID, queryVec)
+	selection, err := f.resolveVectorQuerySelection(ctx, kbID, queryVec)
 	if err != nil {
 		return nil, fmt.Errorf("select vector query path: %w", err)
 	}
-	results, shardErr := l.queryTopKFromShards(ctx, kbID, queryVec, k, selection.Plan)
+	results, shardErr := f.queryTopKFromShards(ctx, kbID, queryVec, k, selection.Plan)
 	if shardErr != nil {
-		l.recordShardExecutionFailure(kbID)
+		f.deps.Metrics.RecordShardExecutionFailure(kbID)
 		return nil, shardErr
 	}
 	return results, nil
 }
 
-func (l *KB) queryTopKFromShards(ctx context.Context, kbID string, queryVec []float32, k int, plan shardQueryPlan) ([]QueryResult, error) {
+func (f *DuckDBArtifactFormat) queryTopKFromShards(ctx context.Context, kbID string, queryVec []float32, k int, plan shardQueryPlan) ([]QueryResult, error) {
 	if plan.Fanout <= 0 || len(plan.Shards) == 0 {
 		return []QueryResult{}, nil
 	}
-	l.recordShardFanout(kbID, plan.Fanout, plan.Capped)
-	l.recordShardExecution(kbID, plan.Fanout)
+	f.deps.Metrics.RecordShardFanout(kbID, plan.Fanout, plan.Capped)
+	f.deps.Metrics.RecordShardExecution(kbID, plan.Fanout)
 
-	shardResults, err := l.queryShardsTopK(ctx, kbID, plan.Shards, queryVec, k, plan.Parallelism)
+	shardResults, err := f.queryShardsTopK(ctx, kbID, plan.Shards, queryVec, k, plan.Parallelism)
 	if err != nil {
 		return nil, err
 	}
 	return mergeShardTopKResults(shardResults, k), nil
 }
 
-func (l *KB) queryShardsTopK(ctx context.Context, kbID string, shards []SnapshotShardMetadata, queryVec []float32, k, parallelism int) ([][]QueryResult, error) {
+func (f *DuckDBArtifactFormat) queryShardsTopK(ctx context.Context, kbID string, shards []SnapshotShardMetadata, queryVec []float32, k, parallelism int) ([][]QueryResult, error) {
 	if len(shards) == 0 || k <= 0 {
 		return [][]QueryResult{}, nil
 	}
@@ -303,7 +303,7 @@ func (l *KB) queryShardsTopK(ctx context.Context, kbID string, shards []Snapshot
 			}
 			defer func() { <-sem }()
 
-			rows, err := l.querySingleShardTopK(ctx, kbID, shard, queryVec, k)
+			rows, err := f.querySingleShardTopK(ctx, kbID, shard, queryVec, k)
 			if err != nil {
 				select {
 				case errCh <- err:
@@ -326,14 +326,14 @@ func (l *KB) queryShardsTopK(ctx context.Context, kbID string, shards []Snapshot
 	return results, nil
 }
 
-func (l *KB) querySingleShardTopK(ctx context.Context, kbID string, shard SnapshotShardMetadata, queryVec []float32, k int) ([]QueryResult, error) {
-	localPath, hit, err := l.ensureLocalShardFile(ctx, kbID, shard)
+func (f *DuckDBArtifactFormat) querySingleShardTopK(ctx context.Context, kbID string, shard SnapshotShardMetadata, queryVec []float32, k int) ([]QueryResult, error) {
+	localPath, hit, err := f.ensureLocalShardFile(ctx, kbID, shard)
 	if err != nil {
 		return nil, fmt.Errorf("ensure shard file %s: %w", shard.ShardID, err)
 	}
-	l.recordShardCacheAccess(kbID, hit)
+	f.deps.Metrics.RecordShardCacheAccess(kbID, hit)
 
-	db, err := l.openConfiguredDB(ctx, localPath)
+	db, err := f.openConfiguredDB(ctx, localPath)
 	if err != nil {
 		return nil, fmt.Errorf("open shard %s: %w", shard.ShardID, err)
 	}
@@ -346,14 +346,14 @@ func (l *KB) querySingleShardTopK(ctx context.Context, kbID string, shard Snapsh
 	return results, nil
 }
 
-func (l *KB) ensureLocalShardFile(ctx context.Context, kbID string, shard SnapshotShardMetadata) (string, bool, error) {
+func (f *DuckDBArtifactFormat) ensureLocalShardFile(ctx context.Context, kbID string, shard SnapshotShardMetadata) (string, bool, error) {
 	if strings.TrimSpace(shard.Key) == "" {
 		return "", false, fmt.Errorf("shard key is required")
 	}
-	cacheDir := filepath.Join(l.CacheDir, kbID, "query-shards")
+	cacheDir := filepath.Join(f.deps.CacheDir, kbID, "query-shards")
 	localPath := filepath.Join(cacheDir, shardCacheFileName(shard))
 	if _, err := os.Stat(localPath); err == nil {
-		if err := l.evictCacheIfNeeded(ctx, kbID); err != nil {
+		if err := f.deps.EvictCacheIfNeeded(ctx, kbID); err != nil {
 			return "", true, err
 		}
 		return localPath, true, nil
@@ -367,7 +367,7 @@ func (l *KB) ensureLocalShardFile(ctx context.Context, kbID string, shard Snapsh
 
 	tmpPath := fmt.Sprintf("%s.download-%d", localPath, time.Now().UnixNano())
 	defer os.Remove(tmpPath)
-	if err := l.BlobStore.Download(ctx, shard.Key, tmpPath); err != nil {
+	if err := f.deps.BlobStore.Download(ctx, shard.Key, tmpPath); err != nil {
 		return "", false, err
 	}
 
@@ -392,7 +392,7 @@ func (l *KB) ensureLocalShardFile(ctx context.Context, kbID string, shard Snapsh
 	if err := os.Rename(tmpPath, localPath); err != nil {
 		return "", false, err
 	}
-	if err := l.evictCacheIfNeeded(ctx, kbID); err != nil {
+	if err := f.deps.EvictCacheIfNeeded(ctx, kbID); err != nil {
 		return "", false, err
 	}
 	return localPath, false, nil
@@ -485,56 +485,4 @@ func mergeShardTopKResults(shardResults [][]QueryResult, k int) []QueryResult {
 	}
 
 	return merged
-}
-
-// SearchByDistance returns documents within maxDistance of the query vector.
-// Uses the HNSW index to efficiently retrieve up to 1000 nearest neighbors,
-// then filters results by the distance threshold.
-// Results are ordered by distance (ascending).
-// Returns empty slice if no results found or maxDistance <= 0.
-//
-// For queries expecting > 1000 results, use TopK() directly with a larger K.
-func (l *KB) SearchByDistance(ctx context.Context, kbID string, queryVec []float32, maxDistance float64) ([]QueryResult, error) {
-	if maxDistance <= 0 {
-		return []QueryResult{}, nil
-	}
-	if len(queryVec) == 0 {
-		return nil, fmt.Errorf("query vector cannot be empty")
-	}
-
-	selection, err := l.resolveVectorQuerySelection(ctx, kbID, queryVec)
-	if err != nil {
-		return nil, fmt.Errorf("select vector query path: %w", err)
-	}
-	results, shardErr := l.queryDistanceFromShards(ctx, kbID, queryVec, maxDistance, selection.Plan)
-	if shardErr != nil {
-		l.recordShardExecutionFailure(kbID)
-		return nil, shardErr
-	}
-	return results, nil
-}
-
-func (l *KB) queryDistanceFromShards(ctx context.Context, kbID string, queryVec []float32, maxDistance float64, plan shardQueryPlan) ([]QueryResult, error) {
-	const maxResults = 1000
-	if plan.Fanout <= 0 || len(plan.Shards) == 0 {
-		return []QueryResult{}, nil
-	}
-	l.recordShardFanout(kbID, plan.Fanout, plan.Capped)
-	l.recordShardExecution(kbID, plan.Fanout)
-
-	shardResults, err := l.queryShardsTopK(ctx, kbID, plan.Shards, queryVec, maxResults, plan.Parallelism)
-	if err != nil {
-		return nil, err
-	}
-	merged := mergeShardTopKResults(shardResults, maxResults)
-
-	results := make([]QueryResult, 0, len(merged))
-	for _, r := range merged {
-		if r.Distance < maxDistance {
-			results = append(results, r)
-		} else {
-			break
-		}
-	}
-	return results, nil
 }

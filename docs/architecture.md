@@ -77,7 +77,7 @@ sequenceDiagram
     participant S as Shard DuckDB Files
 
     C->>A: POST /rag/query
-    A->>K: TopK / SearchByDistance
+    A->>K: Search
     K->>M: Get(kbID)
     alt missing manifest (ErrManifestNotFound)
         M-->>K: ErrManifestNotFound

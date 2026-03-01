@@ -25,12 +25,8 @@
 package kb
 
 import (
-	"context"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -62,112 +58,3 @@ func writeLocalShardManifestVersion(path, version string) error {
 	return os.WriteFile(path, []byte(strings.TrimSpace(version)), 0o644)
 }
 
-// ensureMutableShardDBLocked ensures a mutable DuckDB file is present at
-// dbPath and consistent with the current remote manifest.
-//
-// The caller must hold the per-KB write lock before calling this function.
-//
-// Logic:
-//  1. Fetch the current remote manifest version.
-//  2. If no manifest exists and allowBootstrap is true, create an empty DB.
-//     If allowBootstrap is false, return ErrKBUninitialized.
-//  3. If a matching local version sentinel exists and the DB file is present,
-//     return immediately — the local DB is already up to date.
-//  4. Otherwise download and reconstruct the DB from the current shards, then
-//     write the new version sentinel.
-func (l *KB) ensureMutableShardDBLocked(
-	ctx context.Context,
-	kbID string,
-	kbDir string,
-	dbPath string,
-	embeddingDim int,
-	allowBootstrap bool,
-) error {
-	if strings.TrimSpace(kbID) == "" {
-		return fmt.Errorf("kbID cannot be empty")
-	}
-
-	manifestVersion, err := l.ManifestStore.HeadVersion(ctx, kbID)
-	if err != nil {
-		return err
-	}
-	if manifestVersion == "" {
-		if !allowBootstrap {
-			return ErrKBUninitialized
-		}
-		if embeddingDim <= 0 {
-			return fmt.Errorf("embedding dimension must be > 0")
-		}
-		return l.createEmptyMutableShardDBLocked(ctx, kbDir, dbPath, embeddingDim)
-	}
-
-	localVersionPath := localShardManifestVersionPath(kbDir)
-	localVersion, readErr := readLocalShardManifestVersion(localVersionPath)
-	hasLocalVersion := readErr == nil
-	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return readErr
-	}
-	if hasLocalVersion && localVersion == manifestVersion {
-		if _, statErr := os.Stat(dbPath); statErr == nil {
-			return nil
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return statErr
-		}
-	}
-
-	if err := os.MkdirAll(kbDir, 0o755); err != nil {
-		return err
-	}
-	if _, err := l.DownloadSnapshotFromShards(ctx, kbID, dbPath); err != nil {
-		return err
-	}
-	if err := writeLocalShardManifestVersion(localVersionPath, manifestVersion); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// createEmptyMutableShardDBLocked initialises an empty DuckDB file at dbPath
-// with the docs, doc_tombstones, entities, edges, and doc_entities tables.
-//
-// Used on the first write to a KB that has no remote manifest yet (bootstrap
-// path). The caller must hold the per-KB write lock.
-func (l *KB) createEmptyMutableShardDBLocked(ctx context.Context, kbDir, dbPath string, embeddingDim int) error {
-	if embeddingDim <= 0 {
-		return fmt.Errorf("embedding dimension must be > 0")
-	}
-	if err := os.MkdirAll(kbDir, 0o755); err != nil {
-		return err
-	}
-
-	db, err := l.openConfiguredDB(ctx, dbPath)
-	if err != nil {
-		return err
-	}
-
-	createDocsSQL := `
-		CREATE TABLE IF NOT EXISTS docs (
-			id TEXT,
-			content TEXT,
-			embedding FLOAT[` + strconv.Itoa(embeddingDim) + `]
-		)
-	`
-	if _, err := db.ExecContext(ctx, createDocsSQL); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("create docs table for shard bootstrap: %w", err)
-	}
-	if err := ensureDocTombstonesTable(ctx, db); err != nil {
-		_ = db.Close()
-		return err
-	}
-	if err := EnsureGraphTables(ctx, db); err != nil {
-		_ = db.Close()
-		return err
-	}
-
-	if err := checkpointAndCloseDB(ctx, db, "close db after shard bootstrap"); err != nil {
-		return err
-	}
-	return nil
-}

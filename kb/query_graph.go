@@ -3,10 +3,8 @@ package kb
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"sort"
-	"sync"
 )
 
 // ExpansionOptions configures graph-based search expansion.
@@ -47,9 +45,10 @@ const (
 )
 
 // SearchOptions configures search strategy selection.
-// Zero values are replaced with defaults.
 type SearchOptions struct {
 	Mode           SearchMode
+	TopK           int
+	MaxDistance    *float64
 	Expansion      *ExpansionOptions
 	AdaptiveMinSim float64
 }
@@ -60,85 +59,55 @@ type edgeRow struct {
 	Weight float64
 }
 
-// SearchExpanded performs a vector search and expands results via a knowledge graph.
-// Results are scored by blending vector similarity with hop-decayed graph scores.
-func (k *KB) SearchExpanded(ctx context.Context, kbID string, queryVec []float32, topK int, opts *ExpansionOptions) ([]ExpandedResult, error) {
-	if err := validateSearchExpandedInputs(topK, queryVec); err != nil {
-		return nil, err
-	}
-	options := normalizeExpansionOptions(topK, opts)
-	options.OfflineExt = k.OfflineExt
-	selection, err := k.resolveVectorQuerySelection(ctx, kbID, queryVec)
-	if err != nil {
-		return nil, fmt.Errorf("select vector query path: %w", err)
-	}
-	parallelism := selection.Plan.Parallelism
-	if parallelism <= 0 {
-		parallelism = 1
+// Search performs vector, graph, or adaptive retrieval based on options.
+func (k *KB) Search(ctx context.Context, kbID string, queryVec []float32, opts *SearchOptions) ([]ExpandedResult, error) {
+	if k.ArtifactFormat == nil {
+		return nil, ErrArtifactFormatNotConfigured
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	results := make([][]ExpandedResult, len(selection.Plan.Shards))
-	errCh := make(chan error, 1)
-	sem := make(chan struct{}, parallelism)
-	var wg sync.WaitGroup
-
-	for i := range selection.Plan.Shards {
-		idx := i
-		shard := selection.Plan.Shards[i]
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-sem }()
-
-			localPath, _, err := k.ensureLocalShardFile(ctx, kbID, shard)
-			if err != nil {
-				select {
-				case errCh <- err:
-				default:
-				}
-				cancel()
-				return
-			}
-			db, err := k.openConfiguredDB(ctx, localPath)
-			if err != nil {
-				select {
-				case errCh <- err:
-				default:
-				}
-				cancel()
-				return
-			}
-			defer db.Close()
-
-			shardResults, err := searchExpandedWithDB(ctx, db, queryVec, topK, options)
-			if err != nil {
-				select {
-				case errCh <- err:
-				default:
-				}
-				cancel()
-				return
-			}
-			results[idx] = shardResults
-		}()
+	options := normalizeSearchOptions(opts)
+	if options.TopK <= 0 {
+		return nil, fmt.Errorf("%w: top_k must be > 0", ErrInvalidQueryRequest)
 	}
 
-	wg.Wait()
-	select {
-	case err := <-errCh:
-		return nil, err
+	ragReq := RagQueryRequest{
+		KBID:     kbID,
+		QueryVec: queryVec,
+		Options: RagQueryOptions{
+			TopK:        options.TopK,
+			MaxDistance: options.MaxDistance,
+		},
+	}
+
+	graphReq := GraphQueryRequest{
+		KBID:     kbID,
+		QueryVec: queryVec,
+		Options: GraphQueryOptions{
+			TopK:        options.TopK,
+			MaxDistance: options.MaxDistance,
+			Expansion:   options.Expansion,
+		},
+	}
+
+	switch options.Mode {
+	case SearchModeGraph:
+		return k.ArtifactFormat.QueryGraph(ctx, graphReq)
+	case SearchModeAdaptive:
+		vectorResults, err := k.ArtifactFormat.QueryRag(ctx, ragReq)
+		if err != nil {
+			return nil, err
+		}
+		if len(vectorResults) == 0 {
+			return []ExpandedResult{}, nil
+		}
+		sim := 1.0 / (1.0 + vectorResults[0].Distance)
+		if sim >= options.AdaptiveMinSim {
+			return vectorResults, nil
+		}
+		return k.ArtifactFormat.QueryGraph(ctx, graphReq)
 	default:
+		return k.ArtifactFormat.QueryRag(ctx, ragReq)
 	}
-
-	return mergeExpandedShardResults(results, topK), nil
 }
 
 func searchExpandedWithDB(ctx context.Context, db *sql.DB, queryVec []float32, topK int, options ExpansionOptions) ([]ExpandedResult, error) {
@@ -197,16 +166,6 @@ func mergeExpandedShardResults(shardResults [][]ExpandedResult, topK int) []Expa
 		topK = len(flattened)
 	}
 	return flattened[:topK]
-}
-
-func validateSearchExpandedInputs(topK int, queryVec []float32) error {
-	if topK <= 0 {
-		return fmt.Errorf("k must be > 0")
-	}
-	if len(queryVec) == 0 {
-		return fmt.Errorf("query vector cannot be empty")
-	}
-	return nil
 }
 
 func seedEntityScores(ctx context.Context, db *sql.DB, seeds []QueryResult) (map[string]float64, error) {
@@ -361,60 +320,6 @@ func copyFloatMap(src map[string]float64) map[string]float64 {
 		dst[k] = v
 	}
 	return dst
-}
-
-// Search performs vector, graph, or hybrid retrieval based on options.
-// Defaults to pure vector retrieval when options are nil.
-func (k *KB) Search(ctx context.Context, kbID string, queryVec []float32, topK int, opts *SearchOptions) ([]ExpandedResult, error) {
-	options := normalizeSearchOptions(opts)
-
-	switch options.Mode {
-	case SearchModeGraph:
-		if err := k.ensureGraphModeAvailable(ctx, kbID); err != nil {
-			return nil, err
-		}
-		return k.SearchExpanded(ctx, kbID, queryVec, topK, options.Expansion)
-	case SearchModeAdaptive:
-		vectorResults, err := k.TopK(ctx, kbID, queryVec, topK)
-		if err != nil {
-			return nil, err
-		}
-		if len(vectorResults) == 0 {
-			return []ExpandedResult{}, nil
-		}
-		sim := 1.0 / (1.0 + vectorResults[0].Distance)
-		if sim >= options.AdaptiveMinSim {
-			return expandedFromVector(vectorResults), nil
-		}
-		return k.SearchExpanded(ctx, kbID, queryVec, topK, options.Expansion)
-	default:
-		vectorResults, err := k.TopK(ctx, kbID, queryVec, topK)
-		if err != nil {
-			return nil, err
-		}
-		return expandedFromVector(vectorResults), nil
-	}
-}
-
-func (k *KB) ensureGraphModeAvailable(ctx context.Context, kbID string) error {
-	doc, err := k.ManifestStore.Get(ctx, kbID)
-	if err != nil {
-		if errors.Is(err, ErrManifestNotFound) {
-			return ErrKBUninitialized
-		}
-		return fmt.Errorf("download shard manifest: %w", err)
-	}
-	manifest := &doc.Manifest
-	if len(manifest.Shards) == 0 {
-		return ErrGraphQueryUnavailable
-	}
-	for _, shard := range manifest.Shards {
-		if !shard.GraphAvailable {
-			return ErrGraphQueryUnavailable
-		}
-	}
-
-	return nil
 }
 
 func normalizeExpansionOptions(topK int, opts *ExpansionOptions) ExpansionOptions {

@@ -37,12 +37,12 @@ func TestCacheQueryBudget(t *testing.T) {
 	kb := harness.KB()
 	kb.SetMaxCacheBytes(1)
 
-	_, err = kb.TopK(ctx, "kb-vector-budget", queryVec, 2)
+	_, err = kb.Search(ctx, "kb-vector-budget", queryVec, &SearchOptions{TopK: 2})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCacheBudgetExceeded)
 
 	kb.SetMaxCacheBytes(5 * 1024 * 1024)
-	results, err := kb.TopK(ctx, "kb-vector-budget", queryVec, 2)
+	results, err := kb.Search(ctx, "kb-vector-budget", queryVec, &SearchOptions{TopK: 2})
 	require.NoError(t, err)
 	require.NotEmpty(t, results)
 }

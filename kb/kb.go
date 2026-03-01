@@ -48,14 +48,15 @@ type Chunker interface {
 // KB is the core knowledge base orchestrator for loading, querying,
 // mutating, uploading, and maintaining HNSW indices.
 type KB struct {
-	BlobStore     BlobStore
-	ManifestStore ManifestStore
-	CacheDir      string
-	MemoryLimit   string
-	ExtensionDir  string
-	OfflineExt    bool
-	Embedder      Embedder
-	GraphBuilder  *GraphBuilder
+	BlobStore      BlobStore
+	ManifestStore  ManifestStore
+	ArtifactFormat ArtifactFormat
+	CacheDir       string
+	MemoryLimit    string
+	ExtensionDir   string
+	OfflineExt     bool
+	Embedder       Embedder
+	GraphBuilder   *GraphBuilder
 
 	WriteLeaseManager WriteLeaseManager
 	WriteLeaseTTL     time.Duration
@@ -140,6 +141,12 @@ func WithManifestStore(store ManifestStore) KBOption {
 	}
 }
 
+func WithArtifactFormat(format ArtifactFormat) KBOption {
+	return func(kb *KB) {
+		kb.ArtifactFormat = format
+	}
+}
+
 // WithGraphBuilder sets the graph builder for RAG functionality.
 func WithGraphBuilder(builder *GraphBuilder) KBOption {
 	return func(kb *KB) {
@@ -215,6 +222,30 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 		kb.ManifestStore = &BlobManifestStore{Store: kb.BlobStore}
 	}
 
+	if kb.ArtifactFormat == nil {
+		format, err := NewDuckDBArtifactFormat(DuckDBArtifactDeps{
+			BlobStore:      kb.BlobStore,
+			ManifestStore:  kb.ManifestStore,
+			CacheDir:       kb.CacheDir,
+			MemoryLimit:    kb.MemoryLimit,
+			ExtensionDir:   kb.ExtensionDir,
+			OfflineExt:     kb.OfflineExt,
+			ShardingPolicy: kb.ShardingPolicy,
+			Embed:          kb.Embed,
+			GraphBuilder:   func() *GraphBuilder { return kb.GraphBuilder },
+			EvictCacheIfNeeded: func(ctx context.Context, protectKBID string) error {
+				return kb.evictCacheIfNeeded(ctx, protectKBID)
+			},
+			LockFor: kb.lockFor,
+			Metrics: kb,
+		})
+
+		if err != nil {
+			panic(fmt.Sprintf("kbcore: NewKB(): default DuckDB artifact format: %v", err))
+		}
+		kb.ArtifactFormat = format
+	}
+
 	return kb
 }
 
@@ -285,75 +316,11 @@ func (l *KB) lockFor(kbID string) *sync.Mutex {
 }
 
 func (l *KB) Load(ctx context.Context, kbID string) (*sql.DB, error) {
-	kbDir := filepath.Join(l.CacheDir, kbID)
-	dbPath := filepath.Join(kbDir, "vectors.duckdb")
-
-	lock := l.lockFor(kbID)
-	lock.Lock()
-	defer lock.Unlock()
-
-	if err := l.ensureMutableShardDBLocked(ctx, kbID, kbDir, dbPath, 0, false); err != nil {
-		return nil, err
-	}
-	if err := l.evictCacheIfNeeded(ctx, kbID); err != nil {
-		return nil, err
+	if l.ArtifactFormat == nil {
+		return nil, ErrArtifactFormatNotConfigured
 	}
 
-	return l.openConfiguredDB(ctx, dbPath)
-}
-
-func (l *KB) openConfiguredDB(ctx context.Context, dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("duckdb", dbPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if l.ExtensionDir != "" {
-		if _, err := db.Exec(fmt.Sprintf(`SET extension_directory = '%s'`, l.ExtensionDir)); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("set extension_directory: %w", err)
-		}
-	}
-
-	if l.OfflineExt {
-		// Disable autoinstall to prevent DuckDB from downloading extensions
-		// behind the scenes when LOAD can't find them locally.
-		if _, err := db.Exec(`SET autoinstall_known_extensions = false`); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("disable autoinstall: %w", err)
-		}
-	}
-
-	if _, err := db.Exec(`LOAD vss`); err != nil {
-		if l.OfflineExt {
-			db.Close()
-			return nil, fmt.Errorf("failed to load vss extension in offline mode (check extension_directory %q): %w", l.ExtensionDir, err)
-		}
-		if _, installErr := db.Exec(`INSTALL vss`); installErr != nil {
-			db.Close()
-			return nil, fmt.Errorf("failed to install vss: %w", installErr)
-		}
-		if _, loadErr := db.Exec(`LOAD vss`); loadErr != nil {
-			db.Close()
-			return nil, fmt.Errorf("failed to load vss after install: %w", loadErr)
-		}
-	}
-
-	if _, err := db.Exec(`SET hnsw_enable_experimental_persistence = true`); err != nil {
-		db.Close()
-		return nil, err
-	}
-
-	_, err = db.Exec(fmt.Sprintf(`
-		SET memory_limit = '%s';
-		PRAGMA threads = 1;
-	`, l.MemoryLimit))
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-
-	return db, nil
+	return l.ArtifactFormat.PrepareAndOpenDB(ctx, kbID)
 }
 
 // Embed returns an embedding for input using the configured Embedder.
