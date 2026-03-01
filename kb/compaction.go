@@ -39,8 +39,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
-	"path/filepath"
 	"sort"
 	"time"
 )
@@ -80,6 +78,9 @@ type CompactionPublishResult struct {
 // candidates. Returns an error on lease acquisition failure, blob I/O errors,
 // or manifest CAS conflict.
 func (l *KB) CompactShardsIfNeeded(ctx context.Context, kbID string) (result *CompactionPublishResult, err error) {
+	if l.ArtifactFormat == nil {
+		return nil, ErrArtifactFormatNotConfigured
+	}
 	if kbID == "" {
 		return nil, fmt.Errorf("kbID cannot be empty")
 	}
@@ -116,7 +117,7 @@ func (l *KB) CompactShardsIfNeeded(ctx context.Context, kbID string) (result *Co
 		return &CompactionPublishResult{Performed: false, ManifestVersionOld: manifestVersion}, nil
 	}
 
-	replacement, err := l.buildAndUploadCompactionReplacement(ctx, kbID, candidates)
+	replacement, err := l.ArtifactFormat.BuildAndUploadCompactionReplacement(ctx, kbID, candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -140,100 +141,6 @@ func (l *KB) CompactShardsIfNeeded(ctx context.Context, kbID string) (result *Co
 		ReplacementShards:  []SnapshotShardMetadata{replacement},
 		ManifestVersionOld: manifestVersion,
 		ManifestVersionNew: newVersion,
-	}, nil
-}
-
-// buildAndUploadCompactionReplacement downloads the candidate shards, merges
-// their docs tables into a single DuckDB file, rebuilds the HNSW index, and
-// uploads the result to BlobStore.
-//
-// The merge process:
-//  1. Create a temporary DuckDB file.
-//  2. For each candidate shard, ATTACH in read-only mode, INSERT INTO docs,
-//     then DETACH.
-//  3. CREATE INDEX ... USING HNSW (embedding) on the combined docs table.
-//  4. Checkpoint and close the DB.
-//  5. Compute SHA256 and file size, then upload via UploadIfMatch.
-//
-// Returns the metadata for the replacement shard on success.
-func (l *KB) buildAndUploadCompactionReplacement(ctx context.Context, kbID string, shards []SnapshotShardMetadata) (SnapshotShardMetadata, error) {
-	tmpDir, err := os.MkdirTemp("", "kbcore-compact-*")
-	if err != nil {
-		return SnapshotShardMetadata{}, err
-	}
-	defer os.RemoveAll(tmpDir)
-
-	combinedPath := filepath.Join(tmpDir, "replacement.duckdb")
-	db, err := l.openConfiguredDB(ctx, combinedPath)
-	if err != nil {
-		return SnapshotShardMetadata{}, err
-	}
-	defer db.Close()
-
-	vectorRows := int64(0)
-	graphAvailable := false
-	for i, shard := range shards {
-		partPath := filepath.Join(tmpDir, fmt.Sprintf("in-%05d.duckdb", i))
-		if err := l.BlobStore.Download(ctx, shard.Key, partPath); err != nil {
-			return SnapshotShardMetadata{}, err
-		}
-
-		alias := fmt.Sprintf("s%d", i)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("ATTACH '%s' AS %s (READ_ONLY)", quoteSQLString(partPath), alias)); err != nil {
-			return SnapshotShardMetadata{}, err
-		}
-		if i == 0 {
-			if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE TABLE docs AS SELECT * FROM %s.docs WHERE 1=0", alias)); err != nil {
-				_, _ = db.ExecContext(ctx, fmt.Sprintf("DETACH %s", alias))
-				return SnapshotShardMetadata{}, err
-			}
-		}
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("INSERT INTO docs SELECT * FROM %s.docs", alias)); err != nil {
-			_, _ = db.ExecContext(ctx, fmt.Sprintf("DETACH %s", alias))
-			return SnapshotShardMetadata{}, err
-		}
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("DETACH %s", alias)); err != nil {
-			return SnapshotShardMetadata{}, err
-		}
-
-		vectorRows += shard.VectorRows
-		graphAvailable = graphAvailable || shard.GraphAvailable
-	}
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`); err != nil {
-		return SnapshotShardMetadata{}, err
-	}
-	if err := checkpointAndCloseDB(ctx, db, "close compacted shard db"); err != nil {
-		return SnapshotShardMetadata{}, err
-	}
-
-	sha, err := fileContentSHA256(combinedPath)
-	if err != nil {
-		return SnapshotShardMetadata{}, err
-	}
-	info, err := os.Stat(combinedPath)
-	if err != nil {
-		return SnapshotShardMetadata{}, err
-	}
-
-	now := time.Now().UTC()
-	replacementID := fmt.Sprintf("compact-%d", now.UnixNano())
-	replacementKey := fmt.Sprintf("%s.duckdb.compacted/%s/part-00000", kbID, replacementID)
-	uploadInfo, err := l.BlobStore.UploadIfMatch(ctx, replacementKey, combinedPath, "")
-	if err != nil {
-		return SnapshotShardMetadata{}, err
-	}
-
-	return SnapshotShardMetadata{
-		ShardID:        replacementID,
-		Key:            replacementKey,
-		Version:        uploadInfo.Version,
-		SizeBytes:      info.Size(),
-		VectorRows:     vectorRows,
-		CreatedAt:      now,
-		SealedAt:       now,
-		TombstoneRatio: 0,
-		GraphAvailable: graphAvailable,
-		SHA256:         sha,
 	}, nil
 }
 
@@ -272,18 +179,13 @@ func buildCompactedManifest(kbID string, current *SnapshotShardManifest, replace
 	return SnapshotShardManifest{
 		SchemaVersion:  current.SchemaVersion,
 		Layout:         current.Layout,
+		FormatKind:     current.FormatKind,
+		FormatVersion:  current.FormatVersion,
 		KBID:           kbID,
 		CreatedAt:      time.Now().UTC(),
 		TotalSizeBytes: total,
 		Shards:         nextShards,
 	}
-}
-
-// selectCompactionCandidates returns shards eligible for compaction based on
-// the current sharding policy and manifest. It is a convenience wrapper around
-// selectCompactionCandidatesWithReason that discards the reason string.
-func (l *KB) selectCompactionCandidates(manifest *SnapshotShardManifest) []SnapshotShardMetadata {
-	return selectCompactionCandidates(l.ShardingPolicy, manifest)
 }
 
 // selectCompactionCandidatesWithReason evaluates the manifest and returns a

@@ -18,8 +18,11 @@ var (
 	ErrInvalidEmbeddingDimension  = errors.New("invalid embedding dimension")
 	ErrEmbeddingDimensionMismatch = errors.New("embedding dimension mismatch")
 
-	ErrManifestNotFound   = errors.New("manifest not found")
-	ErrWriteLeaseConflict = errors.New("write lease conflict")
+	ErrManifestNotFound            = errors.New("manifest not found")
+	ErrWriteLeaseConflict          = errors.New("write lease conflict")
+	ErrInvalidQueryRequest         = errors.New("invalid query request")
+	ErrArtifactFormatNotConfigured = errors.New("artifact format is not configured")
+	ErrUnsupportedOperation        = errors.New("operation not supported by this artifact format")
 )
 
 func wrapEmbeddingDimensionMismatch(err error, operation string) error {

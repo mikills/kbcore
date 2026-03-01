@@ -41,6 +41,13 @@ func setupGraphKBForTest(t *testing.T, kbID string, edges []graphEdge) (*KB, []f
 	return harness.KB(), queryVec
 }
 
+func requireDuckDBFormat(t *testing.T, loader *KB) *DuckDBArtifactFormat {
+	t.Helper()
+	format, ok := loader.ArtifactFormat.(*DuckDBArtifactFormat)
+	require.True(t, ok, "expected DuckDBArtifactFormat, got %T", loader.ArtifactFormat)
+	return format
+}
+
 // requireResultContainsID asserts that at least one result has the given ID.
 func requireResultContainsID(t *testing.T, results []ExpandedResult, id string) {
 	t.Helper()
@@ -314,12 +321,12 @@ func testKBTopKCases(t *testing.T) {
 			wantLen: 2,
 		},
 		{
-			name: "invalid_k_zero",
+			name: "k_zero_returns_error",
 			setup: func(t *testing.T) (*KB, string, []float32, int) {
 				loader, kbID := setupTestKB(t)
 				return loader, kbID, []float32{0.1, 0.2, 0.3}, 0
 			},
-			wantLen: 0,
+			wantErr: true,
 		},
 		{
 			name: "invalid_vector_empty",
@@ -350,7 +357,7 @@ func testKBTopKCases(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			loader, kbID, vec, k := tc.setup(t)
-			results, err := loader.TopK(ctx, kbID, vec, k)
+			results, err := loader.Search(ctx, kbID, vec, &SearchOptions{TopK: k})
 			if tc.wantErr {
 				require.Error(t, err)
 				return
@@ -400,7 +407,7 @@ func testKBSearchByDistanceCases(t *testing.T) {
 				loader, kbID := setupTestKB(t)
 				return loader, kbID, []float32{0.1, 0.2, 0.3}, 0
 			},
-			wantLen: 0,
+			wantErr: true,
 		},
 		{
 			name: "invalid_vector",
@@ -423,7 +430,7 @@ func testKBSearchByDistanceCases(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			loader, kbID, vec, threshold := tc.setup(t)
-			results, err := loader.SearchByDistance(ctx, kbID, vec, threshold)
+			results, err := loader.Search(ctx, kbID, vec, &SearchOptions{TopK: 1000, MaxDistance: &threshold})
 			if tc.wantErr {
 				require.Error(t, err)
 				return
@@ -449,7 +456,7 @@ func testKBResultOrdering(t *testing.T) {
 	loader, kbID := setupTestKB(t)
 
 	t.Run("TopK", func(t *testing.T) {
-		results, err := loader.TopK(ctx, kbID, []float32{0.1, 0.2, 0.3}, 2)
+		results, err := loader.Search(ctx, kbID, []float32{0.1, 0.2, 0.3}, &SearchOptions{TopK: 2})
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, len(results), 2, "need at least 2 results for ordering test")
 
@@ -462,7 +469,8 @@ func testKBResultOrdering(t *testing.T) {
 	})
 
 	t.Run("SearchByDistance", func(t *testing.T) {
-		results, err := loader.SearchByDistance(ctx, kbID, []float32{0.1, 0.2, 0.3}, 10.0)
+		maxDist := 10.0
+		results, err := loader.Search(ctx, kbID, []float32{0.1, 0.2, 0.3}, &SearchOptions{TopK: 1000, MaxDistance: &maxDist})
 		require.NoError(t, err)
 
 		if len(results) < 2 {
@@ -509,7 +517,7 @@ func testKBSearchShardPath(t *testing.T) {
 				uploadTestShardManifest(t, harness.KB(), kbID, tc.shardCount)
 			}
 
-			gotPath, err := harness.KB().selectVectorQueryPath(ctx, kbID)
+			gotPath, err := requireDuckDBFormat(t, harness.KB()).selectVectorQueryPath(ctx, kbID)
 			if tc.wantErr != nil {
 				require.Error(t, err)
 				assert.ErrorIs(t, err, tc.wantErr)
@@ -596,11 +604,11 @@ func testKBTopKShardExecutionModes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			loader, kbID, queryVec, wantPath, baseline := tc.setup(t)
 
-			path, err := loader.selectVectorQueryPath(ctx, kbID)
+			path, err := requireDuckDBFormat(t, loader).selectVectorQueryPath(ctx, kbID)
 			require.NoError(t, err)
 			assert.Equal(t, wantPath, path)
 
-			results, err := loader.TopK(ctx, kbID, queryVec, 5)
+			results, err := loader.Search(ctx, kbID, queryVec, &SearchOptions{TopK: 5})
 			require.NoError(t, err)
 			assert.NotEmpty(t, results)
 
@@ -635,7 +643,15 @@ func testKBShardExecutionFallback(t *testing.T) {
 		{
 			name: "top_k",
 			run: func(loader *KB, runCtx context.Context, kbID string, queryVec []float32) ([]QueryResult, error) {
-				return loader.TopK(runCtx, kbID, queryVec, 3)
+				expanded, err := loader.Search(runCtx, kbID, queryVec, &SearchOptions{TopK: 3})
+				if err != nil {
+					return nil, err
+				}
+				out := make([]QueryResult, len(expanded))
+				for i, r := range expanded {
+					out[i] = QueryResult{ID: r.ID, Content: r.Content, Distance: r.Distance}
+				}
+				return out, nil
 			},
 		},
 	}
@@ -782,7 +798,7 @@ func testKBTopKShardFanoutPlan(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			loader := &KB{ShardingPolicy: tc.policy}
+			loader := NewKB(&LocalBlobStore{Root: t.TempDir()}, t.TempDir(), WithShardingPolicy(tc.policy))
 			manifest := &SnapshotShardManifest{}
 			if len(tc.shards) > 0 {
 				manifest.Shards = append(manifest.Shards, tc.shards...)
@@ -796,7 +812,7 @@ func testKBTopKShardFanoutPlan(t *testing.T) {
 				}
 			}
 
-			plan := loader.planShardFanout(normalizeShardingPolicy(tc.policy), manifest, tc.queryVec)
+			plan := requireDuckDBFormat(t, loader).planShardFanout(normalizeShardingPolicy(tc.policy), manifest, tc.queryVec)
 			if tc.assertExact {
 				assert.Equal(t, tc.wantFanout, plan.Fanout)
 				assert.Equal(t, tc.wantParallelism, plan.Parallelism)
@@ -880,13 +896,13 @@ func testKBSearchExpandedBasic(t *testing.T) {
 		{src: "ent-a", dst: "ent-c", weight: 1.0, relType: "related"},
 	})
 
-	results, err := loader.SearchExpanded(ctx, kbID, queryVec, 2, &ExpansionOptions{
+	results, err := loader.Search(ctx, kbID, queryVec, &SearchOptions{Mode: SearchModeGraph, TopK: 2, Expansion: &ExpansionOptions{
 		SeedK:               1,
 		Hops:                1,
 		MaxNeighborsPerNode: 25,
 		Alpha:               0.7,
 		Decay:               0.7,
-	})
+	}})
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 	requireResultContainsID(t, results, "c")
@@ -932,7 +948,7 @@ func testKBGraphModeUnavailableScenarios(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			loader, kbID, queryVec := tc.setup(t)
-			_, err := loader.Search(ctx, kbID, queryVec, 2, &SearchOptions{Mode: SearchModeGraph})
+			_, err := loader.Search(ctx, kbID, queryVec, &SearchOptions{Mode: SearchModeGraph, TopK: 2})
 			require.Error(t, err)
 			require.ErrorIs(t, err, ErrGraphQueryUnavailable)
 		})
@@ -962,7 +978,7 @@ func testKBSearchExpandedInvalidArgs(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := loader.SearchExpanded(ctx, kbID, tc.vec, tc.k, nil)
+			_, err := loader.Search(ctx, kbID, tc.vec, &SearchOptions{Mode: SearchModeGraph, TopK: tc.k})
 			require.Error(t, err)
 		})
 	}
@@ -975,13 +991,13 @@ func testKBSearchExpandedInvalidOptionsDefaulted(t *testing.T) {
 		{src: "a", dst: "c", weight: 1.0, relType: "related"},
 	})
 
-	_, err := loader.SearchExpanded(ctx, kbID, queryVec, 2, &ExpansionOptions{
+	_, err := loader.Search(ctx, kbID, queryVec, &SearchOptions{Mode: SearchModeGraph, TopK: 2, Expansion: &ExpansionOptions{
 		SeedK:               -5,
 		Hops:                -1,
 		MaxNeighborsPerNode: -10,
 		Alpha:               2.5,
 		Decay:               -0.1,
-	})
+	}})
 	require.NoError(t, err)
 }
 
@@ -989,10 +1005,10 @@ func testKBSearchDefaultVector(t *testing.T) {
 	ctx := context.Background()
 	loader, kbID := setupTestKB(t)
 
-	vectorResults, err := loader.TopK(ctx, kbID, []float32{0.1, 0.2, 0.3}, 2)
+	vectorResults, err := loader.Search(ctx, kbID, []float32{0.1, 0.2, 0.3}, &SearchOptions{TopK: 2})
 	require.NoError(t, err)
 
-	searchResults, err := loader.Search(ctx, kbID, []float32{0.1, 0.2, 0.3}, 2, nil)
+	searchResults, err := loader.Search(ctx, kbID, []float32{0.1, 0.2, 0.3}, &SearchOptions{TopK: 2})
 	require.NoError(t, err)
 
 	require.Len(t, searchResults, len(vectorResults))
@@ -1008,8 +1024,9 @@ func testKBSearchGraphMode(t *testing.T) {
 		{src: "ent-a", dst: "ent-c", weight: 1.0, relType: "related"},
 	})
 
-	results, err := loader.Search(ctx, kbID, queryVec, 2, &SearchOptions{
+	results, err := loader.Search(ctx, kbID, queryVec, &SearchOptions{
 		Mode: SearchModeGraph,
+		TopK: 2,
 		Expansion: &ExpansionOptions{
 			SeedK:               1,
 			Hops:                1,
@@ -1033,8 +1050,9 @@ func testKBSearchAdaptive(t *testing.T) {
 		queryVec[i] += 0.1
 	}
 
-	results, err := loader.Search(ctx, kbID, queryVec, 2, &SearchOptions{
+	results, err := loader.Search(ctx, kbID, queryVec, &SearchOptions{
 		Mode:           SearchModeAdaptive,
+		TopK:           2,
 		AdaptiveMinSim: 0.95,
 		Expansion: &ExpansionOptions{
 			SeedK:               1,
@@ -1058,13 +1076,13 @@ func testKBSearchExpandedBidirectional(t *testing.T) {
 		{src: "ent-c", dst: "ent-a", weight: 1.0, relType: "related"},
 	})
 
-	results, err := loader.SearchExpanded(ctx, kbID, queryVec, 3, &ExpansionOptions{
+	results, err := loader.Search(ctx, kbID, queryVec, &SearchOptions{Mode: SearchModeGraph, TopK: 3, Expansion: &ExpansionOptions{
 		SeedK:               1,
 		Hops:                1,
 		MaxNeighborsPerNode: 25,
 		Alpha:               0.7,
 		Decay:               0.7,
-	})
+	}})
 	require.NoError(t, err)
 	requireResultContainsID(t, results, "c")
 }

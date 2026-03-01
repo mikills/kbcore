@@ -59,8 +59,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -89,6 +87,8 @@ type SnapshotShardMetadata struct {
 type SnapshotShardManifest struct {
 	SchemaVersion  int                     `json:"schema_version"`
 	Layout         string                  `json:"layout,omitempty"`
+	FormatKind     string                  `json:"format_kind,omitempty"`
+	FormatVersion  int                     `json:"format_version,omitempty"`
 	KBID           string                  `json:"kb_id"`
 	CreatedAt      time.Time               `json:"created_at"`
 	TotalSizeBytes int64                   `json:"total_size_bytes"`
@@ -120,24 +120,28 @@ func (l *KB) UploadSnapshotShardedIfMatch(ctx context.Context, kbID, localDBPath
 		_ = leaseManager.Release(context.Background(), lease)
 	}()
 
-	dbHash, err := fileContentSHA256(localDBPath)
+	if l.ArtifactFormat == nil {
+		return nil, ErrArtifactFormatNotConfigured
+	}
+	artifacts, err := l.ArtifactFormat.BuildArtifacts(ctx, kbID, localDBPath, partSize)
 	if err != nil {
 		return nil, err
 	}
-	prefix := fmt.Sprintf("%s.duckdb.shards/%s", kbID, dbHash[:16])
 
-	parts, totalSize, err := l.uploadQueryableSnapshotShards(ctx, prefix, localDBPath, partSize)
-	if err != nil {
-		return nil, err
+	totalSize := int64(0)
+	for _, a := range artifacts {
+		totalSize += a.SizeBytes
 	}
 
 	manifest := SnapshotShardManifest{
 		SchemaVersion:  1,
 		Layout:         shardManifestLayoutDuckDBs,
+		FormatKind:     l.ArtifactFormat.Kind(),
+		FormatVersion:  l.ArtifactFormat.Version(),
 		KBID:           kbID,
 		CreatedAt:      time.Now().UTC(),
 		TotalSizeBytes: totalSize,
-		Shards:         parts,
+		Shards:         artifacts,
 	}
 
 	newVersion, err := l.ManifestStore.UpsertIfMatch(ctx, kbID, manifest, expectedManifestVersion)
@@ -147,7 +151,7 @@ func (l *KB) UploadSnapshotShardedIfMatch(ctx context.Context, kbID, localDBPath
 		}
 		return nil, err
 	}
-	l.recordShardCount(kbID, len(parts))
+	l.recordShardCount(kbID, len(artifacts))
 	return &BlobObjectInfo{
 		Key:     shardManifestKey(kbID),
 		Version: newVersion,
@@ -157,89 +161,10 @@ func (l *KB) UploadSnapshotShardedIfMatch(ctx context.Context, kbID, localDBPath
 // DownloadSnapshotFromShards downloads a sharded snapshot manifest and
 // reconstructs a single DB file at dest.
 func (l *KB) DownloadSnapshotFromShards(ctx context.Context, kbID, dest string) (*SnapshotShardManifest, error) {
-	if kbID == "" {
-		return nil, fmt.Errorf("kbID cannot be empty")
+	if l.ArtifactFormat == nil {
+		return nil, ErrArtifactFormatNotConfigured
 	}
-	if dest == "" {
-		return nil, fmt.Errorf("dest cannot be empty")
-	}
-
-	doc, err := l.ManifestStore.Get(ctx, kbID)
-	if err != nil {
-		return nil, err
-	}
-	manifest := doc.Manifest
-	l.recordShardCount(kbID, len(manifest.Shards))
-	if len(manifest.Shards) == 0 {
-		return nil, fmt.Errorf("manifest has no shards")
-	}
-
-	tmpDir, err := os.MkdirTemp("", "kbcore-shard-download-*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// CreateTemp in the same directory as dest keeps os.Rename atomic (same
-	// filesystem). Remove the 0-byte placeholder immediately — DuckDB requires
-	// creating its own file structure and rejects a pre-existing empty file.
-	tmpFile, err := os.CreateTemp(filepath.Dir(dest), "kbcore-reconstruct-*.duckdb")
-	if err != nil {
-		return nil, err
-	}
-	tmpDest := tmpFile.Name()
-	tmpFile.Close()
-	_ = os.Remove(tmpDest)
-	defer os.Remove(tmpDest)
-
-	db, err := l.openConfiguredDB(ctx, tmpDest)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-
-	for i, shard := range manifest.Shards {
-		partPath := filepath.Join(tmpDir, fmt.Sprintf("part-%05d.duckdb", i))
-		if err := l.BlobStore.Download(ctx, shard.Key, partPath); err != nil {
-			return nil, err
-		}
-		// Check size first (cheap stat) before computing SHA256 (full file read).
-		info, err := os.Stat(partPath)
-		if err != nil {
-			return nil, err
-		}
-		if shard.SizeBytes > 0 && info.Size() != shard.SizeBytes {
-			return nil, fmt.Errorf("shard %s size mismatch", shard.ShardID)
-		}
-		if shard.SHA256 != "" {
-			sha, err := fileContentSHA256(partPath)
-			if err != nil {
-				return nil, err
-			}
-			if sha != shard.SHA256 {
-				return nil, fmt.Errorf("shard %s checksum mismatch", shard.ShardID)
-			}
-		}
-
-		alias := fmt.Sprintf("s%d", i)
-		if err := mergeShardIntoDB(ctx, db, alias, partPath, i == 0); err != nil {
-			return nil, err
-		}
-	}
-	if err := ensureDocTombstonesTable(ctx, db); err != nil {
-		return nil, err
-	}
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`); err != nil {
-		return nil, err
-	}
-	if err := checkpointAndCloseDB(ctx, db, "close reconstructed shard snapshot"); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(tmpDest, dest); err != nil {
-		return nil, err
-	}
-
-	return &manifest, nil
+	return l.ArtifactFormat.DownloadSnapshotFromShards(ctx, kbID, dest)
 }
 
 // mergeShardIntoDB ATTACHes a shard file under alias, copies docs and graph
@@ -284,177 +209,6 @@ func mergeShardIntoDB(ctx context.Context, db *sql.DB, alias, partPath string, i
 		}
 	}
 	return nil
-}
-
-func (l *KB) uploadQueryableSnapshotShards(ctx context.Context, prefix, localDBPath string, partSize int64) ([]SnapshotShardMetadata, int64, error) {
-	sourceDB, err := l.openConfiguredDB(ctx, localDBPath)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer sourceDB.Close()
-
-	hasTombstones, err := tableExists(ctx, sourceDB, "doc_tombstones")
-	if err != nil {
-		return nil, 0, err
-	}
-	activeRows, err := countActiveDocs(ctx, sourceDB, hasTombstones)
-	if err != nil {
-		return nil, 0, err
-	}
-	if activeRows <= 0 {
-		return nil, 0, fmt.Errorf("cannot shard snapshot with zero active docs")
-	}
-
-	sourceInfo, err := os.Stat(localDBPath)
-	if err != nil {
-		return nil, 0, err
-	}
-	bytesPerRow := sourceInfo.Size() / activeRows
-	if bytesPerRow <= 0 {
-		bytesPerRow = 1
-	}
-	rowsPerShard := int(partSize / bytesPerRow)
-	if rowsPerShard <= 0 {
-		rowsPerShard = 1
-	}
-
-	tmpDir, err := os.MkdirTemp("", "kbcore-queryable-shards-*")
-	if err != nil {
-		return nil, 0, err
-	}
-	defer os.RemoveAll(tmpDir)
-
-	estimatedShards := int((activeRows + int64(rowsPerShard) - 1) / int64(rowsPerShard))
-	parts := make([]SnapshotShardMetadata, 0, estimatedShards)
-	totalSize := int64(0)
-	for shardIndex, offset := 0, 0; int64(offset) < activeRows; shardIndex, offset = shardIndex+1, offset+rowsPerShard {
-		shardPath := filepath.Join(tmpDir, fmt.Sprintf("shard-%05d.duckdb", shardIndex))
-		vectorRows, graphAvailable, err := l.buildShardDBFromSourceRange(ctx, localDBPath, hasTombstones, shardPath, rowsPerShard, offset)
-		if err != nil {
-			return nil, 0, err
-		}
-		if vectorRows <= 0 {
-			continue
-		}
-
-		sha, err := fileContentSHA256(shardPath)
-		if err != nil {
-			return nil, 0, err
-		}
-		info, err := os.Stat(shardPath)
-		if err != nil {
-			return nil, 0, err
-		}
-		partKey := fmt.Sprintf("%s/shard-%05d.duckdb", prefix, shardIndex)
-		uploadInfo, err := l.BlobStore.UploadIfMatch(ctx, partKey, shardPath, "")
-		if err != nil {
-			return nil, 0, err
-		}
-
-		now := time.Now().UTC()
-		parts = append(parts, SnapshotShardMetadata{
-			ShardID:        fmt.Sprintf("shard-%05d", shardIndex),
-			Key:            partKey,
-			Version:        uploadInfo.Version,
-			SizeBytes:      info.Size(),
-			VectorRows:     vectorRows,
-			CreatedAt:      now,
-			SealedAt:       now,
-			TombstoneRatio: 0,
-			GraphAvailable: graphAvailable,
-			SHA256:         sha,
-		})
-		totalSize += info.Size()
-	}
-
-	if len(parts) == 0 {
-		return nil, 0, fmt.Errorf("failed to build shard files")
-	}
-	return parts, totalSize, nil
-}
-
-func (l *KB) buildShardDBFromSourceRange(ctx context.Context, sourceDBPath string, hasTombstones bool, shardPath string, limit, offset int) (int64, bool, error) {
-	if limit <= 0 {
-		return 0, false, fmt.Errorf("limit must be > 0")
-	}
-	if offset < 0 {
-		offset = 0
-	}
-
-	shardDB, err := l.openConfiguredDB(ctx, shardPath)
-	if err != nil {
-		return 0, false, err
-	}
-	defer shardDB.Close()
-
-	if _, err := shardDB.ExecContext(ctx, fmt.Sprintf("ATTACH '%s' AS src (READ_ONLY)", quoteSQLString(sourceDBPath))); err != nil {
-		return 0, false, err
-	}
-	defer func() {
-		_, _ = shardDB.ExecContext(context.Background(), "DETACH src")
-	}()
-
-	where := ""
-	if hasTombstones {
-		where = "WHERE NOT EXISTS (SELECT 1 FROM src.doc_tombstones t WHERE t.doc_id = d.id)"
-	}
-
-	createSQL := fmt.Sprintf(`
-		CREATE TABLE docs AS
-		SELECT d.id, d.content, d.embedding
-		FROM src.docs d
-		%s
-		ORDER BY d.id
-		LIMIT %d OFFSET %d
-	`, where, limit, offset)
-	if _, err := shardDB.ExecContext(ctx, createSQL); err != nil {
-		return 0, false, err
-	}
-	if _, err := shardDB.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`); err != nil {
-		return 0, false, err
-	}
-
-	if err := EnsureGraphTables(ctx, shardDB); err != nil {
-		return 0, false, err
-	}
-	if ok, err := sourceGraphTablesReady(ctx, shardDB); err != nil {
-		return 0, false, err
-	} else if ok {
-		if _, err := shardDB.ExecContext(ctx, `
-			INSERT INTO doc_entities (doc_id, entity_id, weight, chunk_id)
-			SELECT de.doc_id, de.entity_id, de.weight, de.chunk_id
-			FROM src.doc_entities de
-			JOIN docs d ON d.id = de.doc_id
-		`); err != nil {
-			return 0, false, err
-		}
-		if _, err := shardDB.ExecContext(ctx, `
-			INSERT OR IGNORE INTO entities (id, name)
-			SELECT DISTINCT e.id, e.name
-			FROM src.entities e
-			JOIN doc_entities de ON de.entity_id = e.id
-		`); err != nil {
-			return 0, false, err
-		}
-		if _, err := shardDB.ExecContext(ctx, `
-			INSERT INTO edges (src, dst, weight, rel_type, chunk_id)
-			SELECT DISTINCT e.src, e.dst, e.weight, e.rel_type, e.chunk_id
-			FROM src.edges e
-			JOIN doc_entities de ON de.chunk_id = e.chunk_id
-		`); err != nil {
-			return 0, false, err
-		}
-	}
-
-	var rowCount int64
-	if err := shardDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs`).Scan(&rowCount); err != nil {
-		return 0, false, err
-	}
-	graphAvailable := hasGraphQueryData(ctx, shardDB)
-	if err := checkpointAndCloseDB(ctx, shardDB, "close shard db"); err != nil {
-		return 0, false, err
-	}
-	return rowCount, graphAvailable, nil
 }
 
 func countActiveDocs(ctx context.Context, db *sql.DB, hasTombstones bool) (int64, error) {

@@ -45,7 +45,7 @@ type TestFixture struct {
 //	    Setup()
 //	defer harness.Cleanup()
 //
-//	results, err := harness.KB().TopK(ctx, "mykb", queryVec, 10)
+//	results, err := harness.KB().Search(ctx, "mykb", queryVec, &SearchOptions{TopK: 10})
 type TestHarness struct {
 	t    *testing.T
 	kbID string
@@ -265,6 +265,26 @@ func copyHarnessFixture(src, dst string) error {
 	}
 
 	return dstFile.Sync()
+}
+
+// testOpenConfiguredDB opens a DuckDB file with the standard configuration
+// (vss extension, HNSW persistence, memory limit, threads) using the KB's
+// artifact format. Tests should use this instead of the removed KB.openConfiguredDB.
+// When the KB has no ArtifactFormat, a temporary DuckDBArtifactFormat is
+// created with the KB's config values for test convenience.
+func testOpenConfiguredDB(kb *KB, ctx context.Context, dbPath string) (*sql.DB, error) {
+	if f, ok := kb.ArtifactFormat.(*DuckDBArtifactFormat); ok {
+		return f.openConfiguredDB(ctx, dbPath)
+	}
+	// Fallback for tests that construct a bare KB{} without NewKB.
+	f := &DuckDBArtifactFormat{
+		deps: DuckDBArtifactDeps{
+			MemoryLimit:  kb.MemoryLimit,
+			ExtensionDir: kb.ExtensionDir,
+			OfflineExt:   kb.OfflineExt,
+		},
+	}
+	return f.openConfiguredDB(ctx, dbPath)
 }
 
 // testLoadVSS loads the vss extension into a raw *sql.DB for test fixture

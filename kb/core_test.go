@@ -282,7 +282,7 @@ func TestOfflineExtensionLoad(t *testing.T) {
 				OfflineExt:   tt.offline,
 			}
 
-			db, err := k.openConfiguredDB(context.Background(), dbPath)
+			db, err := testOpenConfiguredDB(k, context.Background(), dbPath)
 			if tt.wantErr {
 				require.Error(t, err)
 				require.Contains(t, err.Error(), tt.errContains)

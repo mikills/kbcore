@@ -150,7 +150,7 @@ func testKBUpsertAndSoftDelete(t *testing.T) {
 		require.FailNowf(t, "test failed", "embed query: %v", err)
 	}
 
-	results, err := kb.TopK(ctx, kbID, queryVec, 1)
+	results, err := kb.Search(ctx, kbID, queryVec, &SearchOptions{TopK: 1})
 	if err != nil {
 		require.FailNowf(t, "test failed", "topk after upsert: %v", err)
 	}
@@ -162,7 +162,7 @@ func testKBUpsertAndSoftDelete(t *testing.T) {
 		require.FailNowf(t, "test failed", "soft delete docs: %v", err)
 	}
 
-	results, err = kb.TopK(ctx, kbID, queryVec, 3)
+	results, err = kb.Search(ctx, kbID, queryVec, &SearchOptions{TopK: 3})
 	if err != nil {
 		require.FailNowf(t, "test failed", "topk after soft delete: %v", err)
 	}
@@ -239,7 +239,7 @@ func testKBMutateUploadVisibleFreshLoader(t *testing.T) {
 			verify: func(t *testing.T, ctx context.Context, kbReader *KB, kbID string) {
 				queryVec, err := kbReader.Embed(ctx, "brand new doc")
 				require.NoError(t, err)
-				results, err := kbReader.TopK(ctx, kbID, queryVec, 1)
+				results, err := kbReader.Search(ctx, kbID, queryVec, &SearchOptions{TopK: 1})
 				require.NoError(t, err)
 				require.Len(t, results, 1)
 				assert.Equal(t, "c", results[0].ID)
@@ -255,7 +255,7 @@ func testKBMutateUploadVisibleFreshLoader(t *testing.T) {
 			verify: func(t *testing.T, ctx context.Context, kbReader *KB, kbID string) {
 				queryVec, err := kbReader.Embed(ctx, "goodbye")
 				require.NoError(t, err)
-				results, err := kbReader.TopK(ctx, kbID, queryVec, 2)
+				results, err := kbReader.Search(ctx, kbID, queryVec, &SearchOptions{TopK: 2})
 				require.NoError(t, err)
 				for _, r := range results {
 					assert.NotEqual(t, "b", r.ID)
@@ -298,7 +298,7 @@ func testKBUpsertUploadBootstrap(t *testing.T) {
 	queryVec, err := readerHarness.KB().Embed(ctx, "brand new doc")
 	require.NoError(t, err)
 
-	results, err := readerHarness.KB().TopK(ctx, kbID, queryVec, 1)
+	results, err := readerHarness.KB().Search(ctx, kbID, queryVec, &SearchOptions{TopK: 1})
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, "c", results[0].ID)
@@ -381,7 +381,7 @@ func testKBMutateUploadRetry(t *testing.T) {
 			verify: func(t *testing.T, ctx context.Context, kbReader *KB, kbID string) {
 				queryVec, err := kbReader.Embed(ctx, "brand new doc")
 				require.NoError(t, err)
-				results, err := kbReader.TopK(ctx, kbID, queryVec, 1)
+				results, err := kbReader.Search(ctx, kbID, queryVec, &SearchOptions{TopK: 1})
 				require.NoError(t, err)
 				require.Len(t, results, 1)
 				assert.Equal(t, "c", results[0].ID)
@@ -398,7 +398,7 @@ func testKBMutateUploadRetry(t *testing.T) {
 			verify: func(t *testing.T, ctx context.Context, kbReader *KB, kbID string) {
 				queryVec, err := kbReader.Embed(ctx, "goodbye")
 				require.NoError(t, err)
-				results, err := kbReader.TopK(ctx, kbID, queryVec, 2)
+				results, err := kbReader.Search(ctx, kbID, queryVec, &SearchOptions{TopK: 2})
 				require.NoError(t, err)
 				for _, r := range results {
 					assert.NotEqual(t, "b", r.ID)
@@ -450,9 +450,9 @@ func testKBIngestSharding(t *testing.T) {
 		kbID              string
 		policy            ShardingPolicy
 		docs              []Document
-			wantManifest      bool
-			wantMinShardCount int
-		}{
+		wantManifest      bool
+		wantMinShardCount int
+	}{
 		{
 			name: "below_threshold",
 			kbID: "kb-ingest-sharding-below-threshold",

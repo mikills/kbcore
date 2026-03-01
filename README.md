@@ -69,7 +69,7 @@ sequenceDiagram
     participant B as Blob Store
 
     C->>A: POST /rag/query
-    A->>K: TopK/SearchByDistance
+    A->>K: Search
     K->>B: download manifest
     alt missing manifest
         K-->>A: ErrKBUninitialized

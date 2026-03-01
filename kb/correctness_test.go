@@ -71,7 +71,7 @@ func testE2EConcurrentReadsFinanceFixture(t *testing.T) {
 		rh := NewTestHarness(t, fmt.Sprintf("reader-%d", i)).WithBlobRoot(sharedBlobRoot).WithEmbedder(embedder).WithMemLimit("256MB").Setup()
 		t.Cleanup(rh.Cleanup)
 		readerHarnesses = append(readerHarnesses, rh)
-		_, err := rh.KB().TopK(ctx, financeTenant, queryVecs[0], 1)
+		_, err := rh.KB().Search(ctx, financeTenant, queryVecs[0], &SearchOptions{TopK: 1})
 		require.NoError(t, err)
 	}
 
@@ -87,7 +87,7 @@ func testE2EConcurrentReadsFinanceFixture(t *testing.T) {
 			defer readerWG.Done()
 			for i := 0; i < iterationsPerReader; i++ {
 				qIdx := (worker + i) % len(queryVecs)
-				results, err := readerKB.TopK(ctx, financeTenant, queryVecs[qIdx], 5)
+				results, err := readerKB.Search(ctx, financeTenant, queryVecs[qIdx], &SearchOptions{TopK: 5})
 				if err != nil {
 					readerErrCh <- err
 					return
@@ -159,7 +159,7 @@ func testE2EConcurrentWritesRecipeFixture(t *testing.T) {
 		queryVecs = append(queryVecs, v)
 	}
 	for _, rh := range readerHarnesses {
-		_, err := rh.KB().TopK(ctx, tenantID, queryVecs[0], 1)
+		_, err := rh.KB().Search(ctx, tenantID, queryVecs[0], &SearchOptions{TopK: 1})
 		require.NoError(t, err)
 	}
 
@@ -184,7 +184,7 @@ func testE2EConcurrentWritesRecipeFixture(t *testing.T) {
 				}
 				vec := queryVecs[(worker+iter)%len(queryVecs)]
 				iter++
-				res, err := readerKB.TopK(ctx, tenantID, vec, 5)
+				res, err := readerKB.Search(ctx, tenantID, vec, &SearchOptions{TopK: 5})
 				if err != nil {
 					readerErrCh <- err
 					return
@@ -263,12 +263,12 @@ func testMultiTenantCacheBudgetEnforcement(t *testing.T) {
 	require.NoError(t, err)
 
 	kb.SetMaxCacheBytes(1)
-	_, err = kb.TopK(ctx, tenantID, q, 2)
+	_, err = kb.Search(ctx, tenantID, q, &SearchOptions{TopK: 2})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCacheBudgetExceeded)
 
 	kb.SetMaxCacheBytes(16 * 1024 * 1024)
-	res, err := kb.TopK(ctx, tenantID, q, 2)
+	res, err := kb.Search(ctx, tenantID, q, &SearchOptions{TopK: 2})
 	require.NoError(t, err)
 	require.NotEmpty(t, res)
 }
@@ -288,7 +288,7 @@ func testMultiTenantCacheEvictionBehavior(t *testing.T) {
 		}}))
 		q, err := kb.Embed(ctx, "payload for "+tenantID)
 		require.NoError(t, err)
-		_, err = kb.TopK(ctx, tenantID, q, 1)
+		_, err = kb.Search(ctx, tenantID, q, &SearchOptions{TopK: 1})
 		require.NoError(t, err)
 	}
 
@@ -309,7 +309,7 @@ func testMultiTenantCacheEvictionBehavior(t *testing.T) {
 	for _, tenantID := range tenantIDs {
 		q, err := kb.Embed(ctx, "payload for "+tenantID)
 		require.NoError(t, err)
-		res, err := kb.TopK(ctx, tenantID, q, 1)
+		res, err := kb.Search(ctx, tenantID, q, &SearchOptions{TopK: 1})
 		require.NoError(t, err)
 		require.NotEmpty(t, res)
 		assert.Equal(t, tenantID+"-1", res[0].ID)
@@ -354,7 +354,7 @@ func testMultiTenantQueryRecallAgainstBruteForce(t *testing.T) {
 		qVec, err := kb.Embed(ctx, queryText)
 		require.NoError(t, err)
 
-		actual, err := kb.TopK(ctx, tenantID, qVec, k)
+		actual, err := kb.Search(ctx, tenantID, qVec, &SearchOptions{TopK: k})
 		require.NoError(t, err)
 		require.NotEmpty(t, actual)
 
@@ -393,7 +393,7 @@ func testMultiTenantWriteVisibilityAcrossReaders(t *testing.T) {
 		}}))
 		seedVec, err := readerKB.Embed(ctx, "seed "+tenantID)
 		require.NoError(t, err)
-		_, err = readerKB.TopK(ctx, tenantID, seedVec, 1)
+		_, err = readerKB.Search(ctx, tenantID, seedVec, &SearchOptions{TopK: 1})
 		require.NoError(t, err)
 	}
 
@@ -499,7 +499,7 @@ func queryContainsDocID(ctx context.Context, kb *KB, kbID, text, docID string, k
 	if err != nil {
 		return false, err
 	}
-	results, err := kb.TopK(ctx, kbID, qVec, k)
+	results, err := kb.Search(ctx, kbID, qVec, &SearchOptions{TopK: k})
 	if err != nil {
 		return false, err
 	}

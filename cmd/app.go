@@ -194,11 +194,11 @@ func (a *App) registerRoutes() {
 			}
 			return a.kb.Embed(ctx, input)
 		},
-		Search: func(ctx context.Context, kbID string, queryVec []float32, k int, opts *kb.SearchOptions) ([]kb.ExpandedResult, error) {
+		Search: func(ctx context.Context, kbID string, queryVec []float32, opts *kb.SearchOptions) ([]kb.ExpandedResult, error) {
 			if a.kb == nil {
 				return nil, fmt.Errorf("kb unavailable")
 			}
-			return a.kb.Search(ctx, kbID, queryVec, k, opts)
+			return a.kb.Search(ctx, kbID, queryVec, opts)
 		},
 		Logger:     a.logger,
 		AppMetrics: a.metrics,

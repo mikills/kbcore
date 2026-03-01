@@ -23,7 +23,7 @@ type Dependencies struct {
 	IsBudgetExceeded    func(error) bool
 	UpsertDocsAndUpload func(context.Context, string, []kb.Document, kb.UpsertDocsOptions) error
 	Embed               func(context.Context, string) ([]float32, error)
-	Search              func(context.Context, string, []float32, int, *kb.SearchOptions) ([]kb.ExpandedResult, error)
+	Search              func(context.Context, string, []float32, *kb.SearchOptions) ([]kb.ExpandedResult, error)
 	Logger              *slog.Logger
 }
 
@@ -192,7 +192,7 @@ func Register(e *echo.Echo, deps Dependencies) {
 			return c.JSON(http.StatusBadRequest, map[string]any{"error": "query is required"})
 		}
 		if req.K <= 0 {
-			req.K = 5
+			return c.JSON(http.StatusBadRequest, map[string]any{"error": "k must be > 0"})
 		}
 		mode, modeName, modeErr := parseSearchMode(req.SearchMode)
 		if modeErr != nil {
@@ -211,8 +211,8 @@ func Register(e *echo.Echo, deps Dependencies) {
 			return WriteError(c, err, deps.IsBudgetExceeded)
 		}
 
-		searchOpts := &kb.SearchOptions{Mode: mode}
-		results, err := deps.Search(c.Request().Context(), req.KBID, vec, req.K, searchOpts)
+		searchOpts := &kb.SearchOptions{Mode: mode, TopK: req.K}
+		results, err := deps.Search(c.Request().Context(), req.KBID, vec, searchOpts)
 		if err != nil {
 			metrics.RecordQuery(req.KBID, time.Since(start).Milliseconds(), 0, 0, err)
 			logger.ErrorContext(c.Request().Context(), "rag query failed",
