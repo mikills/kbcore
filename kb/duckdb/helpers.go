@@ -60,12 +60,16 @@ func queryTopKWithDB(
 	}
 
 	vecStr := FormatVectorForSQL(queryVec)
+	metadataExpr, err := docsMetadataSelectExpr(ctx, db)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance, media_refs
+		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance, media_refs, %s
 		FROM docs
 		ORDER BY distance
 		LIMIT %d
-	`, vecStr, len(queryVec), k))
+	`, vecStr, len(queryVec), metadataExpr, k))
 	if err != nil {
 		return nil, kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("query failed: %w", err),
@@ -78,11 +82,15 @@ func queryTopKWithDB(
 	for rows.Next() {
 		var r kb.QueryResult
 		var mediaRefsRaw sql.NullString
-		if err := rows.Scan(&r.ID, &r.Content, &r.Distance, &mediaRefsRaw); err != nil {
+		var metadataRaw sql.NullString
+		if err := rows.Scan(&r.ID, &r.Content, &r.Distance, &mediaRefsRaw, &metadataRaw); err != nil {
 			return nil, fmt.Errorf("failed to scan result: %w", err)
 		}
 		if refs, derr := decodeMediaRefs(mediaRefsRaw); derr == nil {
 			r.MediaRefs = refs
+		}
+		if metadata, derr := decodeMetadata(metadataRaw); derr == nil {
+			r.Metadata = metadata
 		}
 		results = append(results, r)
 	}
@@ -117,6 +125,7 @@ type docMatch struct {
 	Content   string
 	Distance  float64
 	MediaRefs []kb.ChunkMediaRef
+	Metadata  map[string]any
 }
 
 func queryDocDistancesForIDs(
@@ -181,11 +190,15 @@ func queryDocMatchesForIDs(
 	}
 	vecStr := FormatVectorForSQL(queryVec)
 	placeholders := kb.BuildInClausePlaceholders(len(ids))
+	metadataExpr, err := docsMetadataSelectExpr(ctx, db)
+	if err != nil {
+		return nil, err
+	}
 	query := fmt.Sprintf(`
-		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance, media_refs
+		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance, media_refs, %s
 		FROM docs
 		WHERE id IN (%s)
-	`, vecStr, len(queryVec), placeholders)
+	`, vecStr, len(queryVec), metadataExpr, placeholders)
 	args := make([]any, 0, len(ids))
 	for _, id := range ids {
 		args = append(args, id)
@@ -204,16 +217,41 @@ func queryDocMatchesForIDs(
 		var content string
 		var distance float64
 		var mediaRefsRaw sql.NullString
-		if err := rows.Scan(&id, &content, &distance, &mediaRefsRaw); err != nil {
+		var metadataRaw sql.NullString
+		if err := rows.Scan(&id, &content, &distance, &mediaRefsRaw, &metadataRaw); err != nil {
 			return nil, fmt.Errorf("failed to scan query result: %w", err)
 		}
 		refs, _ := decodeMediaRefs(mediaRefsRaw)
-		results[id] = docMatch{Content: content, Distance: distance, MediaRefs: refs}
+		metadata, _ := decodeMetadata(metadataRaw)
+		results[id] = docMatch{Content: content, Distance: distance, MediaRefs: refs, Metadata: metadata}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("query rows iteration error: %w", err)
 	}
 	return results, nil
+}
+
+func docsMetadataSelectExpr(ctx context.Context, db *sql.DB) (string, error) {
+	hasMetadata, err := docsColumnExists(ctx, db, "metadata")
+	if err != nil {
+		return "", err
+	}
+	if hasMetadata {
+		return "metadata", nil
+	}
+	return "NULL AS metadata", nil
+}
+
+func docsColumnExists(ctx context.Context, db *sql.DB, columnName string) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM information_schema.columns
+		WHERE table_name = 'docs' AND column_name = ?
+	`, columnName).Scan(&count); err != nil {
+		return false, fmt.Errorf("check docs.%s column: %w", columnName, err)
+	}
+	return count > 0, nil
 }
 
 func ensureGraphQueryReady(ctx context.Context, db *sql.DB) error {

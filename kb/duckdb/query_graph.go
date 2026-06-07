@@ -205,6 +205,7 @@ func hydrateExpandedResults(ctx context.Context, db *sql.DB, ranked []kb.Expande
 		}
 		result.Content = payload.Content
 		result.MediaRefs = payload.MediaRefs
+		result.Metadata = payload.Metadata
 		out = append(out, result)
 	}
 	return out, nil
@@ -213,7 +214,12 @@ func hydrateExpandedResults(ctx context.Context, db *sql.DB, ranked []kb.Expande
 func convertDocMatches(matches map[string]docMatch) map[string]graph.DocMatch {
 	out := make(map[string]graph.DocMatch, len(matches))
 	for id, match := range matches {
-		out[id] = graph.DocMatch{Content: match.Content, Distance: match.Distance, MediaRefs: match.MediaRefs}
+		out[id] = graph.DocMatch{
+			Content:   match.Content,
+			Distance:  match.Distance,
+			MediaRefs: match.MediaRefs,
+			Metadata:  match.Metadata,
+		}
 	}
 	return out
 }

@@ -28,6 +28,7 @@ type QueryResult struct {
 	Content   string          `json:"content"`  // Document text stored at ingestion time
 	Distance  float64         `json:"distance"` // Euclidean distance from query vector
 	MediaRefs []ChunkMediaRef `json:"media_refs,omitempty"`
+	Metadata  map[string]any  `json:"metadata,omitempty"`
 }
 
 type Document struct {

@@ -399,8 +399,11 @@ func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(ctx context.Context, r
 	}
 	localVersionPath := localShardManifestVersionPath(req.kbDir)
 	fresh, err := localShardDBIsFresh(req.kbDir, req.dbPath, localVersionPath, manifestVersion)
-	if err != nil || fresh {
+	if err != nil {
 		return err
+	}
+	if fresh {
+		return f.ensureDocsMetadataColumn(ctx, req.dbPath)
 	}
 	return f.refreshMutableShardDB(
 		ctx,
@@ -461,6 +464,9 @@ func (f *DuckDBArtifactFormat) refreshMutableShardDB(ctx context.Context, req mu
 	if _, err := f.downloadSnapshotFromShards(ctx, req.kbID, req.dbPath); err != nil {
 		return err
 	}
+	if err := f.ensureDocsMetadataColumn(ctx, req.dbPath); err != nil {
+		return err
+	}
 	return writeLocalShardManifestVersion(req.localVersionPath, req.manifestVersion)
 }
 
@@ -486,7 +492,8 @@ func (f *DuckDBArtifactFormat) createEmptyMutableShardDBLocked(
 			id TEXT,
 			content TEXT,
 			embedding FLOAT[` + strconv.Itoa(embeddingDim) + `],
-			media_refs TEXT
+			media_refs TEXT,
+			metadata TEXT
 		)
 	`
 	if _, err := db.ExecContext(ctx, createDocsSQL); err != nil {
@@ -500,6 +507,28 @@ func (f *DuckDBArtifactFormat) createEmptyMutableShardDBLocked(
 	}
 
 	if err := CheckpointAndCloseDB(ctx, db, "close db after shard bootstrap"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (f *DuckDBArtifactFormat) ensureDocsMetadataColumn(ctx context.Context, dbPath string) error {
+	db, err := f.openConfiguredDB(ctx, dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	hasMetadata, err := docsColumnExists(ctx, db, "metadata")
+	if err != nil {
+		return err
+	}
+	if hasMetadata {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE docs ADD COLUMN metadata TEXT`); err != nil {
+		return fmt.Errorf("add docs.metadata column: %w", err)
+	}
+	if err := CheckpointDB(ctx, db); err != nil {
 		return err
 	}
 	return nil

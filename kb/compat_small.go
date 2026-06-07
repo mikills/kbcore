@@ -422,6 +422,7 @@ func ExpandedFromVector(results []QueryResult) []ExpandedResult {
 			GraphScore: 0,
 			Score:      sim,
 			MediaRefs:  r.MediaRefs,
+			Metadata:   r.Metadata,
 		})
 	}
 	return expanded

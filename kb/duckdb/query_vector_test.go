@@ -2,6 +2,7 @@ package duckdb
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -189,6 +190,151 @@ func TestShardVectorQuery(t *testing.T) {
 	t.Run("topk_shard_fanout_plan", testKBTopKShardFanoutPlan)
 	t.Run("topk_shard_local_multiplier", testKBTopKShardLocalMultiplier)
 	t.Run("topk_shard_merge", testKBTopKShardMerge)
+	t.Run("returns_metadata", testKBQueryReturnsMetadata)
+	t.Run("replaces_metadata_on_upsert", testKBUpsertReplacesMetadata)
+	t.Run("invalid_metadata_fails", testKBInvalidMetadataFails)
+	t.Run("migrates_fresh_local_cache_metadata_column", testKBMigratesFreshLocalCacheMetadataColumn)
+}
+
+func testKBQueryReturnsMetadata(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-query-metadata"
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(8)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+	docs := []kb.Document{{
+		ID:   "doc-1",
+		Text: "document with metadata",
+		Metadata: map[string]any{
+			"tag":    "alpha",
+			"tenant": "t1",
+			"rank":   float64(1),
+		},
+	}}
+	require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, docs))
+	_, err := loader.ManifestStore.Get(ctx, kbID)
+	require.NoError(t, err)
+	af := requireDuckDBFormat(t, loader)
+	dbPath := filepath.Join(harness.CacheDir(), kbID, "inspect.duckdb")
+	_, err = af.DownloadSnapshotFromShards(ctx, kbID, dbPath)
+	require.NoError(t, err)
+	db, err := af.OpenConfiguredDB(ctx, dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+	var stored sql.NullString
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT metadata FROM docs WHERE id = 'doc-1'`).Scan(&stored))
+	t.Logf("stored metadata raw: valid=%v value=%q", stored.Valid, stored.String)
+	var inserted sql.NullString
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT metadata FROM docs WHERE id = 'doc-1'`).Scan(&inserted))
+	require.True(t, inserted.Valid)
+	vec, err := loader.Embed(ctx, docs[0].Text)
+	require.NoError(t, err)
+	results, err := loader.Search(ctx, kbID, vec, &kb.SearchOptions{TopK: 1})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, "alpha", results[0].Metadata["tag"])
+	require.Equal(t, "t1", results[0].Metadata["tenant"])
+	require.Equal(t, float64(1), results[0].Metadata["rank"])
+}
+
+func testKBMigratesFreshLocalCacheMetadataColumn(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-migrate-fresh-cache-metadata"
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(8)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+	require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{{
+		ID:   "seed",
+		Text: "seed document",
+	}}))
+	manifestVersion, err := loader.ManifestStore.HeadVersion(ctx, kbID)
+	require.NoError(t, err)
+	require.NotEmpty(t, manifestVersion)
+
+	af := requireDuckDBFormat(t, loader)
+	kbDir := filepath.Join(harness.CacheDir(), kbID)
+	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
+	require.NoError(t, os.Remove(dbPath))
+	db, err := af.OpenConfiguredDB(ctx, dbPath)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `CREATE TABLE docs (
+		id TEXT,
+		content TEXT,
+		embedding FLOAT[8],
+		media_refs TEXT
+	)`)
+	require.NoError(t, err)
+	require.NoError(t, ensureDocTombstonesTable(ctx, db))
+	require.NoError(t, EnsureGraphTables(ctx, db))
+	require.NoError(t, CheckpointAndCloseDB(ctx, db, "close old fresh cache db"))
+	require.NoError(t, writeLocalShardManifestVersion(localShardManifestVersionPath(kbDir), manifestVersion))
+
+	require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{{
+		ID:       "doc-1",
+		Text:     "document after metadata migration",
+		Metadata: map[string]any{"tag": "migrated"},
+	}}))
+	vec, err := loader.Embed(ctx, "document after metadata migration")
+	require.NoError(t, err)
+	results, err := loader.Search(ctx, kbID, vec, &kb.SearchOptions{TopK: 1})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, "migrated", results[0].Metadata["tag"])
+}
+
+func testKBUpsertReplacesMetadata(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-replace-metadata"
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(8)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+	require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{{
+		ID:       "doc-1",
+		Text:     "replace metadata doc",
+		Metadata: map[string]any{"tag": "a"},
+	}}))
+	require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{{
+		ID:       "doc-1",
+		Text:     "replace metadata doc",
+		Metadata: map[string]any{"tag": "b", "state": "updated"},
+	}}))
+	vec, err := loader.Embed(ctx, "replace metadata doc")
+	require.NoError(t, err)
+	results, err := loader.Search(ctx, kbID, vec, &kb.SearchOptions{TopK: 1})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, "b", results[0].Metadata["tag"])
+	_, exists := results[0].Metadata["state"]
+	require.True(t, exists)
+}
+
+func testKBInvalidMetadataFails(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-invalid-metadata"
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(8)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+	err := loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{{
+		ID:   "doc-1",
+		Text: "bad metadata",
+		Metadata: map[string]any{
+			"bad": make(chan int),
+		},
+	}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "metadata")
 }
 
 func testKBSearchShardPath(t *testing.T) {

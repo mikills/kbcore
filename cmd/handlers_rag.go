@@ -47,6 +47,7 @@ type ragQueryResultOut struct {
 	Score      *float64           `json:"score,omitempty"`
 	GraphScore *float64           `json:"graph_score,omitempty"`
 	MediaRefs  []kb.ChunkMediaRef `json:"media_refs,omitempty"`
+	Metadata   map[string]any     `json:"metadata,omitempty"`
 }
 
 type multipartFileMetadata struct {
@@ -255,6 +256,9 @@ func ragQueryResults(results []kb.ExpandedResult, includeScoring bool) []ragQuer
 		}
 		if len(result.MediaRefs) > 0 {
 			out.MediaRefs = result.MediaRefs
+		}
+		if len(result.Metadata) > 0 {
+			out.Metadata = result.Metadata
 		}
 		queryResults = append(queryResults, out)
 	}
