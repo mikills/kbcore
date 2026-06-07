@@ -54,7 +54,7 @@ func createPreparedDocsStagingTable(ctx context.Context, db *sql.DB, table strin
 		return nil, fmt.Errorf("open appender conn: %w", err)
 	}
 	createSQL := fmt.Sprintf(
-		`CREATE TABLE %s (id TEXT, content TEXT, embedding FLOAT[%d], media_refs TEXT)`,
+		`CREATE TABLE %s (id TEXT, content TEXT, embedding FLOAT[%d], media_refs TEXT, metadata TEXT)`,
 		table,
 		dim,
 	)
@@ -98,7 +98,15 @@ func appendPreparedDocRow(appender *duckdbdriver.Appender, prepared preparedUpse
 	if mediaRefsJSON.Valid {
 		mediaRefsValue = mediaRefsJSON.String
 	}
-	if err := appender.AppendRow(doc.ID, doc.Text, prepared.Embedding, mediaRefsValue); err != nil {
+	metadataJSON, err := encodeMetadata(doc.Metadata)
+	if err != nil {
+		return fmt.Errorf("encode metadata for doc %q: %w", doc.ID, err)
+	}
+	var metadataValue any
+	if metadataJSON.Valid {
+		metadataValue = metadataJSON.String
+	}
+	if err := appender.AppendRow(doc.ID, doc.Text, prepared.Embedding, mediaRefsValue, metadataValue); err != nil {
 		return kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("append doc %q: %w", doc.ID, err),
 			"upsert embedding dimension is incompatible with stored vectors",
@@ -123,7 +131,7 @@ func mergePreparedDocsAndGraphStaging(ctx context.Context, input preparedDocsSta
 	if err := deletePreparedDocRows(ctx, tx, input.docs); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO docs (id, content, embedding, media_refs) SELECT id, content, embedding, media_refs FROM %s`, input.table)); err != nil {
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO docs (id, content, embedding, media_refs, metadata) SELECT id, content, embedding, media_refs, metadata FROM %s`, input.table)); err != nil {
 		tx.Rollback()
 		return kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("bulk insert prepared docs: %w", err),
@@ -231,7 +239,7 @@ func preparePreparedDocsTxStatements(ctx context.Context, tx *sql.Tx, dim int) (
 		return preparedDocsTxStatements{}, fmt.Errorf("prepare docs delete: %w", err)
 	}
 	insertSQL := fmt.Sprintf(
-		`INSERT INTO docs (id, content, embedding, media_refs) VALUES (?, ?, CAST(? AS FLOAT[%d]), ?)`,
+		`INSERT INTO docs (id, content, embedding, media_refs, metadata) VALUES (?, ?, CAST(? AS FLOAT[%d]), ?, ?)`,
 		dim,
 	)
 	stmtInsert, err := tx.PrepareContext(ctx, insertSQL)
@@ -280,7 +288,12 @@ func upsertPreparedDocTx(
 		tx.Rollback()
 		return fmt.Errorf("encode media refs for doc %q: %w", doc.ID, err)
 	}
-	if _, err := stmts.insert.ExecContext(ctx, doc.ID, doc.Text, FormatVectorForSQL(prepared.Embedding), mediaRefsJSON); err != nil {
+	metadataJSON, err := encodeMetadata(doc.Metadata)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("encode metadata for doc %q: %w", doc.ID, err)
+	}
+	if _, err := stmts.insert.ExecContext(ctx, doc.ID, doc.Text, FormatVectorForSQL(prepared.Embedding), mediaRefsJSON, metadataJSON); err != nil {
 		tx.Rollback()
 		return kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("upsert doc %q: %w", doc.ID, err),

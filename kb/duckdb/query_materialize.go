@@ -65,7 +65,11 @@ func queryDocPayloadsByID(ctx context.Context, db *sql.DB, ids []string) (map[st
 		return map[string]docPayload{}, nil
 	}
 	placeholders := kb.BuildInClausePlaceholders(len(ids))
-	query := fmt.Sprintf(`SELECT id, content, media_refs FROM docs WHERE id IN (%s)`, placeholders)
+	metadataExpr, err := docsMetadataSelectExpr(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf(`SELECT id, content, media_refs, %s FROM docs WHERE id IN (%s)`, metadataExpr, placeholders)
 	args := make([]any, 0, len(ids))
 	for _, id := range ids {
 		args = append(args, id)
@@ -80,10 +84,12 @@ func queryDocPayloadsByID(ctx context.Context, db *sql.DB, ids []string) (map[st
 		var id string
 		var payload docPayload
 		var mediaRefsRaw sql.NullString
-		if err := rows.Scan(&id, &payload.Content, &mediaRefsRaw); err != nil {
+		var metadataRaw sql.NullString
+		if err := rows.Scan(&id, &payload.Content, &mediaRefsRaw, &metadataRaw); err != nil {
 			return nil, fmt.Errorf("failed to scan doc payload: %w", err)
 		}
 		payload.MediaRefs, _ = decodeMediaRefs(mediaRefsRaw)
+		payload.Metadata, _ = decodeMetadata(metadataRaw)
 		payloads[id] = payload
 	}
 	if err := rows.Err(); err != nil {
@@ -95,6 +101,7 @@ func queryDocPayloadsByID(ctx context.Context, db *sql.DB, ids []string) (map[st
 type docPayload struct {
 	Content   string
 	MediaRefs []kb.ChunkMediaRef
+	Metadata  map[string]any
 }
 
 func hydrateRankedResults(ctx context.Context, db *sql.DB, refs []rankedDocRef) ([]kb.QueryResult, error) {
@@ -114,7 +121,13 @@ func hydrateRankedResults(ctx context.Context, db *sql.DB, refs []rankedDocRef) 
 		}
 		results = append(
 			results,
-			kb.QueryResult{ID: ref.ID, Content: payload.Content, Distance: ref.Distance, MediaRefs: payload.MediaRefs},
+			kb.QueryResult{
+				ID:        ref.ID,
+				Content:   payload.Content,
+				Distance:  ref.Distance,
+				MediaRefs: payload.MediaRefs,
+				Metadata:  payload.Metadata,
+			},
 		)
 	}
 	return results, nil

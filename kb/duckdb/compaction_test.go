@@ -331,7 +331,8 @@ func uploadRealShardManifest(t *testing.T, bs kb.BlobStore, kbID string, shardCo
 			id TEXT,
 			content TEXT,
 			embedding FLOAT[%d],
-			media_refs TEXT
+			media_refs TEXT,
+			metadata TEXT
 		)`, embDim))
 		require.NoError(t, err)
 
@@ -340,7 +341,7 @@ func uploadRealShardManifest(t *testing.T, bs kb.BlobStore, kbID string, shardCo
 			vec[d] = float32(i*embDim+d) * 0.1
 		}
 		_, err = db.ExecContext(ctx, fmt.Sprintf(
-			`INSERT INTO docs VALUES ('doc-%d', 'content %d', %s::FLOAT[%d], NULL)`,
+			`INSERT INTO docs VALUES ('doc-%d', 'content %d', %s::FLOAT[%d], NULL, '{"source":"compaction-test"}')`,
 			i, i, duckdb.FormatVectorForSQL(vec), embDim,
 		))
 		require.NoError(t, err)

@@ -11,6 +11,7 @@ type DocMatch struct {
 	Content   string
 	Distance  float64
 	MediaRefs []kb.ChunkMediaRef
+	Metadata  map[string]any
 }
 
 type ExpandInput struct {
@@ -111,6 +112,7 @@ func expandedResultFromMatch(
 		GraphScore: graph,
 		Score:      alpha*sim + (1.0-alpha)*graphNorm,
 		MediaRefs:  match.MediaRefs,
+		Metadata:   match.Metadata,
 	}
 }
 

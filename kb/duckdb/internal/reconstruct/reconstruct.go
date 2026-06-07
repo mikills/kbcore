@@ -47,14 +47,22 @@ func initializeMergedShardTables(
 	alias string,
 	ensureGraphTables EnsureGraphTablesFunc,
 ) error {
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE TABLE docs AS SELECT id, content, embedding, media_refs FROM %s.docs WHERE 1=0", alias)); err != nil {
+	metadataExpr, err := attachedMetadataSelectExpr(ctx, db, alias)
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE TABLE docs AS SELECT id, content, embedding, media_refs, %s FROM %s.docs WHERE 1=0", metadataExpr, alias)); err != nil {
 		return err
 	}
 	return ensureGraphTables(ctx, db)
 }
 
 func copyShardTables(ctx context.Context, db *sql.DB, alias string) error {
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("INSERT INTO docs (id, content, embedding, media_refs) SELECT id, content, embedding, media_refs FROM %s.docs", alias)); err != nil {
+	metadataExpr, err := attachedMetadataSelectExpr(ctx, db, alias)
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("INSERT INTO docs (id, content, embedding, media_refs, metadata) SELECT id, content, embedding, media_refs, %s FROM %s.docs", metadataExpr, alias)); err != nil {
 		return err
 	}
 	for _, table := range []string{"doc_entities", "edges"} {
@@ -63,6 +71,17 @@ func copyShardTables(ctx context.Context, db *sql.DB, alias string) error {
 		}
 	}
 	return copyAttachedTableIfExists(ctx, db, alias, "entities", true)
+}
+
+func attachedMetadataSelectExpr(ctx context.Context, db *sql.DB, alias string) (string, error) {
+	ok, err := AttachedColumnExists(ctx, db, alias, "docs", "metadata")
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return "metadata", nil
+	}
+	return "NULL AS metadata", nil
 }
 
 func copyAttachedTableIfExists(
@@ -82,6 +101,29 @@ func copyAttachedTableIfExists(
 	}
 	_, err = db.ExecContext(ctx, fmt.Sprintf("%s %s SELECT * FROM %s.%s", verb, table, alias, table))
 	return err
+}
+
+func AttachedColumnExists(ctx context.Context, db *sql.DB, alias string, table string, column string) (bool, error) {
+	if err := validateSafeIdentifier(alias); err != nil {
+		return false, err
+	}
+	if err := validateSafeIdentifier(table); err != nil {
+		return false, err
+	}
+	if err := validateSafeIdentifier(column); err != nil {
+		return false, err
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s.%s LIMIT 0", column, alias, table)
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "does not exist") || strings.Contains(msg, "not found") ||
+			strings.Contains(msg, "not exist") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, rows.Close()
 }
 
 func AttachedTableExists(ctx context.Context, db *sql.DB, alias, table string) (bool, error) {

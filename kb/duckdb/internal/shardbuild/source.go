@@ -42,15 +42,34 @@ func CopyRowRange(ctx context.Context, shardDB *sql.DB, hasTombstones bool, limi
 	if len(whereClauses) > 0 {
 		where = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
+	metadataExpr := "NULL AS metadata"
+	if ok, err := attachedColumnExists(ctx, shardDB, "src", "docs", "metadata"); err != nil {
+		return err
+	} else if ok {
+		metadataExpr = "d.metadata AS metadata"
+	}
 	_, err := shardDB.ExecContext(ctx, fmt.Sprintf(`
 		CREATE TABLE docs AS
-		SELECT d.id, d.content, d.embedding, d.media_refs
+		SELECT d.id, d.content, d.embedding, d.media_refs, %s
 		FROM src.docs d
 		%s
 		ORDER BY d.id
 		LIMIT %d
-	`, where, limit))
+	`, metadataExpr, where, limit))
 	return err
+}
+
+func attachedColumnExists(ctx context.Context, db *sql.DB, alias string, table string, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM %s.%s LIMIT 0", column, alias, table))
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "does not exist") || strings.Contains(msg, "not found") ||
+			strings.Contains(msg, "not exist") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, rows.Close()
 }
 
 func CopyGraphTables(ctx context.Context, shardDB *sql.DB, ensureGraphTables EnsureGraphTablesFunc) error {

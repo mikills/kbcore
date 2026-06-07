@@ -21,6 +21,7 @@ type ExpandedResult struct {
 	GraphScore float64
 	Score      float64
 	MediaRefs  []media.ChunkMediaRef
+	Metadata   map[string]any
 }
 
 type Mode int
