@@ -24,4 +24,10 @@ func TestNewDocumentWorkflowScenarios(t *testing.T) {
 		AsyncDocumentPipeline(h)
 		h.AssertInvariants()
 	})
+
+	t.Run("filter_correctness", func(t *testing.T) {
+		h := sim.New(t, sim.WithSeed(42), sim.WithInvariants(invariants...))
+		FilterCorrectness(h)
+		h.AssertInvariants()
+	})
 }
