@@ -30,4 +30,10 @@ func TestNewDocumentWorkflowScenarios(t *testing.T) {
 		FilterCorrectness(h)
 		h.AssertInvariants()
 	})
+
+	t.Run("vector_primitive", func(t *testing.T) {
+		h := sim.New(t, sim.WithSeed(7), sim.WithInvariants(invariants...))
+		VectorPrimitive(h)
+		h.AssertInvariants()
+	})
 }
