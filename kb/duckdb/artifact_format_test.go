@@ -347,9 +347,6 @@ func TestHNSWIndexOnShards(t *testing.T) {
 	t.Run("query_plan_uses_hnsw_scan", testHNSWQueryPlanUsesHNSWScan)
 }
 
-// shardHasHNSWIndex returns true when docs_vec_idx exists as an HNSW index on
-// the docs table. Filtering on index_type ensures a future accidental B-tree
-// replacement would not pass the check silently.
 func shardHasHNSWIndex(t *testing.T, af *DuckDBArtifactFormat, path string) bool {
 	t.Helper()
 	ctx := context.Background()
@@ -362,7 +359,7 @@ func shardHasHNSWIndex(t *testing.T, af *DuckDBArtifactFormat, path string) bool
 		WHERE table_name = 'docs' AND index_name = 'docs_vec_idx' AND index_type = 'HNSW'
 	`).Scan(&count)
 	if err != nil {
-		// Fallback for DuckDB versions that do not expose index_type.
+		// index_type not available in older DuckDB versions
 		err = db.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM duckdb_indexes()
 			WHERE table_name = 'docs' AND index_name = 'docs_vec_idx'
@@ -414,7 +411,6 @@ func testHNSWIndexSurvivesCheckpointReopen(t *testing.T) {
 	_, err := af.DownloadSnapshotFromShards(ctx, kbID, dbPath)
 	require.NoError(t, err)
 
-	// Checkpoint and close, then reopen to verify persistence.
 	{
 		db, err := af.OpenConfiguredDB(ctx, dbPath)
 		require.NoError(t, err)
@@ -442,7 +438,6 @@ func testHNSWIndexPresentAfterCompaction(t *testing.T) {
 	registerFormatOnHarness(t, harness)
 	loader := harness.KB()
 
-	// Ingest enough docs to produce multiple shards so compaction fires.
 	for i := range 6 {
 		doc := kb.Document{ID: fmt.Sprintf("doc-%02d", i), Text: fmt.Sprintf("document content %d", i)}
 		require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{doc}))
@@ -451,10 +446,7 @@ func testHNSWIndexPresentAfterCompaction(t *testing.T) {
 	result, err := loader.CompactIfNeeded(ctx, kbID)
 	require.NoError(t, err)
 	if !result.Performed {
-		// Compaction requires at least CompactionMinShardCount shards. If the
-		// trigger policy or test corpus is too small, skip rather than fail.
-		// Check: ShardTriggerVectorRows=1, 6 docs ingested one-at-a-time → 6 shards.
-		t.Skipf("compaction did not fire (policy: trigger_rows=%d, min_shards=%d) — adjust test corpus or policy",
+		t.Skipf("compaction did not fire (trigger_rows=%d, min_shards=%d)",
 			policy.ShardTriggerVectorRows, policy.CompactionMinShardCount)
 	}
 
@@ -466,17 +458,10 @@ func testHNSWIndexPresentAfterCompaction(t *testing.T) {
 	assert.True(t, shardHasHNSWIndex(t, af, inspectPath), "HNSW index missing on compacted shard")
 }
 
-// testHNSWQueryPlanUsesHNSWScan verifies that the query planner selects an
-// HNSW_INDEX_SCAN for the top-K vector query when the index is present. This
-// catches regressions where the query pattern stops matching the VSS optimizer
-// rule. DuckDB only uses the HNSW index when the table is large enough that
-// the index scan is cheaper than a sequential scan, so we build a 200-row
-// shard to exceed that threshold.
 func testHNSWQueryPlanUsesHNSWScan(t *testing.T) {
 	ctx := context.Background()
 	kbID := "kb-hnsw-explain"
 	policy := kb.ShardingPolicy{
-		// Keep everything in a single shard for determinism.
 		ShardTriggerVectorRows: 10000,
 		TargetShardBytes:       1 << 30,
 	}
@@ -488,7 +473,6 @@ func testHNSWQueryPlanUsesHNSWScan(t *testing.T) {
 	registerFormatOnHarness(t, harness)
 	loader := harness.KB()
 
-	// 200 docs is well above any per-table HNSW threshold DuckDB applies.
 	docs := make([]kb.Document, 200)
 	for i := range docs {
 		docs[i] = kb.Document{
