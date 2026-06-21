@@ -339,3 +339,184 @@ func TestOfflineExtensionLoad(t *testing.T) {
 		})
 	}
 }
+
+func TestHNSWIndexOnShards(t *testing.T) {
+	t.Run("index_present_after_shard_build", testHNSWIndexPresentAfterShardBuild)
+	t.Run("index_survives_checkpoint_reopen", testHNSWIndexSurvivesCheckpointReopen)
+	t.Run("index_present_after_compaction", testHNSWIndexPresentAfterCompaction)
+	t.Run("query_plan_uses_hnsw_scan", testHNSWQueryPlanUsesHNSWScan)
+}
+
+func shardHasHNSWIndex(t *testing.T, af *DuckDBArtifactFormat, path string) bool {
+	t.Helper()
+	ctx := context.Background()
+	db, err := af.OpenConfiguredDB(ctx, path)
+	require.NoError(t, err)
+	defer db.Close()
+	var count int
+	err = db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM duckdb_indexes()
+		WHERE table_name = 'docs' AND index_name = 'docs_vec_idx' AND index_type = 'HNSW'
+	`).Scan(&count)
+	if err != nil {
+		// index_type not available in older DuckDB versions
+		err = db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM duckdb_indexes()
+			WHERE table_name = 'docs' AND index_name = 'docs_vec_idx'
+		`).Scan(&count)
+		require.NoError(t, err)
+	}
+	return count > 0
+}
+
+func testHNSWIndexPresentAfterShardBuild(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-hnsw-shard-build"
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(8)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+
+	require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{
+		{ID: "a", Text: "alpha document"},
+		{ID: "b", Text: "beta document"},
+	}))
+
+	af := requireDuckDBFormat(t, loader)
+	inspectPath := filepath.Join(harness.CacheDir(), kbID, "hnsw-inspect.duckdb")
+	_, err := af.DownloadSnapshotFromShards(ctx, kbID, inspectPath)
+	require.NoError(t, err)
+
+	assert.True(t, shardHasHNSWIndex(t, af, inspectPath), "HNSW index missing after shard build")
+}
+
+func testHNSWIndexSurvivesCheckpointReopen(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-hnsw-checkpoint"
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(8)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+
+	require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{
+		{ID: "a", Text: "alpha document"},
+	}))
+
+	af := requireDuckDBFormat(t, loader)
+	dbPath := filepath.Join(harness.CacheDir(), kbID, "checkpoint-test.duckdb")
+	_, err := af.DownloadSnapshotFromShards(ctx, kbID, dbPath)
+	require.NoError(t, err)
+
+	{
+		db, err := af.OpenConfiguredDB(ctx, dbPath)
+		require.NoError(t, err)
+		require.NoError(t, CheckpointAndCloseDB(ctx, db, "checkpoint before reopen"))
+	}
+
+	assert.True(t, shardHasHNSWIndex(t, af, dbPath), "HNSW index lost after checkpoint/reopen")
+}
+
+func testHNSWIndexPresentAfterCompaction(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-hnsw-compaction"
+	policy := kb.ShardingPolicy{
+		ShardTriggerVectorRows: 1,
+		TargetShardBytes:       512,
+		CompactionEnabled:      true,
+		CompactionMinShardCount: 2,
+		CompactionTombstoneRatio: 0.0,
+	}
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(8)).
+		WithOptions(kb.WithShardingPolicy(policy), kb.WithCompactionEnabled(true)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+
+	for i := range 6 {
+		doc := kb.Document{ID: fmt.Sprintf("doc-%02d", i), Text: fmt.Sprintf("document content %d", i)}
+		require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{doc}))
+	}
+
+	result, err := loader.CompactIfNeeded(ctx, kbID)
+	require.NoError(t, err)
+	if !result.Performed {
+		t.Skipf("compaction did not fire (trigger_rows=%d, min_shards=%d)",
+			policy.ShardTriggerVectorRows, policy.CompactionMinShardCount)
+	}
+
+	af := requireDuckDBFormat(t, loader)
+	inspectPath := filepath.Join(harness.CacheDir(), kbID, "post-compact-inspect.duckdb")
+	_, err = af.DownloadSnapshotFromShards(ctx, kbID, inspectPath)
+	require.NoError(t, err)
+
+	assert.True(t, shardHasHNSWIndex(t, af, inspectPath), "HNSW index missing on compacted shard")
+}
+
+func testHNSWQueryPlanUsesHNSWScan(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-hnsw-explain"
+	policy := kb.ShardingPolicy{
+		ShardTriggerVectorRows: 10000,
+		TargetShardBytes:       1 << 30,
+	}
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(8)).
+		WithOptions(kb.WithShardingPolicy(policy)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+
+	docs := make([]kb.Document, 200)
+	for i := range docs {
+		docs[i] = kb.Document{
+			ID:   fmt.Sprintf("doc-%03d", i),
+			Text: fmt.Sprintf("document number %d with unique content", i),
+		}
+	}
+	require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, docs))
+
+	af := requireDuckDBFormat(t, loader)
+	dbPath := filepath.Join(harness.CacheDir(), kbID, "explain-test.duckdb")
+	_, err := af.DownloadSnapshotFromShards(ctx, kbID, dbPath)
+	require.NoError(t, err)
+
+	db, err := af.OpenConfiguredDB(ctx, dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	queryVec := make([]float32, 8)
+	for i := range queryVec {
+		queryVec[i] = float32(i) * 0.1
+	}
+	vecStr := FormatVectorForSQL(queryVec)
+	explainSQL := fmt.Sprintf(`
+		EXPLAIN SELECT id, array_distance(embedding, %s::FLOAT[8]) as distance
+		FROM docs
+		ORDER BY array_distance(embedding, %s::FLOAT[8])
+		LIMIT 10
+	`, vecStr, vecStr)
+
+	rows, err := db.QueryContext(ctx, explainSQL)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var plan strings.Builder
+	for rows.Next() {
+		var typ, extra string
+		require.NoError(t, rows.Scan(&typ, &extra))
+		plan.WriteString(extra)
+		plan.WriteRune('\n')
+	}
+	require.NoError(t, rows.Err())
+
+	planText := plan.String()
+	t.Logf("query plan:\n%s", planText)
+	require.Contains(t, planText, "HNSW_INDEX_SCAN", "expected HNSW_INDEX_SCAN in query plan — ORDER BY array_distance may not be triggering the VSS optimizer rule")
+}
