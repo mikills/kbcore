@@ -31,8 +31,7 @@ type Service struct {
 	ClearCache            func(context.Context) error
 	ForceCompaction       func(context.Context, string) (*kb.CompactionPublishResult, error)
 	DeleteKnowledgeBase   func(context.Context, string) error
-	UpsertVectors         func(context.Context, string, []kb.Document) error
-	QueryVectors          func(context.Context, string, []float32, int, *search.FilterExpr) ([]kb.QueryResult, error)
+	QueryVectors func(context.Context, string, []float32, int, *search.FilterExpr) ([]kb.QueryResult, error)
 	IndexCodebase         func(context.Context, kb.CodeIndexOptions) (kb.CodeIndexResult, error)
 	CodeIndexStatus       func(context.Context, string) (kb.CodeIndexStatus, error)
 	SearchCode            func(context.Context, string, string, kb.CodeSearchOptions) ([]kb.CodeSearchResult, error)
@@ -773,8 +772,8 @@ type upsertVectorsInput struct {
 }
 
 type upsertVectorsOutput struct {
-	KBID    string `json:"kb_id"`
-	Upserted int   `json:"upserted"`
+	KBID        string `json:"kb_id"`
+	OperationID string `json:"operation_id"`
 }
 
 func (s *Service) upsertVectors(
@@ -786,7 +785,7 @@ func (s *Service) upsertVectors(
 	if len(in.Vectors) == 0 {
 		return nil, upsertVectorsOutput{}, fmt.Errorf("vectors must not be empty")
 	}
-	if s.UpsertVectors == nil {
+	if s.AppendDocumentUpsert == nil {
 		return nil, upsertVectorsOutput{}, fmt.Errorf("kb unavailable")
 	}
 	docs := make([]kb.Document, 0, len(in.Vectors))
@@ -799,10 +798,11 @@ func (s *Service) upsertVectors(
 		}
 		docs = append(docs, kb.Document{ID: v.ID, Embedding: v.Vector, Metadata: v.Metadata})
 	}
-	if err := s.UpsertVectors(ctx, kbID, docs); err != nil {
+	opID, _, err := s.AppendDocumentUpsert(ctx, kb.DocumentUpsertPayload{KBID: kbID, Documents: docs}, "", "")
+	if err != nil {
 		return nil, upsertVectorsOutput{}, err
 	}
-	return nil, upsertVectorsOutput{KBID: kbID, Upserted: len(docs)}, nil
+	return nil, upsertVectorsOutput{KBID: kbID, OperationID: opID}, nil
 }
 
 type queryVectorsInput struct {

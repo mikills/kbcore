@@ -57,7 +57,7 @@ func handleVectorUpsert(c echo.Context, deps Dependencies) error {
 	if len(req.Docs) == 0 {
 		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "vectors must not be empty"})
 	}
-	if deps.UpsertVectors == nil {
+	if deps.AppendDocumentUpsert == nil {
 		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "kb unavailable"})
 	}
 
@@ -76,10 +76,15 @@ func handleVectorUpsert(c echo.Context, deps Dependencies) error {
 		})
 	}
 
-	if err := deps.UpsertVectors(c.Request().Context(), req.KBID, docs); err != nil {
+	idempotencyKey, correlationID := requestIDs(c)
+	opID, eventID, err := deps.AppendDocumentUpsert(c.Request().Context(), kb.DocumentUpsertPayload{
+		KBID:      req.KBID,
+		Documents: docs,
+	}, idempotencyKey, correlationID)
+	if err != nil {
 		return WriteError(c, err, deps.IsBudgetExceeded)
 	}
-	return c.JSON(http.StatusOK, map[string]any{"upserted": len(docs)})
+	return c.JSON(http.StatusAccepted, map[string]any{"operation_id": opID, "event_id": eventID})
 }
 
 func handleVectorQuery(c echo.Context, deps Dependencies) error {

@@ -38,7 +38,6 @@ type Dependencies struct {
 	MaxMediaBytes     int64
 
 	DeleteDocuments func(context.Context, string, []string) error
-	UpsertVectors   func(context.Context, string, []kb.Document) error
 	QueryVectors    func(context.Context, string, []float32, int, *search.FilterExpr) ([]kb.QueryResult, error)
 
 	// Event-driven ingest.
