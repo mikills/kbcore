@@ -46,10 +46,22 @@ type StorageConfig struct {
 	Cache CacheConfig `yaml:"cache" json:"cache"`
 }
 
-// BlobConfig selects a blob backend. Only "local" is implemented today.
+// BlobConfig selects a blob backend: "local" or "s3".
 type BlobConfig struct {
-	Kind string `yaml:"kind" json:"kind"`
-	Root string `yaml:"root" json:"root"`
+	Kind string        `yaml:"kind"        json:"kind"`
+	Root string        `yaml:"root"        json:"root"`
+	S3   *S3BlobConfig `yaml:"s3,omitempty" json:"s3,omitempty"`
+}
+
+// S3BlobConfig configures S3 or any S3-compatible blob backend.
+// Credentials fall back to the AWS credential chain when AccessKeyID is empty.
+type S3BlobConfig struct {
+	Bucket          string `yaml:"bucket"                      json:"bucket"`
+	Region          string `yaml:"region,omitempty"            json:"region,omitempty"`
+	Prefix          string `yaml:"prefix,omitempty"            json:"prefix,omitempty"`
+	Endpoint        string `yaml:"endpoint,omitempty"          json:"endpoint,omitempty"`
+	AccessKeyID     string `yaml:"access_key_id,omitempty"     json:"access_key_id,omitempty"`
+	SecretAccessKey string `yaml:"secret_access_key,omitempty" json:"secret_access_key,omitempty"`
 }
 
 // CacheConfig tunes the local shard cache. EntryTTL is non-pointer because
@@ -281,6 +293,9 @@ func (c *Config) applyStorageDefaults() {
 	}
 	if c.Storage.Cache.Dir == "" {
 		c.Storage.Cache.Dir = "./.temp/cache"
+	}
+	if c.Storage.Blob.S3 != nil && c.Storage.Blob.S3.Region == "" {
+		c.Storage.Blob.S3.Region = "us-east-1"
 	}
 }
 

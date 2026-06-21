@@ -25,4 +25,10 @@ func TestExamplesParse(t *testing.T) {
 		_, err := Load("../../examples/minnow.dev.openai.yaml")
 		require.NoError(t, err)
 	})
+
+	t.Run("examples/minnow.s3.yaml", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "test-key")
+		_, err := Load("../../examples/minnow.s3.yaml")
+		require.NoError(t, err)
+	})
 }
