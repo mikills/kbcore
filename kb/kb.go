@@ -34,6 +34,7 @@ type QueryResult struct {
 type Document struct {
 	ID        string
 	Text      string
+	Embedding []float32      // if non-empty, skips the embedder
 	MediaIDs  []string
 	MediaRefs []ChunkMediaRef
 	Metadata  map[string]any

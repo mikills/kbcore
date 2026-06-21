@@ -815,18 +815,22 @@ func (f *DuckDBArtifactFormat) prepareDocsForUpsert(
 		if strings.TrimSpace(doc.ID) == "" {
 			return nil, fmt.Errorf("doc id cannot be empty")
 		}
-		if strings.TrimSpace(doc.Text) == "" {
-			return nil, fmt.Errorf("doc %q text cannot be empty", doc.ID)
+		var vec []float32
+		if len(doc.Embedding) > 0 {
+			vec = doc.Embedding
+		} else {
+			if strings.TrimSpace(doc.Text) == "" {
+				return nil, fmt.Errorf("doc %q: text or embedding is required", doc.ID)
+			}
+			var err error
+			vec, err = f.deps.Embed(ctx, doc.Text)
+			if err != nil {
+				return nil, fmt.Errorf("embed doc %q: %w", doc.ID, err)
+			}
+			if len(vec) == 0 {
+				return nil, fmt.Errorf("embed doc %q: empty embedding", doc.ID)
+			}
 		}
-
-		vec, err := f.deps.Embed(ctx, doc.Text)
-		if err != nil {
-			return nil, fmt.Errorf("embed doc %q: %w", doc.ID, err)
-		}
-		if len(vec) == 0 {
-			return nil, fmt.Errorf("embed doc %q: empty embedding", doc.ID)
-		}
-
 		prepared = append(prepared, preparedUpsertDoc{Doc: doc, Embedding: vec})
 	}
 	return prepared, nil

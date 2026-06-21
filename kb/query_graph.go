@@ -25,6 +25,29 @@ type SearchOptions = search.Options
 
 type EdgeRow = search.EdgeRow
 
+func (k *KB) SearchRaw(ctx context.Context, kbID string, queryVec []float32, topK int, filter *search.FilterExpr) ([]QueryResult, error) {
+	format, err := k.resolveSearchFormat(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	if topK <= 0 {
+		return nil, fmt.Errorf("%w: top_k must be > 0", ErrInvalidQueryRequest)
+	}
+	expanded, err := format.QueryRag(ctx, RagQueryRequest{
+		KBID:     kbID,
+		QueryVec: queryVec,
+		Options:  RagQueryOptions{TopK: topK, Filter: filter},
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]QueryResult, 0, len(expanded))
+	for _, r := range expanded {
+		out = append(out, QueryResult{ID: r.ID, Content: r.Content, Distance: r.Distance, MediaRefs: r.MediaRefs, Metadata: r.Metadata})
+	}
+	return out, nil
+}
+
 func (k *KB) Search(
 	ctx context.Context,
 	kbID string,

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/search"
 
 	"github.com/labstack/echo/v4"
 )
@@ -36,6 +37,10 @@ type Dependencies struct {
 	DeleteMedia       func(context.Context, string) error
 	MaxMediaBytes     int64
 
+	DeleteDocuments func(context.Context, string, []string) error
+	UpsertVectors   func(context.Context, string, []kb.Document) error
+	QueryVectors    func(context.Context, string, []float32, int, *search.FilterExpr) ([]kb.QueryResult, error)
+
 	// Event-driven ingest.
 	AppendDocumentUpsert  func(context.Context, kb.DocumentUpsertPayload, string, string) (string, string, error)
 	AppendFileIngest      func(context.Context, kb.FileIngestInput, int64, string, string) (string, string, error)
@@ -57,6 +62,7 @@ func Register(e *echo.Echo, deps Dependencies) {
 	registerCacheRoutes(e, deps)
 	registerRagRoutes(e, deps)
 	registerMediaRoutes(e, deps)
+	registerVectorRoutes(e, deps)
 }
 
 func requestIDs(c echo.Context) (string, string) {
