@@ -64,6 +64,11 @@ func queryTopKWithDB(
 	if err != nil {
 		return nil, err
 	}
+	// The vector literal appears in both SELECT and ORDER BY. DuckDB's VSS
+	// optimizer requires the exact array_distance(...) expression in ORDER BY
+	// to fire HNSW_INDEX_SCAN; referencing a column alias does not trigger it.
+	// DuckDB does not support binding array values as query parameters for the
+	// VSS pattern, so duplicating the literal is unavoidable.
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance, media_refs, %s
 		FROM docs

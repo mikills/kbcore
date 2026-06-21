@@ -421,7 +421,7 @@ func finalizeReconstructedSnapshot(ctx context.Context, db *sql.DB) error {
 	if err := ensureDocTombstonesTable(ctx, db); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`); err != nil {
+	if err := createDocsVectorIndex(ctx, db); err != nil {
 		return err
 	}
 	return CheckpointAndCloseDB(ctx, db, "close reconstructed shard snapshot")

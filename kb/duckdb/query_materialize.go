@@ -33,6 +33,9 @@ func queryTopKRefsWithDB(
 		return nil, err
 	}
 	vecStr := FormatVectorForSQL(queryVec)
+	// See queryTopKWithDB for why the vector literal appears in both SELECT and
+	// ORDER BY: DuckDB's VSS optimizer requires the exact expression in ORDER BY
+	// and does not support array parameter binding for the HNSW pattern.
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, array_distance(embedding, %s::FLOAT[%d]) as distance
 		FROM docs

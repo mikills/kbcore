@@ -347,9 +347,9 @@ func TestHNSWIndexOnShards(t *testing.T) {
 	t.Run("query_plan_uses_hnsw_scan", testHNSWQueryPlanUsesHNSWScan)
 }
 
-// shardHasHNSWIndex returns true when docs_vec_idx exists on the docs table.
-// We create exactly one index on that table under that name, always as HNSW,
-// so presence is sufficient without filtering on index_type.
+// shardHasHNSWIndex returns true when docs_vec_idx exists as an HNSW index on
+// the docs table. Filtering on index_type ensures a future accidental B-tree
+// replacement would not pass the check silently.
 func shardHasHNSWIndex(t *testing.T, af *DuckDBArtifactFormat, path string) bool {
 	t.Helper()
 	ctx := context.Background()
@@ -359,9 +359,16 @@ func shardHasHNSWIndex(t *testing.T, af *DuckDBArtifactFormat, path string) bool
 	var count int
 	err = db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM duckdb_indexes()
-		WHERE table_name = 'docs' AND index_name = 'docs_vec_idx'
+		WHERE table_name = 'docs' AND index_name = 'docs_vec_idx' AND index_type = 'HNSW'
 	`).Scan(&count)
-	require.NoError(t, err)
+	if err != nil {
+		// Fallback for DuckDB versions that do not expose index_type.
+		err = db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM duckdb_indexes()
+			WHERE table_name = 'docs' AND index_name = 'docs_vec_idx'
+		`).Scan(&count)
+		require.NoError(t, err)
+	}
 	return count > 0
 }
 
@@ -444,7 +451,11 @@ func testHNSWIndexPresentAfterCompaction(t *testing.T) {
 	result, err := loader.CompactIfNeeded(ctx, kbID)
 	require.NoError(t, err)
 	if !result.Performed {
-		t.Skip("compaction did not fire with current corpus — adjust policy or doc count")
+		// Compaction requires at least CompactionMinShardCount shards. If the
+		// trigger policy or test corpus is too small, skip rather than fail.
+		// Check: ShardTriggerVectorRows=1, 6 docs ingested one-at-a-time → 6 shards.
+		t.Skipf("compaction did not fire (policy: trigger_rows=%d, min_shards=%d) — adjust test corpus or policy",
+			policy.ShardTriggerVectorRows, policy.CompactionMinShardCount)
 	}
 
 	af := requireDuckDBFormat(t, loader)
@@ -523,5 +534,5 @@ func testHNSWQueryPlanUsesHNSWScan(t *testing.T) {
 
 	planText := plan.String()
 	t.Logf("query plan:\n%s", planText)
-	assert.Contains(t, planText, "HNSW_INDEX_SCAN", "expected HNSW_INDEX_SCAN in query plan — ORDER BY array_distance may not be triggering the VSS optimizer rule")
+	require.Contains(t, planText, "HNSW_INDEX_SCAN", "expected HNSW_INDEX_SCAN in query plan — ORDER BY array_distance may not be triggering the VSS optimizer rule")
 }
