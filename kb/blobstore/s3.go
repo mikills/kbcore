@@ -134,9 +134,6 @@ func (s *S3BlobStore) DownloadBytes(ctx context.Context, key string) ([]byte, er
 	return data, nil
 }
 
-// DownloadBytesWithInfo downloads an object and returns its content alongside
-// the ObjectInfo (including the ETag version). Callers that need the ETag for
-// a subsequent CAS operation should use this instead of DownloadBytes + Head.
 func (s *S3BlobStore) DownloadBytesWithInfo(ctx context.Context, key string) ([]byte, *ObjectInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
