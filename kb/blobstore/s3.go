@@ -134,6 +134,37 @@ func (s *S3BlobStore) DownloadBytes(ctx context.Context, key string) ([]byte, er
 	return data, nil
 }
 
+func (s *S3BlobStore) DownloadBytesWithInfo(ctx context.Context, key string) ([]byte, *ObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	result, err := s.Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.Bucket),
+		Key:    aws.String(s.fullKey(key)),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, nil, fmt.Errorf("%w: %s", ErrNotFound, key)
+		}
+		return nil, nil, fmt.Errorf("get object %s: %w", key, err)
+	}
+	defer result.Body.Close()
+	data, err := io.ReadAll(result.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("download object %s: %w", key, err)
+	}
+	version := ""
+	if result.ETag != nil {
+		version = *result.ETag
+	}
+	size := int64(len(data))
+	updatedAt := s.now()
+	if result.LastModified != nil {
+		updatedAt = *result.LastModified
+	}
+	return data, &ObjectInfo{Key: key, Version: version, UpdatedAt: updatedAt, Size: size}, nil
+}
+
 // Download retrieves an object from S3 and writes it to the destination path.
 func (s *S3BlobStore) Download(ctx context.Context, key string, dest string) error {
 	if err := ctx.Err(); err != nil {
@@ -229,6 +260,34 @@ func (s *S3BlobStore) putObjectIfMatch(
 		version = *result.ETag
 	}
 	return &ObjectInfo{Key: key, Version: version, UpdatedAt: s.now(), Size: size}, nil
+}
+
+// UploadBytesIfNotExists writes data only if the key does not already exist
+// (uses If-None-Match: * conditional). Returns ErrVersionMismatch if the
+// object already exists.
+func (s *S3BlobStore) UploadBytesIfNotExists(ctx context.Context, key string, data []byte) (*ObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	input := &s3.PutObjectInput{
+		Bucket:      aws.String(s.Bucket),
+		Key:         aws.String(s.fullKey(key)),
+		Body:        bytes.NewReader(data),
+		IfNoneMatch: aws.String("*"),
+	}
+	result, err := s.Client.PutObject(ctx, input)
+	if err != nil {
+		var responseErr *smithyhttp.ResponseError
+		if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == 412 {
+			return nil, fmt.Errorf("%w: object already exists at %s", ErrVersionMismatch, key)
+		}
+		return nil, fmt.Errorf("put object %s: %w", key, err)
+	}
+	version := ""
+	if result.ETag != nil {
+		version = *result.ETag
+	}
+	return &ObjectInfo{Key: key, Version: version, UpdatedAt: s.now(), Size: int64(len(data))}, nil
 }
 
 func (s *S3BlobStore) Delete(ctx context.Context, key string) error {
