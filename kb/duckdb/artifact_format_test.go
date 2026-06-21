@@ -339,3 +339,189 @@ func TestOfflineExtensionLoad(t *testing.T) {
 		})
 	}
 }
+
+func TestHNSWIndexOnShards(t *testing.T) {
+	t.Run("index_present_after_shard_build", testHNSWIndexPresentAfterShardBuild)
+	t.Run("index_survives_checkpoint_reopen", testHNSWIndexSurvivesCheckpointReopen)
+	t.Run("index_present_after_compaction", testHNSWIndexPresentAfterCompaction)
+	t.Run("query_plan_uses_hnsw_scan", testHNSWQueryPlanUsesHNSWScan)
+}
+
+// shardHasHNSWIndex returns true when docs_vec_idx exists on the docs table.
+// We create exactly one index on that table under that name, always as HNSW,
+// so presence is sufficient without filtering on index_type.
+func shardHasHNSWIndex(t *testing.T, af *DuckDBArtifactFormat, path string) bool {
+	t.Helper()
+	ctx := context.Background()
+	db, err := af.OpenConfiguredDB(ctx, path)
+	require.NoError(t, err)
+	defer db.Close()
+	var count int
+	err = db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM duckdb_indexes()
+		WHERE table_name = 'docs' AND index_name = 'docs_vec_idx'
+	`).Scan(&count)
+	require.NoError(t, err)
+	return count > 0
+}
+
+func testHNSWIndexPresentAfterShardBuild(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-hnsw-shard-build"
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(8)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+
+	require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{
+		{ID: "a", Text: "alpha document"},
+		{ID: "b", Text: "beta document"},
+	}))
+
+	af := requireDuckDBFormat(t, loader)
+	inspectPath := filepath.Join(harness.CacheDir(), kbID, "hnsw-inspect.duckdb")
+	_, err := af.DownloadSnapshotFromShards(ctx, kbID, inspectPath)
+	require.NoError(t, err)
+
+	assert.True(t, shardHasHNSWIndex(t, af, inspectPath), "HNSW index missing after shard build")
+}
+
+func testHNSWIndexSurvivesCheckpointReopen(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-hnsw-checkpoint"
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(8)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+
+	require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{
+		{ID: "a", Text: "alpha document"},
+	}))
+
+	af := requireDuckDBFormat(t, loader)
+	dbPath := filepath.Join(harness.CacheDir(), kbID, "checkpoint-test.duckdb")
+	_, err := af.DownloadSnapshotFromShards(ctx, kbID, dbPath)
+	require.NoError(t, err)
+
+	// Checkpoint and close, then reopen to verify persistence.
+	{
+		db, err := af.OpenConfiguredDB(ctx, dbPath)
+		require.NoError(t, err)
+		require.NoError(t, CheckpointAndCloseDB(ctx, db, "checkpoint before reopen"))
+	}
+
+	assert.True(t, shardHasHNSWIndex(t, af, dbPath), "HNSW index lost after checkpoint/reopen")
+}
+
+func testHNSWIndexPresentAfterCompaction(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-hnsw-compaction"
+	policy := kb.ShardingPolicy{
+		ShardTriggerVectorRows: 1,
+		TargetShardBytes:       512,
+		CompactionEnabled:      true,
+		CompactionMinShardCount: 2,
+		CompactionTombstoneRatio: 0.0,
+	}
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(8)).
+		WithOptions(kb.WithShardingPolicy(policy), kb.WithCompactionEnabled(true)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+
+	// Ingest enough docs to produce multiple shards so compaction fires.
+	for i := range 6 {
+		doc := kb.Document{ID: fmt.Sprintf("doc-%02d", i), Text: fmt.Sprintf("document content %d", i)}
+		require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{doc}))
+	}
+
+	result, err := loader.CompactIfNeeded(ctx, kbID)
+	require.NoError(t, err)
+	if !result.Performed {
+		t.Skip("compaction did not fire with current corpus — adjust policy or doc count")
+	}
+
+	af := requireDuckDBFormat(t, loader)
+	inspectPath := filepath.Join(harness.CacheDir(), kbID, "post-compact-inspect.duckdb")
+	_, err = af.DownloadSnapshotFromShards(ctx, kbID, inspectPath)
+	require.NoError(t, err)
+
+	assert.True(t, shardHasHNSWIndex(t, af, inspectPath), "HNSW index missing on compacted shard")
+}
+
+// testHNSWQueryPlanUsesHNSWScan verifies that the query planner selects an
+// HNSW_INDEX_SCAN for the top-K vector query when the index is present. This
+// catches regressions where the query pattern stops matching the VSS optimizer
+// rule. DuckDB only uses the HNSW index when the table is large enough that
+// the index scan is cheaper than a sequential scan, so we build a 200-row
+// shard to exceed that threshold.
+func testHNSWQueryPlanUsesHNSWScan(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-hnsw-explain"
+	policy := kb.ShardingPolicy{
+		// Keep everything in a single shard for determinism.
+		ShardTriggerVectorRows: 10000,
+		TargetShardBytes:       1 << 30,
+	}
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(8)).
+		WithOptions(kb.WithShardingPolicy(policy)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+
+	// 200 docs is well above any per-table HNSW threshold DuckDB applies.
+	docs := make([]kb.Document, 200)
+	for i := range docs {
+		docs[i] = kb.Document{
+			ID:   fmt.Sprintf("doc-%03d", i),
+			Text: fmt.Sprintf("document number %d with unique content", i),
+		}
+	}
+	require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, docs))
+
+	af := requireDuckDBFormat(t, loader)
+	dbPath := filepath.Join(harness.CacheDir(), kbID, "explain-test.duckdb")
+	_, err := af.DownloadSnapshotFromShards(ctx, kbID, dbPath)
+	require.NoError(t, err)
+
+	db, err := af.OpenConfiguredDB(ctx, dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	queryVec := make([]float32, 8)
+	for i := range queryVec {
+		queryVec[i] = float32(i) * 0.1
+	}
+	vecStr := FormatVectorForSQL(queryVec)
+	explainSQL := fmt.Sprintf(`
+		EXPLAIN SELECT id, array_distance(embedding, %s::FLOAT[8]) as distance
+		FROM docs
+		ORDER BY array_distance(embedding, %s::FLOAT[8])
+		LIMIT 10
+	`, vecStr, vecStr)
+
+	rows, err := db.QueryContext(ctx, explainSQL)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var plan strings.Builder
+	for rows.Next() {
+		var typ, extra string
+		require.NoError(t, rows.Scan(&typ, &extra))
+		plan.WriteString(extra)
+		plan.WriteRune('\n')
+	}
+	require.NoError(t, rows.Err())
+
+	planText := plan.String()
+	t.Logf("query plan:\n%s", planText)
+	assert.Contains(t, planText, "HNSW_INDEX_SCAN", "expected HNSW_INDEX_SCAN in query plan — ORDER BY array_distance may not be triggering the VSS optimizer rule")
+}

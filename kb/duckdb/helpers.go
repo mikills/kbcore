@@ -67,9 +67,9 @@ func queryTopKWithDB(
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance, media_refs, %s
 		FROM docs
-		ORDER BY distance
+		ORDER BY array_distance(embedding, %s::FLOAT[%d])
 		LIMIT %d
-	`, vecStr, len(queryVec), metadataExpr, k))
+	`, vecStr, len(queryVec), metadataExpr, vecStr, len(queryVec), k))
 	if err != nil {
 		return nil, kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("query failed: %w", err),

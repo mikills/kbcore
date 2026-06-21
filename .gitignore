@@ -23,3 +23,7 @@ examples/extensions/
 diago_audit.txt
 diago_audit.json
 .diago/
+
+# Local product & planning docs
+product.md
+todo.md

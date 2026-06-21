@@ -36,9 +36,9 @@ func queryTopKRefsWithDB(
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, array_distance(embedding, %s::FLOAT[%d]) as distance
 		FROM docs
-		ORDER BY distance
+		ORDER BY array_distance(embedding, %s::FLOAT[%d])
 		LIMIT %d
-	`, vecStr, len(queryVec), k))
+	`, vecStr, len(queryVec), vecStr, len(queryVec), k))
 	if err != nil {
 		return nil, kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("query refs failed: %w", err),
