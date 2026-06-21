@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/search"
 
 	"github.com/labstack/echo/v4"
 )
@@ -34,10 +35,11 @@ type ragIngestDocIn struct {
 }
 
 type ragQueryRequest struct {
-	KBID       string `json:"kb_id"`
-	Query      string `json:"query"`
-	K          int    `json:"k"`
-	SearchMode string `json:"search_mode,omitempty"`
+	KBID       string             `json:"kb_id"`
+	Query      string             `json:"query"`
+	K          int                `json:"k"`
+	SearchMode string             `json:"search_mode,omitempty"`
+	Filter     *search.FilterExpr `json:"filter,omitempty"`
 }
 
 type ragQueryResultOut struct {
@@ -178,7 +180,7 @@ func handleRagQuery(c echo.Context, deps Dependencies) error {
 		logger.ErrorContext(c.Request().Context(), "rag query failed", kbIDContextKey, req.KBID, errorResponseKey, err)
 		return WriteError(c, err, deps.IsBudgetExceeded)
 	}
-	results, err := deps.Search(c.Request().Context(), req.KBID, vec, &kb.SearchOptions{Mode: mode, TopK: req.K})
+	results, err := deps.Search(c.Request().Context(), req.KBID, vec, &kb.SearchOptions{Mode: mode, TopK: req.K, Filter: req.Filter})
 	if err != nil {
 		return handleRagSearchError(
 			ragSearchErrorContext{c: c, deps: deps, logger: logger, metrics: metrics, start: start, req: req, err: err},
@@ -206,6 +208,11 @@ func bindRagQueryRequest(c echo.Context) (ragQueryRequest, kb.SearchMode, string
 	}
 	if req.K <= 0 {
 		return req, kb.SearchModeVector, "", fmt.Errorf("k must be > 0")
+	}
+	if req.Filter != nil {
+		if err := req.Filter.Validate(); err != nil {
+			return req, kb.SearchModeVector, "", fmt.Errorf("invalid filter: %w", err)
+		}
 	}
 	mode, modeName, err := parseSearchMode(req.SearchMode)
 	return req, mode, modeName, err

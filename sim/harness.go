@@ -14,6 +14,7 @@ import (
 
 	kb "github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/kb/duckdb"
+	"github.com/mikills/minnow/kb/search"
 )
 
 var (
@@ -240,6 +241,15 @@ func (h *Harness) Search(kbID string, vec []float32, k int) ([]kb.ExpandedResult
 		KBID:     kbID,
 		QueryVec: vec,
 		Options:  kb.RagQueryOptions{TopK: k},
+	})
+}
+
+// SearchWithFilter runs a filtered top-k vector search against kbID.
+func (h *Harness) SearchWithFilter(kbID string, vec []float32, k int, filter *search.FilterExpr) ([]kb.ExpandedResult, error) {
+	return h.format.QueryRag(h.ctx, kb.RagQueryRequest{
+		KBID:     kbID,
+		QueryVec: vec,
+		Options:  kb.RagQueryOptions{TopK: k, Filter: filter},
 	})
 }
 

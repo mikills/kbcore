@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	kb "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/search"
 )
 
 type rankedDocRef struct {
@@ -25,6 +26,7 @@ func queryTopKRefsWithDB(
 	queryVec []float32,
 	k int,
 	validateDimension bool,
+	filter *search.FilterExpr,
 ) ([]rankedDocRef, error) {
 	if k <= 0 {
 		return []rankedDocRef{}, nil
@@ -33,13 +35,17 @@ func queryTopKRefsWithDB(
 		return nil, err
 	}
 	vecStr := FormatVectorForSQL(queryVec)
+	whereClause, err := buildWhereClause(filter)
+	if err != nil {
+		return nil, err
+	}
 	// ORDER BY must use the expression directly — see queryTopKWithDB.
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, array_distance(embedding, %s::FLOAT[%d]) as distance
-		FROM docs
+		FROM docs%s
 		ORDER BY array_distance(embedding, %s::FLOAT[%d])
 		LIMIT %d
-	`, vecStr, len(queryVec), vecStr, len(queryVec), k))
+	`, vecStr, len(queryVec), whereClause, vecStr, len(queryVec), k))
 	if err != nil {
 		return nil, kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("query refs failed: %w", err),

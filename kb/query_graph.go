@@ -90,7 +90,7 @@ func queryVectorSearch(
 	ragReq := RagQueryRequest{
 		KBID:     kbID,
 		QueryVec: queryVec,
-		Options:  RagQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance},
+		Options:  RagQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance, Filter: options.Filter},
 	}
 	if err := ValidateRagQueryRequest(ragReq); err != nil {
 		return nil, err
@@ -102,7 +102,7 @@ func graphQueryRequest(kbID string, queryVec []float32, options SearchOptions) G
 	return GraphQueryRequest{
 		KBID:     kbID,
 		QueryVec: queryVec,
-		Options:  GraphQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance, Expansion: options.Expansion},
+		Options:  GraphQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance, Filter: options.Filter, Expansion: options.Expansion},
 	}
 }
 

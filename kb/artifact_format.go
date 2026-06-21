@@ -3,15 +3,14 @@ package kb
 import (
 	"context"
 	"fmt"
+
+	"github.com/mikills/minnow/kb/search"
 )
 
 type RagQueryOptions struct {
-	TopK int
-	// MaxDistance, if set, filters results after top-K retrieval. Results with
-	// distance > MaxDistance are excluded. Because filtering is post-retrieval,
-	// a small TopK may cause in-threshold results to be missed if they fall
-	// outside the top-K window.
+	TopK        int
 	MaxDistance *float64
+	Filter      *search.FilterExpr
 }
 
 type RagQueryRequest struct {
@@ -21,10 +20,9 @@ type RagQueryRequest struct {
 }
 
 type GraphQueryOptions struct {
-	TopK int
-	// MaxDistance, if set, filters results after top-K retrieval (same semantics
-	// as RagQueryOptions.MaxDistance).
+	TopK        int
 	MaxDistance *float64
+	Filter      *search.FilterExpr
 	Expansion   *ExpansionOptions
 }
 

@@ -20,7 +20,7 @@ func searchExpandedWithDB(
 		return nil, err
 	}
 
-	seeds, err := queryTopKWithDB(ctx, db, queryVec, options.SeedK, false)
+	seeds, err := queryTopKWithDB(ctx, db, queryVec, options.SeedK, false, nil)
 	if err != nil {
 		return nil, err
 	}
