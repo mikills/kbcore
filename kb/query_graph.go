@@ -90,7 +90,7 @@ func queryVectorSearch(
 	ragReq := RagQueryRequest{
 		KBID:     kbID,
 		QueryVec: queryVec,
-		Options:  RagQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance},
+		Options:  RagQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance, Filter: options.Filter},
 	}
 	if err := ValidateRagQueryRequest(ragReq); err != nil {
 		return nil, err

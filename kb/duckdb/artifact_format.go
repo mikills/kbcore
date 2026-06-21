@@ -157,7 +157,7 @@ func (f *DuckDBArtifactFormat) QueryRag(ctx context.Context, req kb.RagQueryRequ
 		return nil, err
 	}
 
-	results, err := f.searchTopK(ctx, req.KBID, req.QueryVec, req.Options.TopK)
+	results, err := f.searchTopK(ctx, req.KBID, req.QueryVec, req.Options.TopK, req.Options.Filter)
 	if err != nil {
 		return nil, err
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/search"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -39,10 +40,11 @@ type Service struct {
 }
 
 type queryInput struct {
-	KBID       string `json:"kb_id,omitempty"       jsonschema:"Knowledge base ID. Defaults to default."`
-	Query      string `json:"query"                 jsonschema:"Natural language query."`
-	K          int    `json:"k"                     jsonschema:"Number of results to return."`
-	SearchMode string `json:"search_mode,omitempty" jsonschema:"vector, graph, or adaptive."`
+	KBID       string          `json:"kb_id,omitempty"       jsonschema:"Knowledge base ID. Defaults to default."`
+	Query      string          `json:"query"                 jsonschema:"Natural language query."`
+	K          int             `json:"k"                     jsonschema:"Number of results to return."`
+	SearchMode string          `json:"search_mode,omitempty" jsonschema:"vector, graph, or adaptive."`
+	Filter     json.RawMessage `json:"filter,omitempty"      jsonschema:"Optional metadata predicate filter as a JSON FilterExpr object."`
 }
 
 type queryOutput struct {
@@ -80,7 +82,11 @@ func (s *Service) query(
 	if err != nil {
 		return nil, queryOutput{}, err
 	}
-	results, err := s.Search(ctx, kbID, vec, &kb.SearchOptions{Mode: mode, TopK: in.K})
+	filter, err := decodeFilterExpr(in.Filter)
+	if err != nil {
+		return nil, queryOutput{}, fmt.Errorf("invalid filter: %w", err)
+	}
+	results, err := s.Search(ctx, kbID, vec, &kb.SearchOptions{Mode: mode, TopK: in.K, Filter: filter})
 	if err != nil {
 		return nil, queryOutput{}, err
 	}
@@ -749,6 +755,20 @@ func defaultKBID(raw string) string {
 		return s
 	}
 	return "default"
+}
+
+func decodeFilterExpr(raw json.RawMessage) (*search.FilterExpr, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var f search.FilterExpr
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return nil, err
+	}
+	if err := f.Validate(); err != nil {
+		return nil, err
+	}
+	return &f, nil
 }
 
 // logWarn emits a warn-level log via the configured slog.Logger when one is

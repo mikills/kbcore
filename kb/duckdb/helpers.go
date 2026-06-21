@@ -9,6 +9,7 @@ import (
 
 	kb "github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/kb/duckdb/internal/dimension"
+	"github.com/mikills/minnow/kb/search"
 )
 
 func FormatVectorForSQL(vec []float32) string {
@@ -42,7 +43,7 @@ func tableExists(ctx context.Context, q interface {
 }
 
 func QueryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int) ([]kb.QueryResult, error) {
-	return queryTopKWithDB(ctx, db, queryVec, k, true)
+	return queryTopKWithDB(ctx, db, queryVec, k, true, nil)
 }
 
 func queryTopKWithDB(
@@ -51,6 +52,7 @@ func queryTopKWithDB(
 	queryVec []float32,
 	k int,
 	validateDimension bool,
+	filter *search.FilterExpr,
 ) ([]kb.QueryResult, error) {
 	if k <= 0 {
 		return []kb.QueryResult{}, nil
@@ -64,13 +66,17 @@ func queryTopKWithDB(
 	if err != nil {
 		return nil, err
 	}
+	whereClause, err := buildWhereClause(filter)
+	if err != nil {
+		return nil, err
+	}
 	// ORDER BY must use the expression directly, not an alias — the VSS optimizer only fires HNSW_INDEX_SCAN on array_distance(...).
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance, media_refs, %s
-		FROM docs
+		FROM docs%s
 		ORDER BY array_distance(embedding, %s::FLOAT[%d])
 		LIMIT %d
-	`, vecStr, len(queryVec), metadataExpr, vecStr, len(queryVec), k))
+	`, vecStr, len(queryVec), metadataExpr, whereClause, vecStr, len(queryVec), k))
 	if err != nil {
 		return nil, kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("query failed: %w", err),
@@ -343,4 +349,15 @@ func CheckpointAndCloseDB(ctx context.Context, db *sql.DB, closeContext string) 
 		return fmt.Errorf("%s: %w", closeContext, err)
 	}
 	return nil
+}
+
+func buildWhereClause(filter *search.FilterExpr) (string, error) {
+	clause, err := search.BuildFilterSQL(filter)
+	if err != nil {
+		return "", fmt.Errorf("invalid filter: %w", err)
+	}
+	if clause == "" {
+		return "", nil
+	}
+	return " WHERE " + clause, nil
 }
