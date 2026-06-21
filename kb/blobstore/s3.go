@@ -231,6 +231,34 @@ func (s *S3BlobStore) putObjectIfMatch(
 	return &ObjectInfo{Key: key, Version: version, UpdatedAt: s.now(), Size: size}, nil
 }
 
+// UploadBytesIfNotExists writes data only if the key does not already exist
+// (uses If-None-Match: * conditional). Returns ErrVersionMismatch if the
+// object already exists.
+func (s *S3BlobStore) UploadBytesIfNotExists(ctx context.Context, key string, data []byte) (*ObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	input := &s3.PutObjectInput{
+		Bucket:      aws.String(s.Bucket),
+		Key:         aws.String(s.fullKey(key)),
+		Body:        bytes.NewReader(data),
+		IfNoneMatch: aws.String("*"),
+	}
+	result, err := s.Client.PutObject(ctx, input)
+	if err != nil {
+		var responseErr *smithyhttp.ResponseError
+		if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == 412 {
+			return nil, fmt.Errorf("%w: object already exists at %s", ErrVersionMismatch, key)
+		}
+		return nil, fmt.Errorf("put object %s: %w", key, err)
+	}
+	version := ""
+	if result.ETag != nil {
+		version = *result.ETag
+	}
+	return &ObjectInfo{Key: key, Version: version, UpdatedAt: s.now(), Size: int64(len(data))}, nil
+}
+
 func (s *S3BlobStore) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err

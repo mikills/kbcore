@@ -23,6 +23,7 @@ import (
 	"github.com/mikills/minnow/kb/blobstore"
 	"github.com/mikills/minnow/kb/config"
 	kbduckdb "github.com/mikills/minnow/kb/duckdb"
+	"github.com/mikills/minnow/kb/lease"
 	"github.com/mikills/minnow/mcpserver"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	mongoopts "go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -128,6 +129,11 @@ func (r *Runtime) buildKBOptions(ctx context.Context, cfg *config.Config) ([]kb.
 	}
 	kbOpts := baseKBOptions(cfg, embedder)
 	kbOpts = append(kbOpts, graphKBOptions(cfg, r.logger)...)
+	leaseOpts, err := buildLeaseOptions(ctx, cfg, r.logger)
+	if err != nil {
+		return nil, err
+	}
+	kbOpts = append(kbOpts, leaseOpts...)
 	mongoOpts, err := r.wireMongo(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -330,13 +336,13 @@ func buildBlobStore(ctx context.Context, cfg *config.Config) (kb.BlobStore, erro
 	case "local":
 		return &kb.LocalBlobStore{Root: cfg.Storage.Blob.Root}, nil
 	case "s3":
-		return buildS3BlobStore(ctx, cfg.Storage.Blob.S3)
+		return newS3BlobStore(ctx, cfg.Storage.Blob.S3)
 	default:
 		return nil, fmt.Errorf("configruntime: blob kind %q not supported", cfg.Storage.Blob.Kind)
 	}
 }
 
-func buildS3BlobStore(ctx context.Context, s3cfg *config.S3BlobConfig) (kb.BlobStore, error) {
+func newS3BlobStore(ctx context.Context, s3cfg *config.S3BlobConfig) (*blobstore.S3BlobStore, error) {
 	opts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(s3cfg.Region),
 	}
@@ -356,6 +362,22 @@ func buildS3BlobStore(ctx context.Context, s3cfg *config.S3BlobConfig) (kb.BlobS
 		}
 	})
 	return blobstore.NewS3BlobStore(client, s3cfg.Bucket, s3cfg.Prefix), nil
+}
+
+func buildLeaseOptions(ctx context.Context, cfg *config.Config, logger *slog.Logger) ([]kb.KBOption, error) {
+	if cfg.Storage.Blob.Kind != "s3" {
+		return nil, nil
+	}
+	store, err := newS3BlobStore(ctx, cfg.Storage.Blob.S3)
+	if err != nil {
+		return nil, fmt.Errorf("build s3 lease store: %w", err)
+	}
+	mgr, err := lease.NewS3Manager(store, "")
+	if err != nil {
+		return nil, fmt.Errorf("build s3 lease manager: %w", err)
+	}
+	logger.Info("using S3-native distributed write lease (no Redis required)")
+	return []kb.KBOption{kb.WithWriteLeaseManager(mgr)}, nil
 }
 
 func buildEmbedder(cfg *config.Config, logger *slog.Logger) (kb.Embedder, error) {
