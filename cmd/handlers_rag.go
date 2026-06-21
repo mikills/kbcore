@@ -19,6 +19,8 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+const maxQueryK = 200
+
 type ragIngestRequest struct {
 	KBID         string           `json:"kb_id"`
 	ChunkSize    int              `json:"chunk_size"`
@@ -209,6 +211,9 @@ func bindRagQueryRequest(c echo.Context) (ragQueryRequest, kb.SearchMode, string
 	}
 	if req.K <= 0 {
 		return req, kb.SearchModeVector, "", fmt.Errorf("k must be > 0")
+	}
+	if req.K > maxQueryK {
+		return req, kb.SearchModeVector, "", fmt.Errorf("k must be <= %d", maxQueryK)
 	}
 	if req.Filter != nil {
 		if err := req.Filter.Validate(); err != nil {

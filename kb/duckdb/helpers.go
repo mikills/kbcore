@@ -379,7 +379,9 @@ func queryBM25WithDB(ctx context.Context, db *sql.DB, queryText string, k int, f
 	if err != nil {
 		return nil, err
 	}
-	bm25Cond := "fts_main_docs.match_bm25(id, " + quoteSQLStringLiteral(queryText) + ", fields := 'content') IS NOT NULL"
+	// match_bm25 does not support bound parameters; escape once and reuse.
+	escapedQuery := quoteSQLStringLiteral(queryText)
+	bm25Cond := "fts_main_docs.match_bm25(id, " + escapedQuery + ", fields := 'content') IS NOT NULL"
 	if whereClause != "" {
 		whereClause = whereClause + " AND " + bm25Cond
 	} else {
@@ -390,7 +392,7 @@ func queryBM25WithDB(ctx context.Context, db *sql.DB, queryText string, k int, f
 		FROM docs%s
 		ORDER BY bm25_score DESC
 		LIMIT %d
-	`, quoteSQLStringLiteral(queryText), metadataExpr, whereClause, k))
+	`, escapedQuery, metadataExpr, whereClause, k))
 	if err != nil {
 		return nil, fmt.Errorf("bm25 query failed: %w", err)
 	}
