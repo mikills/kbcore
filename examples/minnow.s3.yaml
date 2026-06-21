@@ -1,0 +1,30 @@
+# Minnow config with S3 blob storage.
+# Works with AWS S3, Cloudflare R2, MinIO, or any S3-compatible store.
+#
+# Run: MINNOW_CONFIG=./examples/minnow.s3.yaml ./minnow
+
+storage:
+  blob:
+    kind: s3
+    s3:
+      bucket: my-minnow-bucket
+      region: us-east-1
+      # prefix: minnow/       # optional key prefix for multi-tenant buckets
+      # endpoint: http://localhost:9000  # set for MinIO / R2 / other S3-compatible stores
+      # access_key_id: ${AWS_ACCESS_KEY_ID}       # optional; falls back to AWS credential chain
+      # secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+  cache:
+    dir: ./.minnow/cache
+    max_bytes: 1073741824
+
+embedder:
+  provider: openai_compatible
+  openai_compatible:
+    base_url: https://api.openai.com/v1
+    model: text-embedding-3-small
+    token: ${OPENAI_API_KEY}
+
+mcp:
+  enabled: true
+  transports: [stdio]
+  allow_indexing: true

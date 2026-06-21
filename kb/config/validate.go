@@ -129,15 +129,39 @@ func (c *Config) validateHTTP() error {
 }
 
 func (c *Config) validateStorage() error {
-	if c.Storage.Blob.Kind != "local" {
-		return fmt.Errorf("storage.blob.kind %q is not supported (only \"local\")", c.Storage.Blob.Kind)
+	var blobErr error
+	switch c.Storage.Blob.Kind {
+	case "local":
+		blobErr = requireNonEmptyString("storage.blob.root", c.Storage.Blob.Root)
+	case "s3":
+		blobErr = c.validateS3BlobConfig()
+	default:
+		return fmt.Errorf("storage.blob.kind %q is not supported (want \"local\" or \"s3\")", c.Storage.Blob.Kind)
 	}
 	return firstErr(
-		requireNonEmptyString("storage.blob.root", c.Storage.Blob.Root),
+		blobErr,
 		requireNonEmptyString("storage.cache.dir", c.Storage.Cache.Dir),
 		requireNonNegativeInt64("storage.cache.max_bytes", c.Storage.Cache.MaxBytes, 0),
 		requireNonNegativeDurationValue("storage.cache.entry_ttl", c.Storage.Cache.EntryTTL, "0 disables the TTL"),
 		requirePositiveDuration("storage.cache.evict_interval", c.Storage.Cache.EvictInterval),
+	)
+}
+
+func (c *Config) validateS3BlobConfig() error {
+	s3 := c.Storage.Blob.S3
+	if s3 == nil {
+		return fmt.Errorf("storage.blob.s3 is required when kind is \"s3\"")
+	}
+	if (s3.AccessKeyID == "") != (s3.SecretAccessKey == "") {
+		return fmt.Errorf("storage.blob.s3: access_key_id and secret_access_key must both be set or both be empty")
+	}
+	var endpointErr error
+	if s3.Endpoint != "" {
+		endpointErr = validateHTTPURL("storage.blob.s3.endpoint", s3.Endpoint)
+	}
+	return firstErr(
+		requireNonEmptyString("storage.blob.s3.bucket", s3.Bucket),
+		endpointErr,
 	)
 }
 
