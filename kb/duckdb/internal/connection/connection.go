@@ -74,7 +74,25 @@ func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
 	if err := LoadVSS(ctx, db, cfg.ExtensionDir, cfg.OfflineExt); err != nil {
 		return err
 	}
+	if err := LoadFTS(ctx, db, cfg.ExtensionDir, cfg.OfflineExt); err != nil {
+		return err
+	}
 	return ConfigureRuntime(ctx, db, cfg.MemoryLimit, cfg.Threads)
+}
+
+func LoadFTS(ctx context.Context, db *sql.DB, extensionDir string, offlineExt bool) error {
+	if _, err := db.ExecContext(ctx, `LOAD fts`); err == nil {
+		return nil
+	} else if offlineExt {
+		return fmt.Errorf("failed to load fts extension in offline mode (check extension_directory %q): %w", extensionDir, err)
+	}
+	if _, installErr := db.ExecContext(ctx, `INSTALL fts`); installErr != nil {
+		return fmt.Errorf("failed to install fts: %w", installErr)
+	}
+	if _, loadErr := db.ExecContext(ctx, `LOAD fts`); loadErr != nil {
+		return fmt.Errorf("failed to load fts after install: %w", loadErr)
+	}
+	return nil
 }
 
 func DisableImplicitExtensionLoading(ctx context.Context, db *sql.DB) error {

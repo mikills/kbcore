@@ -395,6 +395,8 @@ const (
 	ModeVector Mode = iota
 	ModeGraph
 	ModeAdaptive
+	ModeBM25
+	ModeHybrid
 )
 
 type Options struct {
@@ -402,6 +404,7 @@ type Options struct {
 	TopK           int
 	MaxDistance    *float64
 	Filter         *FilterExpr
+	QueryText      string // raw text for BM25/hybrid modes
 	Expansion      *ExpansionOptions
 	AdaptiveMinSim float64
 }
@@ -452,7 +455,9 @@ func NormalizeOptions(opts *Options) Options {
 		return defaults
 	}
 	normalized := *opts
-	if normalized.Mode != ModeGraph && normalized.Mode != ModeAdaptive {
+	switch normalized.Mode {
+	case ModeGraph, ModeAdaptive, ModeBM25, ModeHybrid:
+	default:
 		normalized.Mode = defaults.Mode
 	}
 	if normalized.AdaptiveMinSim <= 0 || normalized.AdaptiveMinSim > 1 {

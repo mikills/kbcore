@@ -232,6 +232,10 @@ func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(
 		return 0, false, "", nil, err
 	}
 
+	if err := createDocsFTSIndex(ctx, shardDB); err != nil {
+		return 0, false, "", nil, err
+	}
+
 	if err := shardbuild.CopyGraphTables(ctx, shardDB, EnsureGraphTables); err != nil {
 		return 0, false, "", nil, err
 	}
@@ -422,6 +426,9 @@ func finalizeReconstructedSnapshot(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := createDocsVectorIndex(ctx, db); err != nil {
+		return err
+	}
+	if err := createDocsFTSIndex(ctx, db); err != nil {
 		return err
 	}
 	return CheckpointAndCloseDB(ctx, db, "close reconstructed shard snapshot")

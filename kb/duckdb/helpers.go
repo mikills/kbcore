@@ -361,3 +361,60 @@ func buildWhereClause(filter *search.FilterExpr) (string, error) {
 	}
 	return " WHERE " + clause, nil
 }
+
+// queryBM25WithDB returns BM25-ranked results for the given query text.
+// Results are ordered by BM25 score descending; at most k rows are returned.
+func queryBM25WithDB(ctx context.Context, db *sql.DB, queryText string, k int, filter *search.FilterExpr) ([]kb.QueryResult, error) {
+	if k <= 0 {
+		return []kb.QueryResult{}, nil
+	}
+	if strings.TrimSpace(queryText) == "" {
+		return []kb.QueryResult{}, nil
+	}
+	metadataExpr, err := docsMetadataSelectExpr(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	whereClause, err := buildWhereClause(filter)
+	if err != nil {
+		return nil, err
+	}
+	bm25Cond := "fts_main_docs.match_bm25(id, " + quoteSQLStringLiteral(queryText) + ", fields := 'content') IS NOT NULL"
+	if whereClause != "" {
+		whereClause = whereClause + " AND " + bm25Cond
+	} else {
+		whereClause = " WHERE " + bm25Cond
+	}
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT id, content, fts_main_docs.match_bm25(id, %s, fields := 'content') AS bm25_score, media_refs, %s
+		FROM docs%s
+		ORDER BY bm25_score DESC
+		LIMIT %d
+	`, quoteSQLStringLiteral(queryText), metadataExpr, whereClause, k))
+	if err != nil {
+		return nil, fmt.Errorf("bm25 query failed: %w", err)
+	}
+	defer rows.Close()
+	results := make([]kb.QueryResult, 0, k)
+	for rows.Next() {
+		var r kb.QueryResult
+		var mediaRefsRaw sql.NullString
+		var metadataRaw sql.NullString
+		if err := rows.Scan(&r.ID, &r.Content, &r.Distance, &mediaRefsRaw, &metadataRaw); err != nil {
+			return nil, fmt.Errorf("scan bm25 result: %w", err)
+		}
+		if refs, err := decodeMediaRefs(mediaRefsRaw); err == nil {
+			r.MediaRefs = refs
+		}
+		if meta, err := decodeMetadata(metadataRaw); err == nil {
+			r.Metadata = meta
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+func quoteSQLStringLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+

@@ -968,6 +968,9 @@ func (m *mockArtifactFormat) QueryGraph(ctx context.Context, req GraphQueryReque
 	}
 	return nil, nil
 }
+func (m *mockArtifactFormat) QueryBM25(context.Context, BM25QueryRequest) ([]ExpandedResult, error) {
+	return nil, nil
+}
 func (m *mockArtifactFormat) Ingest(ctx context.Context, req IngestUpsertRequest) (IngestResult, error) {
 	if m.ingestFn != nil {
 		return m.ingestFn(ctx, req)

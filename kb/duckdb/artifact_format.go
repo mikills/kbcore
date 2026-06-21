@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -164,6 +165,73 @@ func (f *DuckDBArtifactFormat) QueryRag(ctx context.Context, req kb.RagQueryRequ
 	}
 	expanded := kb.ExpandedFromVector(results)
 	return filterExpandedByMaxDistance(expanded, req.Options.MaxDistance), nil
+}
+
+func (f *DuckDBArtifactFormat) QueryBM25(ctx context.Context, req kb.BM25QueryRequest) ([]kb.ExpandedResult, error) {
+	if strings.TrimSpace(req.KBID) == "" {
+		return nil, fmt.Errorf("kb_id is required")
+	}
+	if strings.TrimSpace(req.QueryText) == "" {
+		return nil, fmt.Errorf("query text is required")
+	}
+	results, err := f.searchBM25AllShards(ctx, req.KBID, req.QueryText, req.Options.TopK, req.Options.Filter)
+	if err != nil {
+		return nil, err
+	}
+	expanded := kb.ExpandedFromVector(results)
+	return filterExpandedByMaxDistance(expanded, req.Options.MaxDistance), nil
+}
+
+func (f *DuckDBArtifactFormat) searchBM25AllShards(ctx context.Context, kbID, queryText string, k int, filter *search.FilterExpr) ([]kb.QueryResult, error) {
+	doc, err := f.deps.ManifestStore.Get(ctx, kbID)
+	if err != nil {
+		if errors.Is(err, kb.ErrManifestNotFound) {
+			return nil, kb.ErrKBUninitialized
+		}
+		return nil, err
+	}
+	manifest := &doc.Manifest
+	if err := f.validateManifestFormat(manifest); err != nil {
+		return nil, err
+	}
+	if len(manifest.Shards) == 0 {
+		return nil, kb.ErrKBUninitialized
+	}
+
+	allResults := make([]kb.QueryResult, 0)
+	for _, shard := range manifest.Shards {
+		conn, err := f.openCachedShardConn(ctx, kbID, shard)
+		if err != nil {
+			return nil, fmt.Errorf("open shard %s for bm25: %w", shard.ShardID, err)
+		}
+		rows, err := queryBM25WithDB(ctx, conn.db, queryText, k, filter)
+		conn.mu.Unlock()
+		if err != nil {
+			return nil, fmt.Errorf("bm25 shard %s: %w", shard.ShardID, err)
+		}
+		allResults = append(allResults, rows...)
+	}
+
+	// Re-rank across shards by BM25 score (Distance field carries the score).
+	sort.Slice(allResults, func(i, j int) bool {
+		if allResults[i].Distance != allResults[j].Distance {
+			return allResults[i].Distance > allResults[j].Distance
+		}
+		return allResults[i].ID < allResults[j].ID
+	})
+	seen := make(map[string]struct{}, len(allResults))
+	deduped := make([]kb.QueryResult, 0, len(allResults))
+	for _, r := range allResults {
+		if _, ok := seen[r.ID]; ok {
+			continue
+		}
+		seen[r.ID] = struct{}{}
+		deduped = append(deduped, r)
+	}
+	if k > 0 && len(deduped) > k {
+		deduped = deduped[:k]
+	}
+	return deduped, nil
 }
 
 func (f *DuckDBArtifactFormat) QueryGraph(ctx context.Context, req kb.GraphQueryRequest) ([]kb.ExpandedResult, error) {

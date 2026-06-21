@@ -43,7 +43,7 @@ type queryInput struct {
 	KBID       string          `json:"kb_id,omitempty"       jsonschema:"Knowledge base ID. Defaults to default."`
 	Query      string          `json:"query"                 jsonschema:"Natural language query."`
 	K          int             `json:"k"                     jsonschema:"Number of results to return."`
-	SearchMode string          `json:"search_mode,omitempty" jsonschema:"vector, graph, or adaptive."`
+	SearchMode string          `json:"search_mode,omitempty" jsonschema:"vector, graph, adaptive, bm25, or hybrid."`
 	Filter     json.RawMessage `json:"filter,omitempty"      jsonschema:"Optional metadata predicate filter as a JSON FilterExpr object."`
 }
 
@@ -86,7 +86,7 @@ func (s *Service) query(
 	if err != nil {
 		return nil, queryOutput{}, fmt.Errorf("invalid filter: %w", err)
 	}
-	results, err := s.Search(ctx, kbID, vec, &kb.SearchOptions{Mode: mode, TopK: in.K, Filter: filter})
+	results, err := s.Search(ctx, kbID, vec, &kb.SearchOptions{Mode: mode, TopK: in.K, Filter: filter, QueryText: in.Query})
 	if err != nil {
 		return nil, queryOutput{}, err
 	}
@@ -745,8 +745,12 @@ func parseSearchMode(raw string) (kb.SearchMode, string, error) {
 		return kb.SearchModeGraph, "graph", nil
 	case "adaptive":
 		return kb.SearchModeAdaptive, "adaptive", nil
+	case "bm25":
+		return kb.SearchModeBM25, "bm25", nil
+	case "hybrid":
+		return kb.SearchModeHybrid, "hybrid", nil
 	default:
-		return kb.SearchModeVector, "", fmt.Errorf("invalid search_mode: %q (allowed: vector, graph, adaptive)", raw)
+		return kb.SearchModeVector, "", fmt.Errorf("invalid search_mode: %q (allowed: vector, graph, adaptive, bm25, hybrid)", raw)
 	}
 }
 

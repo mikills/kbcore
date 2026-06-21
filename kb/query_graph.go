@@ -17,6 +17,8 @@ const (
 	SearchModeVector   = search.ModeVector
 	SearchModeGraph    = search.ModeGraph
 	SearchModeAdaptive = search.ModeAdaptive
+	SearchModeBM25     = search.ModeBM25
+	SearchModeHybrid   = search.ModeHybrid
 )
 
 type SearchOptions = search.Options
@@ -44,6 +46,10 @@ func (k *KB) Search(
 		return queryGraphSearch(ctx, format, kbID, queryVec, options)
 	case SearchModeAdaptive:
 		return queryAdaptiveSearch(ctx, format, kbID, queryVec, options)
+	case SearchModeBM25:
+		return queryBM25Search(ctx, format, kbID, options)
+	case SearchModeHybrid:
+		return queryHybridSearch(ctx, format, kbID, queryVec, options)
 	default:
 		return queryVectorSearch(ctx, format, kbID, queryVec, options)
 	}
@@ -104,6 +110,56 @@ func graphQueryRequest(kbID string, queryVec []float32, options SearchOptions) G
 		QueryVec: queryVec,
 		Options:  GraphQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance, Filter: options.Filter, Expansion: options.Expansion},
 	}
+}
+
+func queryBM25Search(
+	ctx context.Context,
+	format ArtifactFormat,
+	kbID string,
+	options SearchOptions,
+) ([]ExpandedResult, error) {
+	if options.QueryText == "" {
+		return nil, fmt.Errorf("%w: query_text is required for bm25 mode", ErrInvalidQueryRequest)
+	}
+	return format.QueryBM25(ctx, BM25QueryRequest{
+		KBID:      kbID,
+		QueryText: options.QueryText,
+		Options:   RagQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance, Filter: options.Filter},
+	})
+}
+
+func queryHybridSearch(
+	ctx context.Context,
+	format ArtifactFormat,
+	kbID string,
+	queryVec []float32,
+	options SearchOptions,
+) ([]ExpandedResult, error) {
+	if options.QueryText == "" {
+		return nil, fmt.Errorf("%w: query_text is required for hybrid mode", ErrInvalidQueryRequest)
+	}
+
+	vectorResults, err := queryVectorSearch(ctx, format, kbID, queryVec, options)
+	if err != nil {
+		return nil, err
+	}
+	bm25Results, err := queryBM25Search(ctx, format, kbID, options)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert ExpandedResult slices to QueryResult for RRF merging.
+	vecQR := make([]QueryResult, len(vectorResults))
+	for i, r := range vectorResults {
+		vecQR[i] = QueryResult{ID: r.ID, Content: r.Content, Distance: r.Distance, MediaRefs: r.MediaRefs, Metadata: r.Metadata}
+	}
+	bm25QR := make([]QueryResult, len(bm25Results))
+	for i, r := range bm25Results {
+		bm25QR[i] = QueryResult{ID: r.ID, Content: r.Content, Distance: r.Distance, MediaRefs: r.MediaRefs, Metadata: r.Metadata}
+	}
+
+	merged := MergeHybridRRF(vecQR, bm25QR, options.TopK)
+	return ExpandedFromVector(merged), nil
 }
 
 func NormalizeExpansionOptions(topK int, opts *ExpansionOptions) ExpansionOptions {
