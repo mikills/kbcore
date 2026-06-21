@@ -20,10 +20,9 @@ type RagQueryRequest struct {
 }
 
 type GraphQueryOptions struct {
-	TopK int
-	// MaxDistance, if set, filters results after top-K retrieval (same semantics
-	// as RagQueryOptions.MaxDistance).
+	TopK        int
 	MaxDistance *float64
+	Filter      *search.FilterExpr
 	Expansion   *ExpansionOptions
 }
 

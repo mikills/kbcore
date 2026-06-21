@@ -11,6 +11,7 @@ import (
 	_ "github.com/duckdb/duckdb-go/v2"
 
 	kb "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/search"
 )
 
 // NewArtifactFormat creates a new DuckDBArtifactFormat from the given deps.
@@ -187,7 +188,8 @@ func (f *DuckDBArtifactFormat) QueryGraph(ctx context.Context, req kb.GraphQuery
 	if err != nil {
 		return nil, err
 	}
-	return filterExpandedByMaxDistance(merged, req.Options.MaxDistance), nil
+	results := filterExpandedByMaxDistance(merged, req.Options.MaxDistance)
+	return filterExpandedByPredicate(results, req.Options.Filter), nil
 }
 
 func (f *DuckDBArtifactFormat) runGraphExpansionAcrossShards(
@@ -321,6 +323,19 @@ func filterExpandedByMaxDistance(results []kb.ExpandedResult, maxDistance *float
 		}
 	}
 	return filtered
+}
+
+func filterExpandedByPredicate(results []kb.ExpandedResult, filter *search.FilterExpr) []kb.ExpandedResult {
+	if filter == nil {
+		return results
+	}
+	out := make([]kb.ExpandedResult, 0, len(results))
+	for _, r := range results {
+		if filter.Match(r.Metadata) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func ensureGraphSelectionAvailable(selection *vectorQuerySelection) error {

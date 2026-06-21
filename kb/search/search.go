@@ -103,6 +103,127 @@ func validateFilterField(field string) error {
 	return nil
 }
 
+// Match evaluates the filter against a metadata map in Go (used for
+// post-retrieval filtering of graph/adaptive search results).
+// Returns true when f is nil or when the metadata satisfies the predicate.
+func (f *FilterExpr) Match(metadata map[string]any) bool {
+	if f == nil {
+		return true
+	}
+	return matchExpr(*f, metadata)
+}
+
+func matchExpr(f FilterExpr, meta map[string]any) bool {
+	if f.Field != "" {
+		return matchLeaf(f, meta)
+	}
+	if len(f.And) > 0 {
+		for _, child := range f.And {
+			if !matchExpr(child, meta) {
+				return false
+			}
+		}
+		return true
+	}
+	if len(f.Or) > 0 {
+		for _, child := range f.Or {
+			if matchExpr(child, meta) {
+				return true
+			}
+		}
+		return false
+	}
+	return true // empty expr is a no-op
+}
+
+func matchLeaf(f FilterExpr, meta map[string]any) bool {
+	val, ok := meta[f.Field]
+	if !ok {
+		return false
+	}
+	if f.Op == FilterOpIn {
+		return matchIn(val, f.Value)
+	}
+	return matchCmp(val, f.Op, f.Value)
+}
+
+func matchCmp(got any, op FilterOp, want any) bool {
+	switch op {
+	case FilterOpEq:
+		return matchEq(got, want)
+	case FilterOpNe:
+		return !matchEq(got, want)
+	case FilterOpGt, FilterOpGte, FilterOpLt, FilterOpLte:
+		gotN, gotOk := toFloat64(got)
+		wantN, wantOk := toFloat64(want)
+		if !gotOk || !wantOk {
+			return false
+		}
+		switch op {
+		case FilterOpGt:
+			return gotN > wantN
+		case FilterOpGte:
+			return gotN >= wantN
+		case FilterOpLt:
+			return gotN < wantN
+		case FilterOpLte:
+			return gotN <= wantN
+		}
+	}
+	return false
+}
+
+func matchEq(got, want any) bool {
+	switch g := got.(type) {
+	case string:
+		w, ok := want.(string)
+		return ok && g == w
+	case float64:
+		w, ok := toFloat64(want)
+		return ok && g == w
+	case bool:
+		w, ok := want.(bool)
+		return ok && g == w
+	}
+	return fmt.Sprintf("%v", got) == fmt.Sprintf("%v", want)
+}
+
+func matchIn(got any, want any) bool {
+	switch v := want.(type) {
+	case []any:
+		for _, item := range v {
+			if matchEq(got, item) {
+				return true
+			}
+		}
+	case []string:
+		for _, item := range v {
+			if matchEq(got, item) {
+				return true
+			}
+		}
+	case []float64:
+		for _, item := range v {
+			if matchEq(got, item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func toFloat64(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	}
+	return 0, false
+}
+
 // BuildFilterSQL returns a safe SQL WHERE clause fragment for use in a DuckDB
 // query. The metadata column must be named "metadata" and contain JSON.
 // Returns ("", nil) when f is nil.
@@ -126,7 +247,7 @@ func buildFilterExprSQL(f FilterExpr) (string, error) {
 	if len(f.Or) > 0 {
 		return buildCompoundSQL("OR", f.Or)
 	}
-	return "", fmt.Errorf("empty filter expression")
+	return "", nil // empty expr → no-op
 }
 
 func buildCompoundSQL(op string, exprs []FilterExpr) (string, error) {
@@ -142,71 +263,99 @@ func buildCompoundSQL(op string, exprs []FilterExpr) (string, error) {
 }
 
 func buildLeafSQL(f FilterExpr) (string, error) {
+	if f.Op == FilterOpIn {
+		return buildInSQL(f.Field, f.Value)
+	}
+	valSQL, err := filterValueSQL(f.Value)
+	if err != nil {
+		return "", err
+	}
 	extract := jsonExtractSQL(f.Field, f.Value)
 	switch f.Op {
 	case FilterOpEq:
-		return extract + " = " + filterValueSQL(f.Value), nil
+		return extract + " = " + valSQL, nil
 	case FilterOpNe:
-		return extract + " != " + filterValueSQL(f.Value), nil
+		return extract + " != " + valSQL, nil
 	case FilterOpGt:
-		return extract + " > " + filterValueSQL(f.Value), nil
+		return extract + " > " + valSQL, nil
 	case FilterOpGte:
-		return extract + " >= " + filterValueSQL(f.Value), nil
+		return extract + " >= " + valSQL, nil
 	case FilterOpLt:
-		return extract + " < " + filterValueSQL(f.Value), nil
+		return extract + " < " + valSQL, nil
 	case FilterOpLte:
-		return extract + " <= " + filterValueSQL(f.Value), nil
-	case FilterOpIn:
-		return buildInSQL(f.Field, f.Value)
+		return extract + " <= " + valSQL, nil
 	}
 	return "", fmt.Errorf("unsupported op %q", f.Op)
 }
 
-// jsonExtractSQL returns the appropriate DuckDB JSON extraction expression,
-// cast to the right type based on the value's Go type.
-func jsonExtractSQL(field string, value any) string {
-	switch value.(type) {
-	case float64, int, int64, []float64:
+// jsonExtractSQL returns the DuckDB JSON extraction expression for a field,
+// cast to DOUBLE for numeric values and using json_extract_string for strings.
+// For IN lists, pass one element (not the slice) to determine the type.
+func jsonExtractSQL(field string, sampleValue any) string {
+	switch sampleValue.(type) {
+	case float64, int, int64:
 		return fmt.Sprintf("CAST(json_extract(metadata, '$.%s') AS DOUBLE)", field)
 	default:
 		return fmt.Sprintf("json_extract_string(metadata, '$.%s')", field)
 	}
 }
 
-func filterValueSQL(v any) string {
+func filterValueSQL(v any) (string, error) {
 	switch val := v.(type) {
 	case float64:
-		return fmt.Sprintf("%g", val)
+		return fmt.Sprintf("%g", val), nil
 	case int:
-		return fmt.Sprintf("%d", val)
+		return fmt.Sprintf("%d", val), nil
 	case int64:
-		return fmt.Sprintf("%d", val)
+		return fmt.Sprintf("%d", val), nil
 	case string:
-		return "'" + strings.ReplaceAll(val, "'", "''") + "'"
+		return "'" + strings.ReplaceAll(val, "'", "''") + "'", nil
 	case bool:
 		if val {
-			return "'true'"
+			return "'true'", nil
 		}
-		return "'false'"
+		return "'false'", nil
 	default:
-		return fmt.Sprintf("'%v'", v)
+		return "", fmt.Errorf("unsupported filter value type %T", v)
 	}
 }
 
 func buildInSQL(field string, value any) (string, error) {
 	var items []string
+	var sample any
 	switch v := value.(type) {
 	case []any:
 		for _, item := range v {
-			items = append(items, filterValueSQL(item))
+			s, err := filterValueSQL(item)
+			if err != nil {
+				return "", err
+			}
+			items = append(items, s)
+		}
+		if len(v) > 0 {
+			sample = v[0]
 		}
 	case []string:
 		for _, item := range v {
-			items = append(items, filterValueSQL(item))
+			s, err := filterValueSQL(item)
+			if err != nil {
+				return "", err
+			}
+			items = append(items, s)
+		}
+		if len(v) > 0 {
+			sample = v[0]
 		}
 	case []float64:
 		for _, item := range v {
-			items = append(items, filterValueSQL(item))
+			s, err := filterValueSQL(item)
+			if err != nil {
+				return "", err
+			}
+			items = append(items, s)
+		}
+		if len(v) > 0 {
+			sample = v[0]
 		}
 	default:
 		return "", fmt.Errorf("filter op \"in\" requires an array value")
@@ -214,7 +363,7 @@ func buildInSQL(field string, value any) (string, error) {
 	if len(items) == 0 {
 		return "FALSE", nil
 	}
-	extract := jsonExtractSQL(field, value)
+	extract := jsonExtractSQL(field, sample)
 	return extract + " IN (" + strings.Join(items, ", ") + ")", nil
 }
 

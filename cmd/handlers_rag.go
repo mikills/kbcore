@@ -209,6 +209,11 @@ func bindRagQueryRequest(c echo.Context) (ragQueryRequest, kb.SearchMode, string
 	if req.K <= 0 {
 		return req, kb.SearchModeVector, "", fmt.Errorf("k must be > 0")
 	}
+	if req.Filter != nil {
+		if err := req.Filter.Validate(); err != nil {
+			return req, kb.SearchModeVector, "", fmt.Errorf("invalid filter: %w", err)
+		}
+	}
 	mode, modeName, err := parseSearchMode(req.SearchMode)
 	return req, mode, modeName, err
 }

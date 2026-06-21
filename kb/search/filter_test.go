@@ -46,6 +46,57 @@ func TestFilterExprValidation(t *testing.T) {
 		err := (&FilterExpr{Field: "f", Op: FilterOpIn, Value: "not-array"}).Validate()
 		require.ErrorContains(t, err, "array value")
 	})
+	t.Run("empty struct is valid no-op", func(t *testing.T) {
+		require.NoError(t, (&FilterExpr{}).Validate())
+	})
+}
+
+func TestFilterExprMatch(t *testing.T) {
+	meta := map[string]any{
+		"tenant": "acme",
+		"rank":   float64(5),
+		"active": true,
+	}
+
+	t.Run("nil matches all", func(t *testing.T) {
+		var f *FilterExpr
+		require.True(t, f.Match(meta))
+	})
+	t.Run("eq string match", func(t *testing.T) {
+		require.True(t, (&FilterExpr{Field: "tenant", Op: FilterOpEq, Value: "acme"}).Match(meta))
+	})
+	t.Run("eq string no match", func(t *testing.T) {
+		require.False(t, (&FilterExpr{Field: "tenant", Op: FilterOpEq, Value: "globex"}).Match(meta))
+	})
+	t.Run("gt number match", func(t *testing.T) {
+		require.True(t, (&FilterExpr{Field: "rank", Op: FilterOpGt, Value: float64(3)}).Match(meta))
+	})
+	t.Run("gt number no match", func(t *testing.T) {
+		require.False(t, (&FilterExpr{Field: "rank", Op: FilterOpGt, Value: float64(10)}).Match(meta))
+	})
+	t.Run("boolean match", func(t *testing.T) {
+		require.True(t, (&FilterExpr{Field: "active", Op: FilterOpEq, Value: true}).Match(meta))
+		require.False(t, (&FilterExpr{Field: "active", Op: FilterOpEq, Value: false}).Match(meta))
+	})
+	t.Run("in match", func(t *testing.T) {
+		require.True(t, (&FilterExpr{Field: "tenant", Op: FilterOpIn, Value: []any{"acme", "globex"}}).Match(meta))
+		require.False(t, (&FilterExpr{Field: "tenant", Op: FilterOpIn, Value: []any{"globex"}}).Match(meta))
+	})
+	t.Run("and compound", func(t *testing.T) {
+		f := &FilterExpr{And: []FilterExpr{
+			{Field: "tenant", Op: FilterOpEq, Value: "acme"},
+			{Field: "rank", Op: FilterOpGt, Value: float64(3)},
+		}}
+		require.True(t, f.Match(meta))
+		f.And[1].Value = float64(10)
+		require.False(t, f.Match(meta))
+	})
+	t.Run("missing field is false", func(t *testing.T) {
+		require.False(t, (&FilterExpr{Field: "nonexistent", Op: FilterOpEq, Value: "x"}).Match(meta))
+	})
+	t.Run("empty expr is true", func(t *testing.T) {
+		require.True(t, (&FilterExpr{}).Match(meta))
+	})
 }
 
 func TestBuildFilterSQL(t *testing.T) {
@@ -119,6 +170,16 @@ func TestBuildFilterSQL(t *testing.T) {
 			name:   "empty in returns FALSE",
 			filter: &FilterExpr{Field: "x", Op: FilterOpIn, Value: []any{}},
 			want:   "FALSE",
+		},
+		{
+			name:   "numeric in via []any uses DOUBLE extract",
+			filter: &FilterExpr{Field: "price", Op: FilterOpIn, Value: []any{float64(10), float64(20)}},
+			want:   "CAST(json_extract(metadata, '$.price') AS DOUBLE) IN (10, 20)",
+		},
+		{
+			name:   "empty expr is no-op",
+			filter: &FilterExpr{},
+			want:   "",
 		},
 	}
 
