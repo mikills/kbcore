@@ -14,6 +14,7 @@ import (
 
 func TestBlobS3(t *testing.T) {
 	t.Run("head_missing", testS3HeadMissing)
+	t.Run("download_missing", testS3DownloadMissing)
 	t.Run("upload_and_download", testS3UploadAndDownload)
 	t.Run("upload_bytes_and_download", testS3UploadBytesAndDownload)
 	t.Run("delete", testS3Delete)
@@ -33,6 +34,12 @@ func newTestS3Store(t *testing.T) *blobstore.S3BlobStore {
 func testS3HeadMissing(t *testing.T) {
 	store := newTestS3Store(t)
 	_, err := store.Head(context.Background(), "missing.duckdb")
+	require.ErrorIs(t, err, blobstore.ErrNotFound)
+}
+
+func testS3DownloadMissing(t *testing.T) {
+	store := newTestS3Store(t)
+	err := store.Download(context.Background(), "missing.duckdb", filepath.Join(t.TempDir(), "out"))
 	require.ErrorIs(t, err, blobstore.ErrNotFound)
 }
 
@@ -126,7 +133,11 @@ func testS3UploadIfMatchVersionMismatch(t *testing.T) {
 	require.NoError(t, os.WriteFile(src2, []byte("v2"), 0o644))
 	_, err = store.UploadIfMatch(ctx, "kb/shard.duckdb", src2, "wrong-etag")
 	if err == nil {
-		t.Skip("mock S3 does not enforce If-Match on PutObject; skipping version-mismatch assertion")
+		// If the mock doesn't enforce If-Match, the CAS invariant is untestable here.
+		// This is expected for older gofakes3 versions; the real AWS S3 path is covered
+		// by integration tests.
+		t.Log("mock S3 did not enforce If-Match on PutObject; version-mismatch not verified")
+		return
 	}
 	require.ErrorIs(t, err, blobstore.ErrVersionMismatch)
 }

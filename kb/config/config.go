@@ -294,7 +294,7 @@ func (c *Config) applyStorageDefaults() {
 	if c.Storage.Cache.Dir == "" {
 		c.Storage.Cache.Dir = "./.temp/cache"
 	}
-	if c.Storage.Blob.S3 != nil && c.Storage.Blob.S3.Region == "" {
+	if c.Storage.Blob.Kind == "s3" && c.Storage.Blob.S3 != nil && c.Storage.Blob.S3.Region == "" {
 		c.Storage.Blob.S3.Region = "us-east-1"
 	}
 }

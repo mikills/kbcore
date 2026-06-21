@@ -103,7 +103,7 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 }
 
 func (r *Runtime) buildKB(ctx context.Context, cfg *config.Config) (*kb.KB, error) {
-	blobStore, err := buildBlobStore(cfg)
+	blobStore, err := buildBlobStore(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -236,8 +236,10 @@ func (r *Runtime) StartBackground(ctx context.Context) error {
 	if r.dryRun {
 		return nil
 	}
-	if err := os.MkdirAll(r.cfg.Storage.Blob.Root, 0o755); err != nil {
-		return fmt.Errorf("create blob root %q: %w", r.cfg.Storage.Blob.Root, err)
+	if r.cfg.Storage.Blob.Kind == "local" {
+		if err := os.MkdirAll(r.cfg.Storage.Blob.Root, 0o755); err != nil {
+			return fmt.Errorf("create blob root %q: %w", r.cfg.Storage.Blob.Root, err)
+		}
 	}
 	if err := os.MkdirAll(r.cfg.Storage.Cache.Dir, 0o755); err != nil {
 		return fmt.Errorf("create cache dir %q: %w", r.cfg.Storage.Cache.Dir, err)
@@ -323,18 +325,18 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	return nil
 }
 
-func buildBlobStore(cfg *config.Config) (kb.BlobStore, error) {
+func buildBlobStore(ctx context.Context, cfg *config.Config) (kb.BlobStore, error) {
 	switch cfg.Storage.Blob.Kind {
 	case "local":
 		return &kb.LocalBlobStore{Root: cfg.Storage.Blob.Root}, nil
 	case "s3":
-		return buildS3BlobStore(cfg.Storage.Blob.S3)
+		return buildS3BlobStore(ctx, cfg.Storage.Blob.S3)
 	default:
 		return nil, fmt.Errorf("configruntime: blob kind %q not supported", cfg.Storage.Blob.Kind)
 	}
 }
 
-func buildS3BlobStore(s3cfg *config.S3BlobConfig) (kb.BlobStore, error) {
+func buildS3BlobStore(ctx context.Context, s3cfg *config.S3BlobConfig) (kb.BlobStore, error) {
 	opts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(s3cfg.Region),
 	}
@@ -343,7 +345,7 @@ func buildS3BlobStore(s3cfg *config.S3BlobConfig) (kb.BlobStore, error) {
 			credentials.NewStaticCredentialsProvider(s3cfg.AccessKeyID, s3cfg.SecretAccessKey, ""),
 		))
 	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), opts...)
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}

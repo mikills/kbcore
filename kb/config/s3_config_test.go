@@ -45,6 +45,7 @@ func TestS3BlobConfig(t *testing.T) {
 		require.Equal(t, "minnow/", s3.Prefix)
 		require.Equal(t, "http://localhost:9000", s3.Endpoint)
 		require.Equal(t, "minioadmin", s3.AccessKeyID)
+		require.Equal(t, "minioadmin", s3.SecretAccessKey)
 	})
 
 	t.Run("s3_missing_bucket", func(t *testing.T) {
@@ -55,6 +56,16 @@ func TestS3BlobConfig(t *testing.T) {
 	t.Run("s3_missing_s3_block", func(t *testing.T) {
 		_, err := load(t, "storage:\n  blob:\n    kind: s3\n")
 		require.ErrorContains(t, err, "storage.blob.s3 is required")
+	})
+
+	t.Run("access_key_without_secret", func(t *testing.T) {
+		_, err := load(t, "storage:\n  blob:\n    kind: s3\n    s3:\n      bucket: b\n      access_key_id: key\n")
+		require.ErrorContains(t, err, "both be set or both be empty")
+	})
+
+	t.Run("invalid_endpoint_url", func(t *testing.T) {
+		_, err := load(t, "storage:\n  blob:\n    kind: s3\n    s3:\n      bucket: b\n      endpoint: localhost:9000\n")
+		require.ErrorContains(t, err, "storage.blob.s3.endpoint")
 	})
 
 	t.Run("unsupported_kind", func(t *testing.T) {

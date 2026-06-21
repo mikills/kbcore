@@ -152,7 +152,17 @@ func (c *Config) validateS3BlobConfig() error {
 	if s3 == nil {
 		return fmt.Errorf("storage.blob.s3 is required when kind is \"s3\"")
 	}
-	return requireNonEmptyString("storage.blob.s3.bucket", s3.Bucket)
+	if (s3.AccessKeyID == "") != (s3.SecretAccessKey == "") {
+		return fmt.Errorf("storage.blob.s3: access_key_id and secret_access_key must both be set or both be empty")
+	}
+	var endpointErr error
+	if s3.Endpoint != "" {
+		endpointErr = validateHTTPURL("storage.blob.s3.endpoint", s3.Endpoint)
+	}
+	return firstErr(
+		requireNonEmptyString("storage.blob.s3.bucket", s3.Bucket),
+		endpointErr,
+	)
 }
 
 func (c *Config) validateGraph() error {

@@ -79,8 +79,7 @@ func (s *S3BlobStore) Head(ctx context.Context, key string) (*ObjectInfo, error)
 		Key:    aws.String(fullKey),
 	})
 	if err != nil {
-		var notFoundErr *types.NotFound
-		if errors.As(err, &notFoundErr) {
+		if isS3NotFound(err) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
 		}
 		return nil, fmt.Errorf("head object %s: %w", key, err)
@@ -121,8 +120,7 @@ func (s *S3BlobStore) DownloadBytes(ctx context.Context, key string) ([]byte, er
 		Key:    aws.String(fullKey),
 	})
 	if err != nil {
-		var notFoundErr *types.NotFound
-		if errors.As(err, &notFoundErr) {
+		if isS3NotFound(err) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
 		}
 		return nil, fmt.Errorf("get object %s: %w", key, err)
@@ -149,15 +147,13 @@ func (s *S3BlobStore) Download(ctx context.Context, key string, dest string) err
 		Key:    aws.String(fullKey),
 	})
 	if err != nil {
-		var notFoundErr *types.NotFound
-		if errors.As(err, &notFoundErr) {
+		if isS3NotFound(err) {
 			return fmt.Errorf("%w: %s", ErrNotFound, key)
 		}
 		return fmt.Errorf("get object %s: %w", key, err)
 	}
 	defer result.Body.Close()
 
-	// Create destination file
 	file, err := os.Create(dest)
 	if err != nil {
 		return fmt.Errorf("create destination file: %w", err)
@@ -302,4 +298,12 @@ func (s *S3BlobStore) List(ctx context.Context, prefix string) ([]ObjectInfo, er
 	})
 
 	return items, nil
+}
+
+// isS3NotFound returns true for both HeadObject (NotFound) and GetObject
+// (NoSuchKey) 404 responses, which use different error types in the AWS SDK.
+func isS3NotFound(err error) bool {
+	var notFound *types.NotFound
+	var noSuchKey *types.NoSuchKey
+	return errors.As(err, &notFound) || errors.As(err, &noSuchKey)
 }

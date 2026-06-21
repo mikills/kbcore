@@ -11,8 +11,8 @@ storage:
       region: us-east-1
       # prefix: minnow/       # optional key prefix for multi-tenant buckets
       # endpoint: http://localhost:9000  # set for MinIO / R2 / other S3-compatible stores
-      # access_key_id: ""     # optional; falls back to AWS credential chain (IAM, env vars, etc.)
-      # secret_access_key: ""
+      # access_key_id: ${AWS_ACCESS_KEY_ID}       # optional; falls back to AWS credential chain
+      # secret_access_key: ${AWS_SECRET_ACCESS_KEY}
   cache:
     dir: ./.minnow/cache
     max_bytes: 1073741824

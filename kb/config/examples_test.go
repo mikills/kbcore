@@ -28,6 +28,8 @@ func TestExamplesParse(t *testing.T) {
 
 	t.Run("examples/minnow.s3.yaml", func(t *testing.T) {
 		t.Setenv("OPENAI_API_KEY", "test-key")
+		t.Setenv("AWS_ACCESS_KEY_ID", "test-key")
+		t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
 		_, err := Load("../../examples/minnow.s3.yaml")
 		require.NoError(t, err)
 	})
