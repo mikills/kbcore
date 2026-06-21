@@ -348,9 +348,11 @@ func TestRegisterTools(t *testing.T) {
 			cfg:  Config{Enabled: true, ReadOnly: true},
 			expected: []string{
 				"minnow_query", "minnow_operation_status", "minnow_list_media", "minnow_get_media",
+				"minnow_query_vectors",
 			},
 			hidden: []string{
 				"minnow_ingest_documents_async", "minnow_ingest_documents_sync", "minnow_index_codebase",
+				"minnow_upsert_vectors",
 				"minnow_delete_media", "minnow_delete_knowledge_base",
 				"minnow_sweep_cache", "minnow_clear_cache", "minnow_force_compaction", "minnow_install_code_hooks",
 			},
@@ -360,7 +362,7 @@ func TestRegisterTools(t *testing.T) {
 			cfg:  Config{Enabled: true, AllowIndexing: true},
 			expected: []string{
 				"minnow_query", "minnow_operation_status", "minnow_list_media", "minnow_get_media",
-				"minnow_ingest_documents_async",
+				"minnow_ingest_documents_async", "minnow_upsert_vectors", "minnow_query_vectors",
 			},
 			hidden: []string{
 				"minnow_ingest_documents_sync",
@@ -418,6 +420,7 @@ func TestRegisterTools(t *testing.T) {
 			},
 			expected: []string{
 				"minnow_query", "minnow_ingest_documents_async", "minnow_ingest_documents_sync",
+				"minnow_upsert_vectors", "minnow_query_vectors",
 				"minnow_delete_media", "minnow_delete_knowledge_base",
 				"minnow_sweep_cache", "minnow_force_compaction", "minnow_clear_cache", "minnow_code_hooks_status",
 			},

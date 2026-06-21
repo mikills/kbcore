@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -97,28 +98,24 @@ func handleVectorQuery(c echo.Context, deps Dependencies) error {
 		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "k must be > 0"})
 	}
 	if req.K > maxQueryK {
-		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "k must be <= 200"})
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: fmt.Sprintf("k must be <= %d", maxQueryK)})
 	}
 	if req.Filter != nil {
 		if err := req.Filter.Validate(); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "invalid filter: " + err.Error()})
 		}
 	}
-	if deps.Search == nil {
+	if deps.QueryVectors == nil {
 		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "kb unavailable"})
 	}
 
-	results, err := deps.Search(c.Request().Context(), req.KBID, req.Vector, &kb.SearchOptions{
-		Mode:   kb.SearchModeVector,
-		TopK:   req.K,
-		Filter: req.Filter,
-	})
+	rawResults, err := deps.QueryVectors(c.Request().Context(), req.KBID, req.Vector, req.K, req.Filter)
 	if err != nil {
 		return WriteError(c, err, deps.IsBudgetExceeded)
 	}
 
-	out := make([]vectorQueryResult, 0, len(results))
-	for _, r := range results {
+	out := make([]vectorQueryResult, 0, len(rawResults))
+	for _, r := range rawResults {
 		out = append(out, vectorQueryResult{ID: r.ID, Distance: r.Distance, Metadata: r.Metadata})
 	}
 	return c.JSON(http.StatusOK, map[string]any{"results": out})
@@ -143,5 +140,5 @@ func handleVectorDelete(c echo.Context, deps Dependencies) error {
 	if err := deps.DeleteDocuments(c.Request().Context(), req.KBID, req.IDs); err != nil {
 		return WriteError(c, err, deps.IsBudgetExceeded)
 	}
-	return c.JSON(http.StatusOK, map[string]any{"deleted": len(req.IDs)})
+	return c.JSON(http.StatusOK, map[string]any{"ids": req.IDs})
 }
