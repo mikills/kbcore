@@ -104,11 +104,11 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 }
 
 func (r *Runtime) buildKB(ctx context.Context, cfg *config.Config) (*kb.KB, error) {
-	blobStore, err := buildBlobStore(ctx, cfg)
+	blobStore, s3Store, err := buildBlobStore(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	kbOpts, err := r.buildKBOptions(ctx, cfg)
+	kbOpts, err := r.buildKBOptions(ctx, cfg, s3Store)
 	if err != nil {
 		return nil, err
 	}
@@ -122,18 +122,20 @@ func (r *Runtime) buildKB(ctx context.Context, cfg *config.Config) (*kb.KB, erro
 	return k, nil
 }
 
-func (r *Runtime) buildKBOptions(ctx context.Context, cfg *config.Config) ([]kb.KBOption, error) {
+func (r *Runtime) buildKBOptions(ctx context.Context, cfg *config.Config, s3Store *blobstore.S3BlobStore) ([]kb.KBOption, error) {
 	embedder, err := buildEmbedder(cfg, r.logger)
 	if err != nil {
 		return nil, err
 	}
 	kbOpts := baseKBOptions(cfg, embedder)
 	kbOpts = append(kbOpts, graphKBOptions(cfg, r.logger)...)
-	leaseOpts, err := buildLeaseOptions(ctx, cfg, r.logger)
-	if err != nil {
-		return nil, err
+	leasePrefix := ""
+	if cfg.Storage.Blob.S3 != nil {
+		leasePrefix = cfg.Storage.Blob.S3.LeasePrefix
 	}
-	kbOpts = append(kbOpts, leaseOpts...)
+	if leaseOpt := buildLeaseOption(s3Store, leasePrefix, r.logger); leaseOpt != nil {
+		kbOpts = append(kbOpts, leaseOpt)
+	}
 	mongoOpts, err := r.wireMongo(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -331,14 +333,15 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	return nil
 }
 
-func buildBlobStore(ctx context.Context, cfg *config.Config) (kb.BlobStore, error) {
+func buildBlobStore(ctx context.Context, cfg *config.Config) (kb.BlobStore, *blobstore.S3BlobStore, error) {
 	switch cfg.Storage.Blob.Kind {
 	case "local":
-		return &kb.LocalBlobStore{Root: cfg.Storage.Blob.Root}, nil
+		return &kb.LocalBlobStore{Root: cfg.Storage.Blob.Root}, nil, nil
 	case "s3":
-		return newS3BlobStore(ctx, cfg.Storage.Blob.S3)
+		store, err := newS3BlobStore(ctx, cfg.Storage.Blob.S3)
+		return store, store, err
 	default:
-		return nil, fmt.Errorf("configruntime: blob kind %q not supported", cfg.Storage.Blob.Kind)
+		return nil, nil, fmt.Errorf("configruntime: blob kind %q not supported", cfg.Storage.Blob.Kind)
 	}
 }
 
@@ -364,20 +367,17 @@ func newS3BlobStore(ctx context.Context, s3cfg *config.S3BlobConfig) (*blobstore
 	return blobstore.NewS3BlobStore(client, s3cfg.Bucket, s3cfg.Prefix), nil
 }
 
-func buildLeaseOptions(ctx context.Context, cfg *config.Config, logger *slog.Logger) ([]kb.KBOption, error) {
-	if cfg.Storage.Blob.Kind != "s3" {
-		return nil, nil
+func buildLeaseOption(s3Store *blobstore.S3BlobStore, prefix string, logger *slog.Logger) kb.KBOption {
+	if s3Store == nil {
+		return nil
 	}
-	store, err := newS3BlobStore(ctx, cfg.Storage.Blob.S3)
+	mgr, err := lease.NewS3Manager(s3Store, prefix)
 	if err != nil {
-		return nil, fmt.Errorf("build s3 lease store: %w", err)
+		logger.Warn("failed to build s3 lease manager, falling back to in-memory", "error", err)
+		return nil
 	}
-	mgr, err := lease.NewS3Manager(store, "")
-	if err != nil {
-		return nil, fmt.Errorf("build s3 lease manager: %w", err)
-	}
-	logger.Info("using S3-native distributed write lease (no Redis required)")
-	return []kb.KBOption{kb.WithWriteLeaseManager(mgr)}, nil
+	logger.Info("using S3-native distributed write lease")
+	return kb.WithWriteLeaseManager(mgr)
 }
 
 func buildEmbedder(cfg *config.Config, logger *slog.Logger) (kb.Embedder, error) {

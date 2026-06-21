@@ -59,6 +59,7 @@ type S3BlobConfig struct {
 	Bucket          string `yaml:"bucket"                      json:"bucket"`
 	Region          string `yaml:"region,omitempty"            json:"region,omitempty"`
 	Prefix          string `yaml:"prefix,omitempty"            json:"prefix,omitempty"`
+	LeasePrefix     string `yaml:"lease_prefix,omitempty"      json:"lease_prefix,omitempty"`
 	Endpoint        string `yaml:"endpoint,omitempty"          json:"endpoint,omitempty"`
 	AccessKeyID     string `yaml:"access_key_id,omitempty"     json:"access_key_id,omitempty"`
 	SecretAccessKey string `yaml:"secret_access_key,omitempty" json:"secret_access_key,omitempty"`

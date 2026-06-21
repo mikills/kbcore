@@ -134,6 +134,40 @@ func (s *S3BlobStore) DownloadBytes(ctx context.Context, key string) ([]byte, er
 	return data, nil
 }
 
+// DownloadBytesWithInfo downloads an object and returns its content alongside
+// the ObjectInfo (including the ETag version). Callers that need the ETag for
+// a subsequent CAS operation should use this instead of DownloadBytes + Head.
+func (s *S3BlobStore) DownloadBytesWithInfo(ctx context.Context, key string) ([]byte, *ObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	result, err := s.Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.Bucket),
+		Key:    aws.String(s.fullKey(key)),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, nil, fmt.Errorf("%w: %s", ErrNotFound, key)
+		}
+		return nil, nil, fmt.Errorf("get object %s: %w", key, err)
+	}
+	defer result.Body.Close()
+	data, err := io.ReadAll(result.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("download object %s: %w", key, err)
+	}
+	version := ""
+	if result.ETag != nil {
+		version = *result.ETag
+	}
+	size := int64(len(data))
+	updatedAt := s.now()
+	if result.LastModified != nil {
+		updatedAt = *result.LastModified
+	}
+	return data, &ObjectInfo{Key: key, Version: version, UpdatedAt: updatedAt, Size: size}, nil
+}
+
 // Download retrieves an object from S3 and writes it to the destination path.
 func (s *S3BlobStore) Download(ctx context.Context, key string, dest string) error {
 	if err := ctx.Err(); err != nil {
