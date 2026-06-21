@@ -67,6 +67,9 @@ func (s *benchPreparedStreamer) QueryRag(context.Context, RagQueryRequest) ([]Ex
 func (s *benchPreparedStreamer) QueryGraph(context.Context, GraphQueryRequest) ([]ExpandedResult, error) {
 	return nil, nil
 }
+func (s *benchPreparedStreamer) QueryBM25(context.Context, BM25QueryRequest) ([]ExpandedResult, error) {
+	return nil, nil
+}
 
 func (s *benchPreparedStreamer) PublishPreparedStream(
 	ctx context.Context,

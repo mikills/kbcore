@@ -723,7 +723,7 @@ func testAppRAGValidation(t *testing.T) {
 				"search_mode":  "bad-mode",
 			},
 			expectedStatus: http.StatusBadRequest,
-			expectedError:  `invalid search_mode: "bad-mode" (allowed: vector, graph, adaptive)`,
+			expectedError:  `invalid search_mode: "bad-mode" (allowed: vector, graph, adaptive, bm25, hybrid)`,
 		},
 	}
 

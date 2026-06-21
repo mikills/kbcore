@@ -19,6 +19,8 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+const maxQueryK = 200
+
 type ragIngestRequest struct {
 	KBID         string           `json:"kb_id"`
 	ChunkSize    int              `json:"chunk_size"`
@@ -180,13 +182,14 @@ func handleRagQuery(c echo.Context, deps Dependencies) error {
 		logger.ErrorContext(c.Request().Context(), "rag query failed", kbIDContextKey, req.KBID, errorResponseKey, err)
 		return WriteError(c, err, deps.IsBudgetExceeded)
 	}
-	results, err := deps.Search(c.Request().Context(), req.KBID, vec, &kb.SearchOptions{Mode: mode, TopK: req.K, Filter: req.Filter})
+	results, err := deps.Search(c.Request().Context(), req.KBID, vec, &kb.SearchOptions{Mode: mode, TopK: req.K, Filter: req.Filter, QueryText: req.Query})
 	if err != nil {
 		return handleRagSearchError(
 			ragSearchErrorContext{c: c, deps: deps, logger: logger, metrics: metrics, start: start, req: req, err: err},
 		)
 	}
-	queryResults := ragQueryResults(results, mode != kb.SearchModeVector)
+	includeScoring := mode != kb.SearchModeVector && mode != kb.SearchModeBM25
+	queryResults := ragQueryResults(results, includeScoring)
 	logRagQuery(
 		ragQueryLog{c: c, logger: logger, req: req, modeName: modeName, resultCount: len(results), start: start},
 	)
@@ -208,6 +211,9 @@ func bindRagQueryRequest(c echo.Context) (ragQueryRequest, kb.SearchMode, string
 	}
 	if req.K <= 0 {
 		return req, kb.SearchModeVector, "", fmt.Errorf("k must be > 0")
+	}
+	if req.K > maxQueryK {
+		return req, kb.SearchModeVector, "", fmt.Errorf("k must be <= %d", maxQueryK)
 	}
 	if req.Filter != nil {
 		if err := req.Filter.Validate(); err != nil {
@@ -325,8 +331,12 @@ func parseSearchMode(raw string) (kb.SearchMode, string, error) {
 		return kb.SearchModeGraph, "graph", nil
 	case "adaptive":
 		return kb.SearchModeAdaptive, "adaptive", nil
+	case "bm25":
+		return kb.SearchModeBM25, "bm25", nil
+	case "hybrid":
+		return kb.SearchModeHybrid, "hybrid", nil
 	default:
-		return kb.SearchModeVector, "", fmt.Errorf("invalid search_mode: %q (allowed: vector, graph, adaptive)", raw)
+		return kb.SearchModeVector, "", fmt.Errorf("invalid search_mode: %q (allowed: vector, graph, adaptive, bm25, hybrid)", raw)
 	}
 }
 

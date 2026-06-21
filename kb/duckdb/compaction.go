@@ -133,6 +133,9 @@ func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(
 	if err := createDocsVectorIndex(ctx, db); err != nil {
 		return kb.SnapshotShardMetadata{}, err
 	}
+	if err := createDocsFTSIndex(ctx, db); err != nil {
+		return kb.SnapshotShardMetadata{}, err
+	}
 	centroid, err := centroid.Compute(ctx, db)
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, err
@@ -199,6 +202,11 @@ func countCompactedDocs(ctx context.Context, db *sql.DB) (int64, error) {
 
 func createDocsVectorIndex(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`)
+	return err
+}
+
+func createDocsFTSIndex(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `PRAGMA create_fts_index('docs', 'id', 'content', stemmer='none', stopwords='none', ignore='', strip_accents=1, lower=1, overwrite=1)`)
 	return err
 }
 

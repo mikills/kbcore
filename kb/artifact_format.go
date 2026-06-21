@@ -73,12 +73,19 @@ type PreparedStreamRequest struct {
 	Options UpsertDocsOptions
 }
 
+type BM25QueryRequest struct {
+	KBID      string
+	QueryText string
+	Options   RagQueryOptions
+}
+
 type ArtifactFormat interface {
 	Kind() string
 	Version() int
 	FileExt() string
 	BuildArtifacts(ctx context.Context, kbID, srcPath string, targetBytes int64) ([]SnapshotShardMetadata, error)
 	QueryRag(ctx context.Context, req RagQueryRequest) ([]ExpandedResult, error)
+	QueryBM25(ctx context.Context, req BM25QueryRequest) ([]ExpandedResult, error)
 	QueryGraph(ctx context.Context, req GraphQueryRequest) ([]ExpandedResult, error)
 	Ingest(ctx context.Context, req IngestUpsertRequest) (IngestResult, error)
 	Delete(ctx context.Context, req IngestDeleteRequest) (IngestResult, error)
