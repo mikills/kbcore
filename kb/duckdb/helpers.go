@@ -42,8 +42,13 @@ func tableExists(ctx context.Context, q interface {
 	return true, rows.Close()
 }
 
+type vectorQueryOpts struct {
+	validateDimension bool // shard-level callers set false; dimension is validated upstream
+	filter            *search.FilterExpr
+}
+
 func QueryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int) ([]kb.QueryResult, error) {
-	return queryTopKWithDB(ctx, db, queryVec, k, true, nil)
+	return queryTopKWithDB(ctx, db, queryVec, k, vectorQueryOpts{validateDimension: true})
 }
 
 func queryTopKWithDB(
@@ -51,13 +56,12 @@ func queryTopKWithDB(
 	db *sql.DB,
 	queryVec []float32,
 	k int,
-	validateDimension bool,
-	filter *search.FilterExpr,
+	opts vectorQueryOpts,
 ) ([]kb.QueryResult, error) {
 	if k <= 0 {
 		return []kb.QueryResult{}, nil
 	}
-	if err := validateQueryVectorForDB(ctx, db, queryVec, validateDimension, "query vector dimension is incompatible with stored vectors"); err != nil {
+	if err := validateQueryVectorForDB(ctx, db, queryVec, opts.validateDimension, "query vector dimension is incompatible with stored vectors"); err != nil {
 		return nil, err
 	}
 
@@ -66,7 +70,7 @@ func queryTopKWithDB(
 	if err != nil {
 		return nil, err
 	}
-	whereClause, err := buildWhereClause(filter)
+	whereClause, err := buildWhereClause(opts.filter)
 	if err != nil {
 		return nil, err
 	}

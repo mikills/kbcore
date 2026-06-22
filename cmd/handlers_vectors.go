@@ -39,12 +39,20 @@ type vectorDeleteRequest struct {
 	IDs  []string `json:"ids"`
 }
 
+type vectorHandler struct{ deps Dependencies }
+
 func registerVectorRoutes(e *echo.Echo, deps Dependencies) {
-	e.POST("/v1/vectors/upsert", func(c echo.Context) error { return handleVectorUpsert(c, deps) })
-	e.POST("/v1/vectors/query", func(c echo.Context) error { return handleVectorQuery(c, deps) })
-	e.POST("/v1/vectors/fetch", func(c echo.Context) error { return handleVectorFetch(c, deps) })
-	e.DELETE("/v1/vectors", func(c echo.Context) error { return handleVectorDelete(c, deps) })
+	h := vectorHandler{deps}
+	e.POST("/v1/vectors/upsert", h.upsert)
+	e.POST("/v1/vectors/query", h.query)
+	e.POST("/v1/vectors/fetch", h.fetch)
+	e.DELETE("/v1/vectors", h.delete)
 }
+
+func (h vectorHandler) upsert(c echo.Context) error { return handleVectorUpsert(c, h.deps) }
+func (h vectorHandler) query(c echo.Context) error  { return handleVectorQuery(c, h.deps) }
+func (h vectorHandler) fetch(c echo.Context) error  { return handleVectorFetch(c, h.deps) }
+func (h vectorHandler) delete(c echo.Context) error { return handleVectorDelete(c, h.deps) }
 
 func handleVectorUpsert(c echo.Context, deps Dependencies) error {
 	var req vectorUpsertRequest
@@ -53,7 +61,7 @@ func handleVectorUpsert(c echo.Context, deps Dependencies) error {
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
-		req.KBID = "default"
+		req.KBID = defaultKBIDValue
 	}
 	if len(req.Docs) == 0 {
 		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "vectors must not be empty"})
@@ -95,7 +103,7 @@ func handleVectorQuery(c echo.Context, deps Dependencies) error {
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
-		req.KBID = "default"
+		req.KBID = defaultKBIDValue
 	}
 	if len(req.Vector) == 0 {
 		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "vector is required"})
@@ -137,7 +145,7 @@ func handleVectorFetch(c echo.Context, deps Dependencies) error {
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
-		req.KBID = "default"
+		req.KBID = defaultKBIDValue
 	}
 	if len(req.IDs) == 0 {
 		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "ids must not be empty"})
@@ -162,7 +170,7 @@ func handleVectorDelete(c echo.Context, deps Dependencies) error {
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
-		req.KBID = "default"
+		req.KBID = defaultKBIDValue
 	}
 	if len(req.IDs) == 0 {
 		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "ids must not be empty"})

@@ -139,7 +139,7 @@ func bindRagIngestRequest(c echo.Context) (ragIngestRequest, error) {
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
-		req.KBID = "default"
+		req.KBID = defaultKBIDValue
 	}
 	if req.GraphEnabled == nil {
 		return req, fmt.Errorf("graph_enabled is required")
@@ -204,7 +204,7 @@ func bindRagQueryRequest(c echo.Context) (ragQueryRequest, kb.SearchMode, string
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
-		req.KBID = "default"
+		req.KBID = defaultKBIDValue
 	}
 	if strings.TrimSpace(req.Query) == "" {
 		return req, kb.SearchModeVector, "", fmt.Errorf("query is required")
@@ -526,7 +526,7 @@ func parseMultipartIngestRequest(form *multipart.Form) (multipartIngestRequest, 
 	var req multipartIngestRequest
 	req.KBID = strings.TrimSpace(firstFormValue(form, kbIDContextKey))
 	if req.KBID == "" {
-		req.KBID = "default"
+		req.KBID = defaultKBIDValue
 	}
 	gb, err := parseRequiredBool(firstFormValue(form, "graph_enabled"), "graph_enabled")
 	if err != nil {

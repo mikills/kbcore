@@ -7,7 +7,6 @@ import (
 	"sort"
 
 	kb "github.com/mikills/minnow/kb"
-	"github.com/mikills/minnow/kb/search"
 )
 
 type rankedDocRef struct {
@@ -25,17 +24,16 @@ func queryTopKRefsWithDB(
 	db *sql.DB,
 	queryVec []float32,
 	k int,
-	validateDimension bool,
-	filter *search.FilterExpr,
+	opts vectorQueryOpts,
 ) ([]rankedDocRef, error) {
 	if k <= 0 {
 		return []rankedDocRef{}, nil
 	}
-	if err := validateQueryVectorForDB(ctx, db, queryVec, validateDimension, "query vector dimension is incompatible with stored vectors"); err != nil {
+	if err := validateQueryVectorForDB(ctx, db, queryVec, opts.validateDimension, "query vector dimension is incompatible with stored vectors"); err != nil {
 		return nil, err
 	}
 	vecStr := FormatVectorForSQL(queryVec)
-	whereClause, err := buildWhereClause(filter)
+	whereClause, err := buildWhereClause(opts.filter)
 	if err != nil {
 		return nil, err
 	}

@@ -72,7 +72,7 @@ func handleMediaUpload(c echo.Context, deps Dependencies) error {
 func mediaUploadInputFromRequest(c echo.Context, maxBytes int64) (kb.MediaUploadInput, int, error) {
 	kbID := strings.TrimSpace(c.FormValue(kbIDContextKey))
 	if kbID == "" {
-		kbID = "default"
+		kbID = defaultKBIDValue
 	}
 	file, err := c.FormFile("file")
 	if err != nil {

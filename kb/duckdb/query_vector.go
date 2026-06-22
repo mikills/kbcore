@@ -377,7 +377,7 @@ func (f *DuckDBArtifactFormat) querySingleShardTopK(
 		return nil, err
 	}
 	defer conn.mu.Unlock()
-	results, err := queryTopKWithDB(ctx, conn.db, queryVec, k, false, filter)
+	results, err := queryTopKWithDB(ctx, conn.db, queryVec, k, vectorQueryOpts{filter: filter})
 	if err != nil {
 		return nil, fmt.Errorf("query shard %s: %w", shard.ShardID, err)
 	}
@@ -397,7 +397,7 @@ func (f *DuckDBArtifactFormat) querySingleShardTopKRefs(
 		return nil, err
 	}
 	defer conn.mu.Unlock()
-	refs, err := queryTopKRefsWithDB(ctx, conn.db, queryVec, k, false, filter)
+	refs, err := queryTopKRefsWithDB(ctx, conn.db, queryVec, k, vectorQueryOpts{filter: filter})
 	if err != nil {
 		return nil, fmt.Errorf("query shard refs %s: %w", shard.ShardID, err)
 	}
