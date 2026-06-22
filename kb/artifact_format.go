@@ -80,8 +80,8 @@ type BM25QueryRequest struct {
 }
 
 type VectorRecord struct {
-	ID       string
-	Metadata map[string]any
+	ID       string         `json:"id"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 type ArtifactFormat interface {

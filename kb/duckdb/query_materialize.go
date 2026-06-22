@@ -105,6 +105,38 @@ func queryDocPayloadsByID(ctx context.Context, db *sql.DB, ids []string) (map[st
 	return payloads, nil
 }
 
+func queryMetadataByIDs(ctx context.Context, db *sql.DB, ids []string) (map[string]map[string]any, error) {
+	if len(ids) == 0 {
+		return map[string]map[string]any{}, nil
+	}
+	placeholders := kb.BuildInClausePlaceholders(len(ids))
+	metadataExpr, err := docsMetadataSelectExpr(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf(`SELECT id, %s FROM docs WHERE id IN (%s)`, metadataExpr, placeholders)
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query metadata: %w", err)
+	}
+	defer rows.Close()
+	result := make(map[string]map[string]any, len(ids))
+	for rows.Next() {
+		var id string
+		var metadataRaw sql.NullString
+		if err := rows.Scan(&id, &metadataRaw); err != nil {
+			return nil, fmt.Errorf("scan metadata: %w", err)
+		}
+		meta, _ := decodeMetadata(metadataRaw)
+		result[id] = meta
+	}
+	return result, rows.Err()
+}
+
 type docPayload struct {
 	Content   string
 	MediaRefs []kb.ChunkMediaRef

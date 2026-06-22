@@ -142,6 +142,9 @@ func handleVectorFetch(c echo.Context, deps Dependencies) error {
 	if len(req.IDs) == 0 {
 		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "ids must not be empty"})
 	}
+	if len(req.IDs) > maxQueryK {
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: fmt.Sprintf("ids must not exceed %d", maxQueryK)})
+	}
 	if deps.FetchVectors == nil {
 		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "kb unavailable"})
 	}

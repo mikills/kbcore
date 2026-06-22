@@ -174,19 +174,16 @@ func (f *DuckDBArtifactFormat) FetchVectors(ctx context.Context, kbID string, id
 		return nil, err
 	}
 
-	seen := make(map[string]struct{}, len(ids))
-	out := make([]kb.VectorRecord, 0, len(ids))
+	// remaining shrinks as IDs are found, avoiding O(n*shards) rescans.
+	remaining := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if strings.TrimSpace(id) != "" {
+			remaining = append(remaining, id)
+		}
+	}
+	out := make([]kb.VectorRecord, 0, len(remaining))
 
 	for _, shard := range manifest.Shards {
-		if len(out) == len(ids) {
-			break
-		}
-		remaining := make([]string, 0, len(ids))
-		for _, id := range ids {
-			if _, ok := seen[id]; !ok {
-				remaining = append(remaining, id)
-			}
-		}
 		if len(remaining) == 0 {
 			break
 		}
@@ -194,17 +191,20 @@ func (f *DuckDBArtifactFormat) FetchVectors(ctx context.Context, kbID string, id
 		if err != nil {
 			return nil, fmt.Errorf("fetch vectors shard %s: %w", shard.ShardID, err)
 		}
-		payloads, err := queryDocPayloadsByID(ctx, conn.db, remaining)
+		metaByID, err := queryMetadataByIDs(ctx, conn.db, remaining)
 		conn.mu.Unlock()
 		if err != nil {
 			return nil, fmt.Errorf("fetch vectors shard %s: %w", shard.ShardID, err)
 		}
+		notFound := remaining[:0]
 		for _, id := range remaining {
-			if p, ok := payloads[id]; ok {
-				seen[id] = struct{}{}
-				out = append(out, kb.VectorRecord{ID: id, Metadata: p.Metadata})
+			if meta, ok := metaByID[id]; ok {
+				out = append(out, kb.VectorRecord{ID: id, Metadata: meta})
+			} else {
+				notFound = append(notFound, id)
 			}
 		}
+		remaining = notFound
 	}
 	return out, nil
 }
