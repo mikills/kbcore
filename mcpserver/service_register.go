@@ -66,6 +66,10 @@ func registerTools(server *mcp.Server, s *Service) {
 		Name:        "minnow_query_vectors",
 		Description: "Query a Minnow knowledge base with a raw vector, returning IDs, distances, and metadata.",
 	}, s.queryVectors)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "minnow_fetch_vectors",
+		Description: "Fetch metadata for specific vector IDs without performing a similarity search.",
+	}, s.fetchVectors)
 	registerVectorIndexingTools(server, s, cfg)
 	mcp.AddTool(
 		server,

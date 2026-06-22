@@ -79,6 +79,11 @@ type BM25QueryRequest struct {
 	Options   RagQueryOptions
 }
 
+type VectorRecord struct {
+	ID       string
+	Metadata map[string]any
+}
+
 type ArtifactFormat interface {
 	Kind() string
 	Version() int
@@ -87,6 +92,7 @@ type ArtifactFormat interface {
 	QueryRag(ctx context.Context, req RagQueryRequest) ([]ExpandedResult, error)
 	QueryBM25(ctx context.Context, req BM25QueryRequest) ([]ExpandedResult, error)
 	QueryGraph(ctx context.Context, req GraphQueryRequest) ([]ExpandedResult, error)
+	FetchVectors(ctx context.Context, kbID string, ids []string) ([]VectorRecord, error)
 	Ingest(ctx context.Context, req IngestUpsertRequest) (IngestResult, error)
 	Delete(ctx context.Context, req IngestDeleteRequest) (IngestResult, error)
 }

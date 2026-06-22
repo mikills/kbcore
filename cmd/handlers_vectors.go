@@ -42,6 +42,7 @@ type vectorDeleteRequest struct {
 func registerVectorRoutes(e *echo.Echo, deps Dependencies) {
 	e.POST("/v1/vectors/upsert", func(c echo.Context) error { return handleVectorUpsert(c, deps) })
 	e.POST("/v1/vectors/query", func(c echo.Context) error { return handleVectorQuery(c, deps) })
+	e.POST("/v1/vectors/fetch", func(c echo.Context) error { return handleVectorFetch(c, deps) })
 	e.DELETE("/v1/vectors", func(c echo.Context) error { return handleVectorDelete(c, deps) })
 }
 
@@ -124,6 +125,31 @@ func handleVectorQuery(c echo.Context, deps Dependencies) error {
 		out = append(out, vectorQueryResult{ID: r.ID, Distance: r.Distance, Metadata: r.Metadata})
 	}
 	return c.JSON(http.StatusOK, map[string]any{"results": out})
+}
+
+func handleVectorFetch(c echo.Context, deps Dependencies) error {
+	var req struct {
+		KBID string   `json:"kb_id"`
+		IDs  []string `json:"ids"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "invalid request body"})
+	}
+	req.KBID = strings.TrimSpace(req.KBID)
+	if req.KBID == "" {
+		req.KBID = "default"
+	}
+	if len(req.IDs) == 0 {
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "ids must not be empty"})
+	}
+	if deps.FetchVectors == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "kb unavailable"})
+	}
+	records, err := deps.FetchVectors(c.Request().Context(), req.KBID, req.IDs)
+	if err != nil {
+		return WriteError(c, err, deps.IsBudgetExceeded)
+	}
+	return c.JSON(http.StatusOK, map[string]any{"records": records})
 }
 
 func handleVectorDelete(c echo.Context, deps Dependencies) error {

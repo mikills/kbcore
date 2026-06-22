@@ -53,6 +53,9 @@ func (f *stubArtifactFormat) QueryGraph(context.Context, GraphQueryRequest) ([]E
 func (f *stubArtifactFormat) QueryBM25(context.Context, BM25QueryRequest) ([]ExpandedResult, error) {
 	return nil, nil
 }
+func (f *stubArtifactFormat) FetchVectors(context.Context, string, []string) ([]VectorRecord, error) {
+	return nil, nil
+}
 func (f *stubArtifactFormat) Ingest(context.Context, IngestUpsertRequest) (IngestResult, error) {
 	return IngestResult{}, nil
 }

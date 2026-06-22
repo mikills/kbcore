@@ -31,6 +31,7 @@ type Service struct {
 	ClearCache            func(context.Context) error
 	ForceCompaction       func(context.Context, string) (*kb.CompactionPublishResult, error)
 	DeleteKnowledgeBase   func(context.Context, string) error
+	FetchVectors func(context.Context, string, []string) ([]kb.VectorRecord, error)
 	QueryVectors func(context.Context, string, []float32, int, *search.FilterExpr) ([]kb.QueryResult, error)
 	IndexCodebase         func(context.Context, kb.CodeIndexOptions) (kb.CodeIndexResult, error)
 	CodeIndexStatus       func(context.Context, string) (kb.CodeIndexStatus, error)
@@ -854,6 +855,35 @@ func (s *Service) queryVectors(
 		out = append(out, vectorResultOut{ID: r.ID, Distance: r.Distance, Metadata: r.Metadata})
 	}
 	return nil, queryVectorsOutput{KBID: kbID, Results: out}, nil
+}
+
+type fetchVectorsInput struct {
+	KBID string   `json:"kb_id,omitempty" jsonschema:"Knowledge base ID. Defaults to default."`
+	IDs  []string `json:"ids"             jsonschema:"List of vector IDs to fetch."`
+}
+
+type fetchVectorsOutput struct {
+	KBID    string           `json:"kb_id"`
+	Records []kb.VectorRecord `json:"records"`
+}
+
+func (s *Service) fetchVectors(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in fetchVectorsInput,
+) (*mcp.CallToolResult, fetchVectorsOutput, error) {
+	kbID := defaultKBID(in.KBID)
+	if len(in.IDs) == 0 {
+		return nil, fetchVectorsOutput{}, fmt.Errorf("ids must not be empty")
+	}
+	if s.FetchVectors == nil {
+		return nil, fetchVectorsOutput{}, fmt.Errorf("kb unavailable")
+	}
+	records, err := s.FetchVectors(ctx, kbID, in.IDs)
+	if err != nil {
+		return nil, fetchVectorsOutput{}, err
+	}
+	return nil, fetchVectorsOutput{KBID: kbID, Records: records}, nil
 }
 
 func decodeFilterExpr(raw json.RawMessage) (*search.FilterExpr, error) {

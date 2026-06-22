@@ -25,6 +25,14 @@ type SearchOptions = search.Options
 
 type EdgeRow = search.EdgeRow
 
+func (k *KB) FetchVectors(ctx context.Context, kbID string, ids []string) ([]VectorRecord, error) {
+	format, err := k.resolveSearchFormat(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	return format.FetchVectors(ctx, kbID, ids)
+}
+
 func (k *KB) SearchRaw(ctx context.Context, kbID string, queryVec []float32, topK int, filter *search.FilterExpr) ([]QueryResult, error) {
 	format, err := k.resolveSearchFormat(ctx, kbID)
 	if err != nil {
