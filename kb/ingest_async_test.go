@@ -610,6 +610,9 @@ func (f *preparedOnlyFormat) QueryGraph(context.Context, GraphQueryRequest) ([]E
 func (f *preparedOnlyFormat) QueryBM25(context.Context, BM25QueryRequest) ([]ExpandedResult, error) {
 	return nil, nil
 }
+func (f *preparedOnlyFormat) FetchVectors(context.Context, string, []string) ([]VectorRecord, error) {
+	return nil, nil
+}
 func (f *preparedOnlyFormat) Ingest(context.Context, IngestUpsertRequest) (IngestResult, error) {
 	return IngestResult{}, nil
 }

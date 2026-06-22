@@ -154,6 +154,61 @@ func (f *DuckDBArtifactFormat) lockFor(kbID string) *sync.Mutex {
 	return f.deps.LockFor(kbID)
 }
 
+func (f *DuckDBArtifactFormat) FetchVectors(ctx context.Context, kbID string, ids []string) ([]kb.VectorRecord, error) {
+	if strings.TrimSpace(kbID) == "" {
+		return nil, fmt.Errorf("kb_id is required")
+	}
+	if len(ids) == 0 {
+		return []kb.VectorRecord{}, nil
+	}
+
+	doc, err := f.deps.ManifestStore.Get(ctx, kbID)
+	if err != nil {
+		if errors.Is(err, kb.ErrManifestNotFound) {
+			return nil, kb.ErrKBUninitialized
+		}
+		return nil, err
+	}
+	manifest := &doc.Manifest
+	if err := f.validateManifestFormat(manifest); err != nil {
+		return nil, err
+	}
+
+	// remaining shrinks as IDs are found, avoiding O(n*shards) rescans.
+	remaining := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if strings.TrimSpace(id) != "" {
+			remaining = append(remaining, id)
+		}
+	}
+	out := make([]kb.VectorRecord, 0, len(remaining))
+
+	for _, shard := range manifest.Shards {
+		if len(remaining) == 0 {
+			break
+		}
+		conn, err := f.openCachedShardConn(ctx, kbID, shard)
+		if err != nil {
+			return nil, fmt.Errorf("fetch vectors shard %s: %w", shard.ShardID, err)
+		}
+		metaByID, err := queryMetadataByIDs(ctx, conn.db, remaining)
+		conn.mu.Unlock()
+		if err != nil {
+			return nil, fmt.Errorf("fetch vectors shard %s: %w", shard.ShardID, err)
+		}
+		notFound := remaining[:0]
+		for _, id := range remaining {
+			if meta, ok := metaByID[id]; ok {
+				out = append(out, kb.VectorRecord{ID: id, Metadata: meta})
+			} else {
+				notFound = append(notFound, id)
+			}
+		}
+		remaining = notFound
+	}
+	return out, nil
+}
+
 func (f *DuckDBArtifactFormat) QueryRag(ctx context.Context, req kb.RagQueryRequest) ([]kb.ExpandedResult, error) {
 	if err := kb.ValidateRagQueryRequest(req); err != nil {
 		return nil, err

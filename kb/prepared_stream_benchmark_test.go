@@ -70,6 +70,9 @@ func (s *benchPreparedStreamer) QueryGraph(context.Context, GraphQueryRequest) (
 func (s *benchPreparedStreamer) QueryBM25(context.Context, BM25QueryRequest) ([]ExpandedResult, error) {
 	return nil, nil
 }
+func (s *benchPreparedStreamer) FetchVectors(context.Context, string, []string) ([]VectorRecord, error) {
+	return nil, nil
+}
 
 func (s *benchPreparedStreamer) PublishPreparedStream(
 	ctx context.Context,

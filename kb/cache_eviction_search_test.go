@@ -129,6 +129,9 @@ func (m *cacheSearchMockFormat) QueryGraph(context.Context, GraphQueryRequest) (
 func (m *cacheSearchMockFormat) QueryBM25(context.Context, BM25QueryRequest) ([]ExpandedResult, error) {
 	return nil, nil
 }
+func (m *cacheSearchMockFormat) FetchVectors(context.Context, string, []string) ([]VectorRecord, error) {
+	return nil, nil
+}
 func (m *cacheSearchMockFormat) Ingest(ctx context.Context, req IngestUpsertRequest) (IngestResult, error) {
 	return m.ingestFn(ctx, req)
 }

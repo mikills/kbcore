@@ -89,6 +89,9 @@ func (f *searchStubFormat) QueryGraph(ctx context.Context, req kb.GraphQueryRequ
 func (f *searchStubFormat) QueryBM25(context.Context, kb.BM25QueryRequest) ([]kb.ExpandedResult, error) {
 	return nil, nil
 }
+func (f *searchStubFormat) FetchVectors(context.Context, string, []string) ([]kb.VectorRecord, error) {
+	return nil, nil
+}
 func (f *searchStubFormat) Ingest(context.Context, kb.IngestUpsertRequest) (kb.IngestResult, error) {
 	return kb.IngestResult{}, nil
 }

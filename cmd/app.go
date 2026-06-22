@@ -285,6 +285,7 @@ func buildKBDeps(loader *kb.KB, logger *slog.Logger) Dependencies {
 	deps.DeleteDocuments = func(ctx context.Context, kbID string, ids []string) error {
 		return loader.DeleteDocsAndUpload(ctx, kbID, ids, kb.DeleteDocsOptions{})
 	}
+	deps.FetchVectors = loader.FetchVectors
 	deps.QueryVectors = func(ctx context.Context, kbID string, vec []float32, k int, filter *search.FilterExpr) ([]kb.QueryResult, error) {
 		return loader.SearchRaw(ctx, kbID, vec, k, filter)
 	}
@@ -341,6 +342,7 @@ func mcpServiceFromDeps(cfg mcpserver.Config, deps Dependencies) mcpserver.Servi
 		ClearCache:            deps.ClearCache,
 		ForceCompaction:       deps.ForceCompaction,
 		DeleteKnowledgeBase:   deps.DeleteKnowledgeBase,
+		FetchVectors:          deps.FetchVectors,
 		QueryVectors:          deps.QueryVectors,
 		IndexCodebase:         deps.IndexCodebase,
 		CodeIndexStatus:       deps.CodeIndexStatus,
