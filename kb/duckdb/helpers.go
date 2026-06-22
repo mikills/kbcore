@@ -42,8 +42,13 @@ func tableExists(ctx context.Context, q interface {
 	return true, rows.Close()
 }
 
+type vectorQueryOpts struct {
+	validateDimension bool // shard-level callers set false; dimension is validated upstream
+	filter            *search.FilterExpr
+}
+
 func QueryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int) ([]kb.QueryResult, error) {
-	return queryTopKWithDB(ctx, db, queryVec, k, true, nil)
+	return queryTopKWithDB(ctx, db, queryVec, k, vectorQueryOpts{validateDimension: true})
 }
 
 func queryTopKWithDB(
@@ -51,13 +56,12 @@ func queryTopKWithDB(
 	db *sql.DB,
 	queryVec []float32,
 	k int,
-	validateDimension bool,
-	filter *search.FilterExpr,
+	opts vectorQueryOpts,
 ) ([]kb.QueryResult, error) {
 	if k <= 0 {
 		return []kb.QueryResult{}, nil
 	}
-	if err := validateQueryVectorForDB(ctx, db, queryVec, validateDimension, "query vector dimension is incompatible with stored vectors"); err != nil {
+	if err := validateQueryVectorForDB(ctx, db, queryVec, opts.validateDimension, "query vector dimension is incompatible with stored vectors"); err != nil {
 		return nil, err
 	}
 
@@ -66,7 +70,7 @@ func queryTopKWithDB(
 	if err != nil {
 		return nil, err
 	}
-	whereClause, err := buildWhereClause(filter)
+	whereClause, err := buildWhereClause(opts.filter)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +89,11 @@ func queryTopKWithDB(
 	}
 	defer rows.Close()
 
-	results := make([]kb.QueryResult, 0, k)
+	return scanQueryResults(rows, k)
+}
+
+func scanQueryResults(rows *sql.Rows, cap int) ([]kb.QueryResult, error) {
+	results := make([]kb.QueryResult, 0, cap)
 	for rows.Next() {
 		var r kb.QueryResult
 		var mediaRefsRaw sql.NullString
@@ -104,7 +112,6 @@ func queryTopKWithDB(
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rows iteration error: %w", err)
 	}
-
 	return results, nil
 }
 
@@ -397,23 +404,7 @@ func queryBM25WithDB(ctx context.Context, db *sql.DB, queryText string, k int, f
 		return nil, fmt.Errorf("bm25 query failed: %w", err)
 	}
 	defer rows.Close()
-	results := make([]kb.QueryResult, 0, k)
-	for rows.Next() {
-		var r kb.QueryResult
-		var mediaRefsRaw sql.NullString
-		var metadataRaw sql.NullString
-		if err := rows.Scan(&r.ID, &r.Content, &r.Distance, &mediaRefsRaw, &metadataRaw); err != nil {
-			return nil, fmt.Errorf("scan bm25 result: %w", err)
-		}
-		if refs, err := decodeMediaRefs(mediaRefsRaw); err == nil {
-			r.MediaRefs = refs
-		}
-		if meta, err := decodeMetadata(metadataRaw); err == nil {
-			r.Metadata = meta
-		}
-		results = append(results, r)
-	}
-	return results, rows.Err()
+	return scanQueryResults(rows, k)
 }
 
 func quoteSQLStringLiteral(s string) string {

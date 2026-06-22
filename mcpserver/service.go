@@ -14,6 +14,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+const errKBUnavailable = "kb unavailable"
+
 type Service struct {
 	Config Config
 	Logger *slog.Logger
@@ -78,7 +80,7 @@ func (s *Service) query(
 		return nil, queryOutput{}, err
 	}
 	if s.Embed == nil || s.Search == nil {
-		return nil, queryOutput{}, fmt.Errorf("kb unavailable")
+		return nil, queryOutput{}, fmt.Errorf(errKBUnavailable)
 	}
 	vec, err := s.Embed(ctx, in.Query)
 	if err != nil {
@@ -668,7 +670,7 @@ func (s *Service) sweepCache(
 		return nil, statusOutput{}, fmt.Errorf("admin tools are disabled")
 	}
 	if s.SweepCache == nil {
-		return nil, statusOutput{}, fmt.Errorf("kb unavailable")
+		return nil, statusOutput{}, fmt.Errorf(errKBUnavailable)
 	}
 	return nil, statusOutput{Status: "ok"}, s.SweepCache(ctx)
 }
@@ -682,7 +684,7 @@ func (s *Service) clearCache(
 		return nil, statusOutput{}, fmt.Errorf("admin destructive tools are disabled")
 	}
 	if s.ClearCache == nil {
-		return nil, statusOutput{}, fmt.Errorf("kb unavailable")
+		return nil, statusOutput{}, fmt.Errorf(errKBUnavailable)
 	}
 	return nil, statusOutput{Status: "ok"}, s.ClearCache(ctx)
 }
@@ -787,7 +789,7 @@ func (s *Service) upsertVectors(
 		return nil, upsertVectorsOutput{}, fmt.Errorf("vectors must not be empty")
 	}
 	if s.AppendDocumentUpsert == nil {
-		return nil, upsertVectorsOutput{}, fmt.Errorf("kb unavailable")
+		return nil, upsertVectorsOutput{}, fmt.Errorf(errKBUnavailable)
 	}
 	docs := make([]kb.Document, 0, len(in.Vectors))
 	for _, v := range in.Vectors {
@@ -844,7 +846,7 @@ func (s *Service) queryVectors(
 		return nil, queryVectorsOutput{}, fmt.Errorf("invalid filter: %w", err)
 	}
 	if s.QueryVectors == nil {
-		return nil, queryVectorsOutput{}, fmt.Errorf("kb unavailable")
+		return nil, queryVectorsOutput{}, fmt.Errorf(errKBUnavailable)
 	}
 	results, err := s.QueryVectors(ctx, kbID, in.Vector, in.K, filter)
 	if err != nil {
@@ -877,7 +879,7 @@ func (s *Service) fetchVectors(
 		return nil, fetchVectorsOutput{}, fmt.Errorf("ids must not be empty")
 	}
 	if s.FetchVectors == nil {
-		return nil, fetchVectorsOutput{}, fmt.Errorf("kb unavailable")
+		return nil, fetchVectorsOutput{}, fmt.Errorf(errKBUnavailable)
 	}
 	records, err := s.FetchVectors(ctx, kbID, in.IDs)
 	if err != nil {

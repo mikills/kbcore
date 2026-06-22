@@ -105,6 +105,15 @@ func (f *DuckDBArtifactFormat) afterCompactionPublish(
 	f.deps.Metrics.RecordShardCount(kbID, len(nextManifest.Shards))
 }
 
+type builtCompactionShard struct {
+	path           string
+	vectorRows     int64
+	sizeBytes      int64
+	graphAvailable bool
+	centroid       []float32
+	sha            string
+}
+
 func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(
 	ctx context.Context,
 	kbID string,
@@ -116,62 +125,63 @@ func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(
 	}
 	defer os.RemoveAll(tmpDir)
 
-	combinedPath := filepath.Join(tmpDir, "replacement.duckdb")
-	db, err := f.openConfiguredDB(ctx, combinedPath)
+	built, err := f.buildCompactionShard(ctx, tmpDir, shards)
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, err
 	}
-	defer db.Close()
-
-	if err := f.mergeCompactionShards(ctx, db, tmpDir, shards); err != nil {
-		return kb.SnapshotShardMetadata{}, err
-	}
-	vectorRows, err := countCompactedDocs(ctx, db)
-	if err != nil {
-		return kb.SnapshotShardMetadata{}, err
-	}
-	if err := createDocsVectorIndex(ctx, db); err != nil {
-		return kb.SnapshotShardMetadata{}, err
-	}
-	if err := createDocsFTSIndex(ctx, db); err != nil {
-		return kb.SnapshotShardMetadata{}, err
-	}
-	centroid, err := centroid.Compute(ctx, db)
-	if err != nil {
-		return kb.SnapshotShardMetadata{}, err
-	}
-
-	graphAvailable := hasGraphQueryData(ctx, db)
-	if err := CheckpointAndCloseDB(ctx, db, "close compacted shard db"); err != nil {
-		return kb.SnapshotShardMetadata{}, err
-	}
-
-	sha, info, err := compactedShardFileInfo(ctx, combinedPath)
-	if err != nil {
-		return kb.SnapshotShardMetadata{}, err
-	}
-
 	now := time.Now().UTC()
 	replacementID := fmt.Sprintf("compact-%d", now.UnixNano())
 	replacementKey := fmt.Sprintf("%s.duckdb.compacted/%s/part-00000", kbID, replacementID)
-	uploadInfo, err := f.deps.BlobStore.UploadIfMatch(ctx, replacementKey, combinedPath, "")
+	uploadInfo, err := f.deps.BlobStore.UploadIfMatch(ctx, replacementKey, built.path, "")
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, err
 	}
-
 	return kb.SnapshotShardMetadata{
 		ShardID:        replacementID,
 		Key:            replacementKey,
 		Version:        uploadInfo.Version,
-		SizeBytes:      info.Size(),
-		VectorRows:     vectorRows,
+		SizeBytes:      built.sizeBytes,
+		VectorRows:     built.vectorRows,
 		CreatedAt:      now,
 		SealedAt:       now,
 		TombstoneRatio: 0,
-		GraphAvailable: graphAvailable,
-		Centroid:       centroid,
-		SHA256:         sha,
+		GraphAvailable: built.graphAvailable,
+		Centroid:       built.centroid,
+		SHA256:         built.sha,
 	}, nil
+}
+
+func (f *DuckDBArtifactFormat) buildCompactionShard(ctx context.Context, tmpDir string, shards []kb.SnapshotShardMetadata) (builtCompactionShard, error) {
+	combinedPath := filepath.Join(tmpDir, "replacement.duckdb")
+	db, err := f.openConfiguredDB(ctx, combinedPath)
+	if err != nil {
+		return builtCompactionShard{}, err
+	}
+	defer db.Close()
+
+	if err := f.mergeCompactionShards(ctx, db, tmpDir, shards); err != nil {
+		return builtCompactionShard{}, err
+	}
+	vectorRows, err := countCompactedDocs(ctx, db)
+	if err != nil {
+		return builtCompactionShard{}, err
+	}
+	if err := buildShardIndexes(ctx, db); err != nil {
+		return builtCompactionShard{}, err
+	}
+	c, err := centroid.Compute(ctx, db)
+	if err != nil {
+		return builtCompactionShard{}, err
+	}
+	graphAvailable := hasGraphQueryData(ctx, db)
+	if err := CheckpointAndCloseDB(ctx, db, "close compacted shard db"); err != nil {
+		return builtCompactionShard{}, err
+	}
+	sha, info, err := compactedShardFileInfo(ctx, combinedPath)
+	if err != nil {
+		return builtCompactionShard{}, err
+	}
+	return builtCompactionShard{path: combinedPath, vectorRows: vectorRows, sizeBytes: info.Size(), graphAvailable: graphAvailable, centroid: c, sha: sha}, nil
 }
 
 func (f *DuckDBArtifactFormat) mergeCompactionShards(
@@ -198,6 +208,15 @@ func countCompactedDocs(ctx context.Context, db *sql.DB) (int64, error) {
 		return 0, err
 	}
 	return vectorRows, nil
+}
+
+// buildShardIndexes builds HNSW and FTS indexes only. Used by compaction,
+// where graph tables are already merged by mergeCompactionShards.
+func buildShardIndexes(ctx context.Context, db *sql.DB) error {
+	if err := createDocsVectorIndex(ctx, db); err != nil {
+		return err
+	}
+	return createDocsFTSIndex(ctx, db)
 }
 
 func createDocsVectorIndex(ctx context.Context, db *sql.DB) error {

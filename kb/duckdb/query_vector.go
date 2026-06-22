@@ -292,7 +292,7 @@ func (f *DuckDBArtifactFormat) runVectorShardQuery(ctx context.Context, work vec
 		return
 	}
 	defer func() { <-work.sem }()
-	rows, err := f.querySingleShardTopK(ctx, work.kbID, work.shard, work.queryVec, work.k, work.filter)
+	rows, err := f.querySingleShardTopK(ctx, work.kbID, work.shard, shardQueryInput{queryVec: work.queryVec, k: work.k, filter: work.filter})
 	if err != nil {
 		select {
 		case work.errCh <- err:
@@ -352,7 +352,7 @@ func (f *DuckDBArtifactFormat) runVectorShardRefQuery(ctx context.Context, work 
 		return
 	}
 	defer func() { <-work.sem }()
-	rows, err := f.querySingleShardTopKRefs(ctx, work.kbID, work.shard, work.queryVec, work.k, work.filter)
+	rows, err := f.querySingleShardTopKRefs(ctx, work.kbID, work.shard, shardQueryInput{queryVec: work.queryVec, k: work.k, filter: work.filter})
 	if err != nil {
 		select {
 		case work.errCh <- err:
@@ -364,20 +364,25 @@ func (f *DuckDBArtifactFormat) runVectorShardRefQuery(ctx context.Context, work 
 	work.results[work.idx] = rows
 }
 
+// shardQueryInput carries the per-query parameters passed to each shard.
+type shardQueryInput struct {
+	queryVec []float32
+	k        int
+	filter   *search.FilterExpr
+}
+
 func (f *DuckDBArtifactFormat) querySingleShardTopK(
 	ctx context.Context,
 	kbID string,
 	shard kb.SnapshotShardMetadata,
-	queryVec []float32,
-	k int,
-	filter *search.FilterExpr,
+	in shardQueryInput,
 ) ([]kb.QueryResult, error) {
 	conn, err := f.openCachedShardConn(ctx, kbID, shard)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.mu.Unlock()
-	results, err := queryTopKWithDB(ctx, conn.db, queryVec, k, false, filter)
+	results, err := queryTopKWithDB(ctx, conn.db, in.queryVec, in.k, vectorQueryOpts{filter: in.filter})
 	if err != nil {
 		return nil, fmt.Errorf("query shard %s: %w", shard.ShardID, err)
 	}
@@ -388,16 +393,14 @@ func (f *DuckDBArtifactFormat) querySingleShardTopKRefs(
 	ctx context.Context,
 	kbID string,
 	shard kb.SnapshotShardMetadata,
-	queryVec []float32,
-	k int,
-	filter *search.FilterExpr,
+	in shardQueryInput,
 ) ([]rankedDocRef, error) {
 	conn, err := f.openCachedShardConn(ctx, kbID, shard)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.mu.Unlock()
-	refs, err := queryTopKRefsWithDB(ctx, conn.db, queryVec, k, false, filter)
+	refs, err := queryTopKRefsWithDB(ctx, conn.db, in.queryVec, in.k, vectorQueryOpts{filter: in.filter})
 	if err != nil {
 		return nil, fmt.Errorf("query shard refs %s: %w", shard.ShardID, err)
 	}

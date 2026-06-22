@@ -161,7 +161,14 @@ func (f *DuckDBArtifactFormat) FetchVectors(ctx context.Context, kbID string, id
 	if len(ids) == 0 {
 		return []kb.VectorRecord{}, nil
 	}
+	shards, err := f.resolveShards(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	return f.fetchVectorsFromShards(ctx, kbID, shards, ids)
+}
 
+func (f *DuckDBArtifactFormat) resolveShards(ctx context.Context, kbID string) ([]kb.SnapshotShardMetadata, error) {
 	doc, err := f.deps.ManifestStore.Get(ctx, kbID)
 	if err != nil {
 		if errors.Is(err, kb.ErrManifestNotFound) {
@@ -169,12 +176,13 @@ func (f *DuckDBArtifactFormat) FetchVectors(ctx context.Context, kbID string, id
 		}
 		return nil, err
 	}
-	manifest := &doc.Manifest
-	if err := f.validateManifestFormat(manifest); err != nil {
+	if err := f.validateManifestFormat(&doc.Manifest); err != nil {
 		return nil, err
 	}
+	return doc.Manifest.Shards, nil
+}
 
-	// remaining shrinks as IDs are found, avoiding O(n*shards) rescans.
+func (f *DuckDBArtifactFormat) fetchVectorsFromShards(ctx context.Context, kbID string, shards []kb.SnapshotShardMetadata, ids []string) ([]kb.VectorRecord, error) {
 	remaining := make([]string, 0, len(ids))
 	for _, id := range ids {
 		if strings.TrimSpace(id) != "" {
@@ -182,8 +190,7 @@ func (f *DuckDBArtifactFormat) FetchVectors(ctx context.Context, kbID string, id
 		}
 	}
 	out := make([]kb.VectorRecord, 0, len(remaining))
-
-	for _, shard := range manifest.Shards {
+	for _, shard := range shards {
 		if len(remaining) == 0 {
 			break
 		}
@@ -266,27 +273,28 @@ func (f *DuckDBArtifactFormat) searchBM25AllShards(ctx context.Context, kbID, qu
 		}
 		allResults = append(allResults, rows...)
 	}
+	return deduplicateBM25Results(allResults, k), nil
+}
 
-	// Re-rank across shards by BM25 score (Distance field carries the score).
-	sort.Slice(allResults, func(i, j int) bool {
-		if allResults[i].Distance != allResults[j].Distance {
-			return allResults[i].Distance > allResults[j].Distance
+func deduplicateBM25Results(results []kb.QueryResult, k int) []kb.QueryResult {
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Distance != results[j].Distance {
+			return results[i].Distance > results[j].Distance
 		}
-		return allResults[i].ID < allResults[j].ID
+		return results[i].ID < results[j].ID
 	})
-	seen := make(map[string]struct{}, len(allResults))
-	deduped := make([]kb.QueryResult, 0, len(allResults))
-	for _, r := range allResults {
-		if _, ok := seen[r.ID]; ok {
-			continue
+	seen := make(map[string]struct{}, len(results))
+	deduped := make([]kb.QueryResult, 0, len(results))
+	for _, r := range results {
+		if _, ok := seen[r.ID]; !ok {
+			seen[r.ID] = struct{}{}
+			deduped = append(deduped, r)
 		}
-		seen[r.ID] = struct{}{}
-		deduped = append(deduped, r)
 	}
 	if k > 0 && len(deduped) > k {
-		deduped = deduped[:k]
+		return deduped[:k]
 	}
-	return deduped, nil
+	return deduped
 }
 
 func (f *DuckDBArtifactFormat) QueryGraph(ctx context.Context, req kb.GraphQueryRequest) ([]kb.ExpandedResult, error) {

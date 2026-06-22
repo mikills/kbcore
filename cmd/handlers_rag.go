@@ -135,11 +135,11 @@ func handleRagIngest(c echo.Context, deps Dependencies) error {
 func bindRagIngestRequest(c echo.Context) (ragIngestRequest, error) {
 	var req ragIngestRequest
 	if err := c.Bind(&req); err != nil {
-		return req, fmt.Errorf("invalid request body")
+		return req, fmt.Errorf(errInvalidRequestBody)
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
-		req.KBID = "default"
+		req.KBID = defaultKBIDValue
 	}
 	if req.GraphEnabled == nil {
 		return req, fmt.Errorf("graph_enabled is required")
@@ -171,7 +171,7 @@ func handleRagQuery(c echo.Context, deps Dependencies) error {
 	logger := deps.Logger
 	metrics := deps.AppMetrics
 	if deps.Embed == nil || deps.Search == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "kb unavailable"})
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: errKBUnavailable})
 	}
 	req, mode, modeName, err := bindRagQueryRequest(c)
 	if err != nil {
@@ -200,11 +200,11 @@ func handleRagQuery(c echo.Context, deps Dependencies) error {
 func bindRagQueryRequest(c echo.Context) (ragQueryRequest, kb.SearchMode, string, error) {
 	var req ragQueryRequest
 	if err := c.Bind(&req); err != nil {
-		return req, kb.SearchModeVector, "", fmt.Errorf("invalid request body")
+		return req, kb.SearchModeVector, "", fmt.Errorf(errInvalidRequestBody)
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
-		req.KBID = "default"
+		req.KBID = defaultKBIDValue
 	}
 	if strings.TrimSpace(req.Query) == "" {
 		return req, kb.SearchModeVector, "", fmt.Errorf("query is required")
@@ -526,7 +526,7 @@ func parseMultipartIngestRequest(form *multipart.Form) (multipartIngestRequest, 
 	var req multipartIngestRequest
 	req.KBID = strings.TrimSpace(firstFormValue(form, kbIDContextKey))
 	if req.KBID == "" {
-		req.KBID = "default"
+		req.KBID = defaultKBIDValue
 	}
 	gb, err := parseRequiredBool(firstFormValue(form, "graph_enabled"), "graph_enabled")
 	if err != nil {

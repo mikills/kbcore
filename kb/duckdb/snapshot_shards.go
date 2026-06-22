@@ -228,11 +228,7 @@ func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(
 		return 0, false, "", nil, err
 	}
 
-	if err := createDocsVectorIndex(ctx, shardDB); err != nil {
-		return 0, false, "", nil, err
-	}
-
-	if err := createDocsFTSIndex(ctx, shardDB); err != nil {
+	if err := buildShardIndexes(ctx, shardDB); err != nil {
 		return 0, false, "", nil, err
 	}
 

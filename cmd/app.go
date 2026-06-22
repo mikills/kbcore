@@ -295,7 +295,7 @@ func buildKBDeps(loader *kb.KB, logger *slog.Logger) Dependencies {
 func kbEmbedFn(loader *kb.KB) func(context.Context, string) ([]float32, error) {
 	return func(ctx context.Context, input string) ([]float32, error) {
 		if loader == nil {
-			return nil, fmt.Errorf("kb unavailable")
+			return nil, fmt.Errorf(errKBUnavailable)
 		}
 		return loader.Embed(ctx, input)
 	}
@@ -306,7 +306,7 @@ func kbSearchFn(
 ) func(context.Context, string, []float32, *kb.SearchOptions) ([]kb.ExpandedResult, error) {
 	return func(ctx context.Context, kbID string, queryVec []float32, opts *kb.SearchOptions) ([]kb.ExpandedResult, error) {
 		if loader == nil {
-			return nil, fmt.Errorf("kb unavailable")
+			return nil, fmt.Errorf(errKBUnavailable)
 		}
 		return loader.Search(ctx, kbID, queryVec, opts)
 	}
@@ -315,7 +315,7 @@ func kbSearchFn(
 func kbSweepCacheFn(loader *kb.KB) func(context.Context) error {
 	return func(ctx context.Context) error {
 		if loader == nil {
-			return fmt.Errorf("kb unavailable")
+			return fmt.Errorf(errKBUnavailable)
 		}
 		return loader.SweepCache(ctx)
 	}

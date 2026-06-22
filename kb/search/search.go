@@ -57,9 +57,13 @@ func validateFilterExpr(f FilterExpr, depth int) error {
 	if isLeaf {
 		return validateLeafFilter(f)
 	}
-	children := f.And
-	if isOr {
-		children = f.Or
+	return validateCompoundChildren(f.And, f.Or, depth)
+}
+
+func validateCompoundChildren(and, or []FilterExpr, depth int) error {
+	children := and
+	if len(or) > 0 {
+		children = or
 	}
 	for _, child := range children {
 		if err := validateFilterExpr(child, depth+1); err != nil {
@@ -321,50 +325,56 @@ func filterValueSQL(v any) (string, error) {
 }
 
 func buildInSQL(field string, value any) (string, error) {
-	var items []string
-	var sample any
-	switch v := value.(type) {
-	case []any:
-		for _, item := range v {
-			s, err := filterValueSQL(item)
-			if err != nil {
-				return "", err
-			}
-			items = append(items, s)
-		}
-		if len(v) > 0 {
-			sample = v[0]
-		}
-	case []string:
-		for _, item := range v {
-			s, err := filterValueSQL(item)
-			if err != nil {
-				return "", err
-			}
-			items = append(items, s)
-		}
-		if len(v) > 0 {
-			sample = v[0]
-		}
-	case []float64:
-		for _, item := range v {
-			s, err := filterValueSQL(item)
-			if err != nil {
-				return "", err
-			}
-			items = append(items, s)
-		}
-		if len(v) > 0 {
-			sample = v[0]
-		}
-	default:
-		return "", fmt.Errorf("filter op \"in\" requires an array value")
+	elems, err := inValueElems(value)
+	if err != nil {
+		return "", err
 	}
-	if len(items) == 0 {
+	if len(elems.items) == 0 {
 		return "FALSE", nil
 	}
-	extract := jsonExtractSQL(field, sample)
-	return extract + " IN (" + strings.Join(items, ", ") + ")", nil
+	extract := jsonExtractSQL(field, elems.sample)
+	return extract + " IN (" + strings.Join(elems.items, ", ") + ")", nil
+}
+
+type inElems struct {
+	items  []string
+	sample any
+}
+
+func inValueElems(value any) (inElems, error) {
+	appendItems := func(vals []any) (inElems, error) {
+		items := make([]string, 0, len(vals))
+		for _, v := range vals {
+			s, err := filterValueSQL(v)
+			if err != nil {
+				return inElems{}, err
+			}
+			items = append(items, s)
+		}
+		var sample any
+		if len(vals) > 0 {
+			sample = vals[0]
+		}
+		return inElems{items: items, sample: sample}, nil
+	}
+	switch v := value.(type) {
+	case []any:
+		return appendItems(v)
+	case []string:
+		anys := make([]any, len(v))
+		for i, s := range v {
+			anys[i] = s
+		}
+		return appendItems(anys)
+	case []float64:
+		anys := make([]any, len(v))
+		for i, f := range v {
+			anys[i] = f
+		}
+		return appendItems(anys)
+	default:
+		return inElems{}, fmt.Errorf("filter op \"in\" requires an array value")
+	}
 }
 
 type ExpansionOptions struct {
