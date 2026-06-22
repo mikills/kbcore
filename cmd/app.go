@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/search"
 	"github.com/mikills/minnow/mcpserver"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -281,6 +282,12 @@ func buildKBDeps(loader *kb.KB, logger *slog.Logger) Dependencies {
 		deps.FindOperationTerminal = loader.FindOperationTerminal
 		deps.OperationStages = loader.OperationStages
 	}
+	deps.DeleteDocuments = func(ctx context.Context, kbID string, ids []string) error {
+		return loader.DeleteDocsAndUpload(ctx, kbID, ids, kb.DeleteDocsOptions{})
+	}
+	deps.QueryVectors = func(ctx context.Context, kbID string, vec []float32, k int, filter *search.FilterExpr) ([]kb.QueryResult, error) {
+		return loader.SearchRaw(ctx, kbID, vec, k, filter)
+	}
 	return deps
 }
 
@@ -334,6 +341,7 @@ func mcpServiceFromDeps(cfg mcpserver.Config, deps Dependencies) mcpserver.Servi
 		ClearCache:            deps.ClearCache,
 		ForceCompaction:       deps.ForceCompaction,
 		DeleteKnowledgeBase:   deps.DeleteKnowledgeBase,
+		QueryVectors:          deps.QueryVectors,
 		IndexCodebase:         deps.IndexCodebase,
 		CodeIndexStatus:       deps.CodeIndexStatus,
 		SearchCode:            deps.SearchCode,

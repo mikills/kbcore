@@ -62,6 +62,11 @@ func registerTools(server *mcp.Server, s *Service) {
 		InputSchema: queryToolSchemaOrDefault(),
 	}
 	mcp.AddTool(server, queryTool, s.query)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "minnow_query_vectors",
+		Description: "Query a Minnow knowledge base with a raw vector, returning IDs, distances, and metadata.",
+	}, s.queryVectors)
+	registerVectorIndexingTools(server, s, cfg)
 	mcp.AddTool(
 		server,
 		&mcp.Tool{
@@ -110,6 +115,16 @@ func registerCodeTools(server *mcp.Server, s *Service) {
 			s.codeSearch,
 		)
 	}
+}
+
+func registerVectorIndexingTools(server *mcp.Server, s *Service, cfg Config) {
+	if cfg.ReadOnly || !cfg.AllowIndexing {
+		return
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "minnow_upsert_vectors",
+		Description: "Upsert pre-computed vectors directly into a Minnow knowledge base, bypassing the embedding pipeline.",
+	}, s.upsertVectors)
 }
 
 func registerIndexingTools(server *mcp.Server, s *Service, cfg Config) {

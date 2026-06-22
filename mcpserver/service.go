@@ -31,6 +31,7 @@ type Service struct {
 	ClearCache            func(context.Context) error
 	ForceCompaction       func(context.Context, string) (*kb.CompactionPublishResult, error)
 	DeleteKnowledgeBase   func(context.Context, string) error
+	QueryVectors func(context.Context, string, []float32, int, *search.FilterExpr) ([]kb.QueryResult, error)
 	IndexCodebase         func(context.Context, kb.CodeIndexOptions) (kb.CodeIndexResult, error)
 	CodeIndexStatus       func(context.Context, string) (kb.CodeIndexStatus, error)
 	SearchCode            func(context.Context, string, string, kb.CodeSearchOptions) ([]kb.CodeSearchResult, error)
@@ -759,6 +760,100 @@ func defaultKBID(raw string) string {
 		return s
 	}
 	return "default"
+}
+
+type upsertVectorsInput struct {
+	KBID    string `json:"kb_id,omitempty" jsonschema:"Knowledge base ID. Defaults to default."`
+	Vectors []struct {
+		ID       string         `json:"id"`
+		Vector   []float32      `json:"vector"`
+		Metadata map[string]any `json:"metadata,omitempty"`
+	} `json:"vectors" jsonschema:"List of vectors to upsert."`
+}
+
+type upsertVectorsOutput struct {
+	KBID        string `json:"kb_id"`
+	OperationID string `json:"operation_id"`
+}
+
+func (s *Service) upsertVectors(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in upsertVectorsInput,
+) (*mcp.CallToolResult, upsertVectorsOutput, error) {
+	kbID := defaultKBID(in.KBID)
+	if len(in.Vectors) == 0 {
+		return nil, upsertVectorsOutput{}, fmt.Errorf("vectors must not be empty")
+	}
+	if s.AppendDocumentUpsert == nil {
+		return nil, upsertVectorsOutput{}, fmt.Errorf("kb unavailable")
+	}
+	docs := make([]kb.Document, 0, len(in.Vectors))
+	for _, v := range in.Vectors {
+		if strings.TrimSpace(v.ID) == "" {
+			return nil, upsertVectorsOutput{}, fmt.Errorf("each vector must have an id")
+		}
+		if len(v.Vector) == 0 {
+			return nil, upsertVectorsOutput{}, fmt.Errorf("vector for id %q is empty", v.ID)
+		}
+		docs = append(docs, kb.Document{ID: v.ID, Embedding: v.Vector, Metadata: v.Metadata})
+	}
+	opID, _, err := s.AppendDocumentUpsert(ctx, kb.DocumentUpsertPayload{KBID: kbID, Documents: docs}, "", "")
+	if err != nil {
+		return nil, upsertVectorsOutput{}, err
+	}
+	return nil, upsertVectorsOutput{KBID: kbID, OperationID: opID}, nil
+}
+
+type queryVectorsInput struct {
+	KBID   string          `json:"kb_id,omitempty"  jsonschema:"Knowledge base ID. Defaults to default."`
+	Vector []float32       `json:"vector"           jsonschema:"Query vector."`
+	K      int             `json:"k"                jsonschema:"Number of results to return."`
+	Filter json.RawMessage `json:"filter,omitempty" jsonschema:"Optional metadata predicate filter."`
+}
+
+type queryVectorsOutput struct {
+	KBID    string              `json:"kb_id"`
+	Results []vectorResultOut   `json:"results"`
+}
+
+type vectorResultOut struct {
+	ID       string         `json:"id"`
+	Distance float64        `json:"distance"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+func (s *Service) queryVectors(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in queryVectorsInput,
+) (*mcp.CallToolResult, queryVectorsOutput, error) {
+	kbID := defaultKBID(in.KBID)
+	if len(in.Vector) == 0 {
+		return nil, queryVectorsOutput{}, fmt.Errorf("vector is required")
+	}
+	if in.K <= 0 {
+		return nil, queryVectorsOutput{}, fmt.Errorf("k must be > 0")
+	}
+	if in.K > queryToolMaxK {
+		return nil, queryVectorsOutput{}, fmt.Errorf("k must be <= %d", queryToolMaxK)
+	}
+	filter, err := decodeFilterExpr(in.Filter)
+	if err != nil {
+		return nil, queryVectorsOutput{}, fmt.Errorf("invalid filter: %w", err)
+	}
+	if s.QueryVectors == nil {
+		return nil, queryVectorsOutput{}, fmt.Errorf("kb unavailable")
+	}
+	results, err := s.QueryVectors(ctx, kbID, in.Vector, in.K, filter)
+	if err != nil {
+		return nil, queryVectorsOutput{}, err
+	}
+	out := make([]vectorResultOut, 0, len(results))
+	for _, r := range results {
+		out = append(out, vectorResultOut{ID: r.ID, Distance: r.Distance, Metadata: r.Metadata})
+	}
+	return nil, queryVectorsOutput{KBID: kbID, Results: out}, nil
 }
 
 func decodeFilterExpr(raw json.RawMessage) (*search.FilterExpr, error) {
