@@ -135,7 +135,7 @@ func handleRagIngest(c echo.Context, deps Dependencies) error {
 func bindRagIngestRequest(c echo.Context) (ragIngestRequest, error) {
 	var req ragIngestRequest
 	if err := c.Bind(&req); err != nil {
-		return req, fmt.Errorf("invalid request body")
+		return req, fmt.Errorf(errInvalidRequestBody)
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
@@ -171,7 +171,7 @@ func handleRagQuery(c echo.Context, deps Dependencies) error {
 	logger := deps.Logger
 	metrics := deps.AppMetrics
 	if deps.Embed == nil || deps.Search == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "kb unavailable"})
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: errKBUnavailable})
 	}
 	req, mode, modeName, err := bindRagQueryRequest(c)
 	if err != nil {
@@ -200,7 +200,7 @@ func handleRagQuery(c echo.Context, deps Dependencies) error {
 func bindRagQueryRequest(c echo.Context) (ragQueryRequest, kb.SearchMode, string, error) {
 	var req ragQueryRequest
 	if err := c.Bind(&req); err != nil {
-		return req, kb.SearchModeVector, "", fmt.Errorf("invalid request body")
+		return req, kb.SearchModeVector, "", fmt.Errorf(errInvalidRequestBody)
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {

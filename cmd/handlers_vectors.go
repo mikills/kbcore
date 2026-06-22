@@ -49,7 +49,7 @@ func registerVectorRoutes(e *echo.Echo, deps Dependencies) {
 func handleVectorUpsert(c echo.Context, deps Dependencies) error {
 	var req vectorUpsertRequest
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "invalid request body"})
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: errInvalidRequestBody})
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
@@ -59,7 +59,7 @@ func handleVectorUpsert(c echo.Context, deps Dependencies) error {
 		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "vectors must not be empty"})
 	}
 	if deps.AppendDocumentUpsert == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "kb unavailable"})
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: errKBUnavailable})
 	}
 
 	docs := make([]kb.Document, 0, len(req.Docs))
@@ -91,7 +91,7 @@ func handleVectorUpsert(c echo.Context, deps Dependencies) error {
 func handleVectorQuery(c echo.Context, deps Dependencies) error {
 	var req vectorQueryRequest
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "invalid request body"})
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: errInvalidRequestBody})
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
@@ -112,7 +112,7 @@ func handleVectorQuery(c echo.Context, deps Dependencies) error {
 		}
 	}
 	if deps.QueryVectors == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "kb unavailable"})
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: errKBUnavailable})
 	}
 
 	rawResults, err := deps.QueryVectors(c.Request().Context(), req.KBID, req.Vector, req.K, req.Filter)
@@ -133,7 +133,7 @@ func handleVectorFetch(c echo.Context, deps Dependencies) error {
 		IDs  []string `json:"ids"`
 	}
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "invalid request body"})
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: errInvalidRequestBody})
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
@@ -146,7 +146,7 @@ func handleVectorFetch(c echo.Context, deps Dependencies) error {
 		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: fmt.Sprintf("ids must not exceed %d", maxQueryK)})
 	}
 	if deps.FetchVectors == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "kb unavailable"})
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: errKBUnavailable})
 	}
 	records, err := deps.FetchVectors(c.Request().Context(), req.KBID, req.IDs)
 	if err != nil {
@@ -158,7 +158,7 @@ func handleVectorFetch(c echo.Context, deps Dependencies) error {
 func handleVectorDelete(c echo.Context, deps Dependencies) error {
 	var req vectorDeleteRequest
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "invalid request body"})
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: errInvalidRequestBody})
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
@@ -168,7 +168,7 @@ func handleVectorDelete(c echo.Context, deps Dependencies) error {
 		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "ids must not be empty"})
 	}
 	if deps.DeleteDocuments == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "kb unavailable"})
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: errKBUnavailable})
 	}
 
 	if err := deps.DeleteDocuments(c.Request().Context(), req.KBID, req.IDs); err != nil {

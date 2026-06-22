@@ -128,11 +128,13 @@ func (m *S3Manager) Release(ctx context.Context, lease *Lease) error {
 		return nil
 	}
 	// CAS tombstone prevents wiping a lock we no longer own
-	_, err = m.store.UploadBytesIfMatch(releaseCtx, m.key(lease.KBID), tombstonePayload(), info.Version)
-	if err != nil {
-		return nil
+	_, casErr := m.store.UploadBytesIfMatch(releaseCtx, m.key(lease.KBID), tombstonePayload(), info.Version)
+	if casErr != nil {
+		return nil // CAS failed — another caller already replaced this lock
 	}
-	_ = m.store.Delete(releaseCtx, m.key(lease.KBID))
+	if deleteErr := m.store.Delete(releaseCtx, m.key(lease.KBID)); deleteErr != nil && !errors.Is(deleteErr, blobstore.ErrNotFound) {
+		return fmt.Errorf("release s3 lease: delete tombstone: %w", deleteErr)
+	}
 	return nil
 }
 
@@ -152,11 +154,13 @@ func (m *S3Manager) evictExpiredCAS(ctx context.Context, kbID string, now time.T
 		return nil
 	}
 	// CAS claim before delete prevents concurrent eviction from wiping a live lock
-	_, err = m.store.UploadBytesIfMatch(ctx, m.key(kbID), tombstonePayload(), info.Version)
-	if err != nil {
-		return nil
+	_, casErr := m.store.UploadBytesIfMatch(ctx, m.key(kbID), tombstonePayload(), info.Version)
+	if casErr != nil {
+		return nil // CAS failed — another eviction or acquire already claimed this slot
 	}
-	_ = m.store.Delete(ctx, m.key(kbID))
+	if deleteErr := m.store.Delete(ctx, m.key(kbID)); deleteErr != nil && !errors.Is(deleteErr, blobstore.ErrNotFound) {
+		return fmt.Errorf("s3 lease evict: delete tombstone: %w", deleteErr)
+	}
 	return nil
 }
 

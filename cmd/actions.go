@@ -75,6 +75,8 @@ func requestIDs(c echo.Context) (string, string) {
 
 const errorResponseKey = "error"
 const eventIDResponseKey = "event_id"
+const errKBUnavailable = "kb unavailable"
+const errInvalidRequestBody = "invalid request body"
 
 func writeAcceptedOperation(c echo.Context, evtID, effectiveIdem string, body map[string]any) error {
 	c.Response().Header().Set("X-Source-Event-Id", evtID)
