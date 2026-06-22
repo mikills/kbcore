@@ -15,18 +15,7 @@ func VectorPrimitive(h *sim.Harness) {
 		n    = 20
 	)
 
-	// Build n unit vectors, each pointing along a unique axis or blend.
-	vecs := make([][]float32, n)
-	for i := range n {
-		v := make([]float32, dim)
-		v[i%dim] = 1.0
-		if i >= dim {
-			v[(i+1)%dim] = 0.5
-			v = normalizeVec32(v)
-		}
-		vecs[i] = v
-	}
-
+	vecs := buildUnitVecs(n, dim)
 	docs := make([]kb.Document, n)
 	for i := range n {
 		docs[i] = kb.Document{
@@ -40,7 +29,38 @@ func VectorPrimitive(h *sim.Harness) {
 		h.Fatalf("ingest pre-computed vectors: %v", err)
 	}
 
-	// Query with each ingested vector — the exact match must rank first.
+	assertSelfTopResult(h, kbID, vecs)
+
+	if err := h.WipeCache(); err != nil {
+		h.Fatalf("wipe cache: %v", err)
+	}
+
+	results, err := h.Search(kbID, vecs[0], 1)
+	if err != nil {
+		h.Fatalf("post-eviction search: %v", err)
+	}
+	if len(results) == 0 || results[0].ID != "vec-000" {
+		h.Errorf("post-eviction: expected vec-000 as top result")
+	}
+
+	h.RecordManifestVersion(kbID)
+}
+
+func buildUnitVecs(n, dim int) [][]float32 {
+	vecs := make([][]float32, n)
+	for i := range n {
+		v := make([]float32, dim)
+		v[i%dim] = 1.0
+		if i >= dim {
+			v[(i+1)%dim] = 0.5
+			v = normalizeVec32(v)
+		}
+		vecs[i] = v
+	}
+	return vecs
+}
+
+func assertSelfTopResult(h *sim.Harness, kbID string, vecs [][]float32) {
 	for i, probe := range vecs {
 		results, err := h.Search(kbID, probe, 3)
 		if err != nil {
@@ -54,22 +74,6 @@ func VectorPrimitive(h *sim.Harness) {
 			h.Errorf("vec-%03d: expected self as top result, got %s (distance=%.4f)", i, results[0].ID, results[0].Distance)
 		}
 	}
-
-	// Verify after cache eviction.
-	if err := h.WipeCache(); err != nil {
-		h.Fatalf("wipe cache: %v", err)
-	}
-
-	probe := vecs[0]
-	results, err := h.Search(kbID, probe, 1)
-	if err != nil {
-		h.Fatalf("post-eviction search: %v", err)
-	}
-	if len(results) == 0 || results[0].ID != "vec-000" {
-		h.Errorf("post-eviction: expected vec-000 as top result")
-	}
-
-	h.RecordManifestVersion(kbID)
 }
 
 func normalizeVec32(v []float32) []float32 {

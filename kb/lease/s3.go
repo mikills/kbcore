@@ -81,23 +81,12 @@ func (m *S3Manager) Renew(ctx context.Context, lease *Lease, ttl time.Duration) 
 		ttl = DefaultTTL
 	}
 	now := m.now()
-	// single round-trip: data + ETag together avoids a separate Head call and TOCTOU
-	data, info, err := m.store.DownloadBytesWithInfo(ctx, m.key(lease.KBID))
+	etag, err := m.verifyOwnership(ctx, lease.KBID, lease.Token, now, true)
 	if err != nil {
-		if errors.Is(err, blobstore.ErrNotFound) {
-			return nil, ErrConflict
-		}
 		return nil, fmt.Errorf("renew s3 lease: %w", err)
 	}
-	if info.Version == "" {
-		return nil, ErrConflict // can't CAS without ETag
-	}
-	storedToken, expiresAt, err := decodeLockPayload(data)
-	if err != nil || storedToken != lease.Token || !now.Before(expiresAt) {
-		return nil, ErrConflict
-	}
 	newExpiresAt := now.Add(ttl)
-	_, err = m.store.UploadBytesIfMatch(ctx, m.key(lease.KBID), encodeLockPayload(lease.Token, newExpiresAt), info.Version)
+	_, err = m.store.UploadBytesIfMatch(ctx, m.key(lease.KBID), encodeLockPayload(lease.Token, newExpiresAt), etag)
 	if err != nil {
 		if errors.Is(err, blobstore.ErrVersionMismatch) {
 			return nil, ErrConflict
@@ -113,22 +102,14 @@ func (m *S3Manager) Release(ctx context.Context, lease *Lease) error {
 	}
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	data, info, err := m.store.DownloadBytesWithInfo(releaseCtx, m.key(lease.KBID))
+	etag, err := m.verifyOwnership(releaseCtx, lease.KBID, lease.Token, m.now(), false)
 	if err != nil {
-		if errors.Is(err, blobstore.ErrNotFound) {
-			return nil
+		if errors.Is(err, ErrConflict) {
+			return nil // not our lock or already released
 		}
 		return fmt.Errorf("release s3 lease: %w", err)
 	}
-	if info.Version == "" {
-		return nil
-	}
-	storedToken, _, decErr := decodeLockPayload(data)
-	if decErr != nil || storedToken != lease.Token {
-		return nil
-	}
-	// CAS tombstone prevents wiping a lock we no longer own
-	_, casErr := m.store.UploadBytesIfMatch(releaseCtx, m.key(lease.KBID), tombstonePayload(), info.Version)
+	_, casErr := m.store.UploadBytesIfMatch(releaseCtx, m.key(lease.KBID), tombstonePayload(), etag)
 	if casErr != nil {
 		return nil // CAS failed — another caller already replaced this lock
 	}
@@ -136,6 +117,30 @@ func (m *S3Manager) Release(ctx context.Context, lease *Lease) error {
 		return fmt.Errorf("release s3 lease: delete tombstone: %w", deleteErr)
 	}
 	return nil
+}
+
+// verifyOwnership reads the lock object and returns its ETag if the token
+// matches. Expiry is checked only when checkExpiry is true (Renew requires
+// a live lease; Release should clean up an expired but still-present lock).
+func (m *S3Manager) verifyOwnership(ctx context.Context, kbID, token string, now time.Time, checkExpiry bool) (string, error) {
+	data, info, err := m.store.DownloadBytesWithInfo(ctx, m.key(kbID))
+	if err != nil {
+		if errors.Is(err, blobstore.ErrNotFound) {
+			return "", ErrConflict
+		}
+		return "", err
+	}
+	if info.Version == "" {
+		return "", ErrConflict
+	}
+	storedToken, expiresAt, decErr := decodeLockPayload(data)
+	if decErr != nil || storedToken != token {
+		return "", ErrConflict
+	}
+	if checkExpiry && !now.Before(expiresAt) {
+		return "", ErrConflict
+	}
+	return info.Version, nil
 }
 
 func (m *S3Manager) evictExpiredCAS(ctx context.Context, kbID string, now time.Time) error {

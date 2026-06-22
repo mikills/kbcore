@@ -97,42 +97,48 @@ func handleVectorUpsert(c echo.Context, deps Dependencies) error {
 }
 
 func handleVectorQuery(c echo.Context, deps Dependencies) error {
+	req, err := bindVectorQueryRequest(c)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: err.Error()})
+	}
+	if deps.QueryVectors == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: errKBUnavailable})
+	}
+	rawResults, err := deps.QueryVectors(c.Request().Context(), req.KBID, req.Vector, req.K, req.Filter)
+	if err != nil {
+		return WriteError(c, err, deps.IsBudgetExceeded)
+	}
+	out := make([]vectorQueryResult, 0, len(rawResults))
+	for _, r := range rawResults {
+		out = append(out, vectorQueryResult{ID: r.ID, Distance: r.Distance, Metadata: r.Metadata})
+	}
+	return c.JSON(http.StatusOK, map[string]any{"results": out})
+}
+
+func bindVectorQueryRequest(c echo.Context) (vectorQueryRequest, error) {
 	var req vectorQueryRequest
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: errInvalidRequestBody})
+		return req, fmt.Errorf(errInvalidRequestBody)
 	}
 	req.KBID = strings.TrimSpace(req.KBID)
 	if req.KBID == "" {
 		req.KBID = defaultKBIDValue
 	}
 	if len(req.Vector) == 0 {
-		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "vector is required"})
+		return req, fmt.Errorf("vector is required")
 	}
 	if req.K <= 0 {
-		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "k must be > 0"})
+		return req, fmt.Errorf("k must be > 0")
 	}
 	if req.K > maxQueryK {
-		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: fmt.Sprintf("k must be <= %d", maxQueryK)})
+		return req, fmt.Errorf("k must be <= %d", maxQueryK)
 	}
 	if req.Filter != nil {
 		if err := req.Filter.Validate(); err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "invalid filter: " + err.Error()})
+			return req, fmt.Errorf("invalid filter: %w", err)
 		}
 	}
-	if deps.QueryVectors == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: errKBUnavailable})
-	}
-
-	rawResults, err := deps.QueryVectors(c.Request().Context(), req.KBID, req.Vector, req.K, req.Filter)
-	if err != nil {
-		return WriteError(c, err, deps.IsBudgetExceeded)
-	}
-
-	out := make([]vectorQueryResult, 0, len(rawResults))
-	for _, r := range rawResults {
-		out = append(out, vectorQueryResult{ID: r.ID, Distance: r.Distance, Metadata: r.Metadata})
-	}
-	return c.JSON(http.StatusOK, map[string]any{"results": out})
+	return req, nil
 }
 
 func handleVectorFetch(c echo.Context, deps Dependencies) error {

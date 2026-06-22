@@ -57,9 +57,13 @@ func validateFilterExpr(f FilterExpr, depth int) error {
 	if isLeaf {
 		return validateLeafFilter(f)
 	}
-	children := f.And
-	if isOr {
-		children = f.Or
+	return validateCompoundChildren(f.And, f.Or, depth)
+}
+
+func validateCompoundChildren(and, or []FilterExpr, depth int) error {
+	children := and
+	if len(or) > 0 {
+		children = or
 	}
 	for _, child := range children {
 		if err := validateFilterExpr(child, depth+1); err != nil {

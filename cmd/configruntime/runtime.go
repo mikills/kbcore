@@ -51,7 +51,8 @@ type Runtime struct {
 	cleanups    []func(context.Context) error
 }
 
-// KB returns the configured KB instance.
+const logKeyError = "error"
+
 func (r *Runtime) KB() *kb.KB { return r.kb }
 
 // App returns the HTTP app. Nil is possible only before Build returns.
@@ -322,12 +323,12 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	}
 	if !r.dryRun && r.app != nil {
 		if err := r.app.Stop(ctx); err != nil {
-			r.logger.Error("shutdown error", "error", err)
+			r.logger.Error("shutdown error", logKeyError, err)
 		}
 	}
 	for _, fn := range r.cleanups {
 		if err := fn(ctx); err != nil {
-			r.logger.Error("runtime cleanup", "error", err)
+			r.logger.Error("runtime cleanup", logKeyError, err)
 		}
 	}
 	return nil
@@ -373,7 +374,7 @@ func buildLeaseOption(s3Store *blobstore.S3BlobStore, prefix string, logger *slo
 	}
 	mgr, err := lease.NewS3Manager(s3Store, prefix)
 	if err != nil {
-		logger.Warn("failed to build s3 lease manager, falling back to in-memory", "error", err)
+		logger.Warn("failed to build s3 lease manager, falling back to in-memory", logKeyError, err)
 		return nil
 	}
 	logger.Info("using S3-native distributed write lease")
@@ -454,7 +455,7 @@ func (r *Runtime) wireMongo(ctx context.Context, cfg *config.Config) ([]kb.KBOpt
 	redactedURI := redactMongoURI(cfg.Mongo.URI)
 	client, err := mongo.Connect(mongoopts.Client().ApplyURI(cfg.Mongo.URI))
 	if err != nil {
-		r.logger.Error("mongo connect failed", "uri", redactedURI, "error", err.Error())
+		r.logger.Error("mongo connect failed", "uri", redactedURI, logKeyError, err.Error())
 		return nil, errors.New("mongo connect failed: check MINNOW_MONGO_URI")
 	}
 
@@ -468,11 +469,11 @@ func (r *Runtime) wireMongo(ctx context.Context, cfg *config.Config) ([]kb.KBOpt
 				"mongo disconnect after ping failure failed",
 				"uri",
 				redactedURI,
-				"error",
+				logKeyError,
 				disconnectErr.Error(),
 			)
 		}
-		r.logger.Error("mongo ping failed", "uri", redactedURI, "error", err.Error())
+		r.logger.Error("mongo ping failed", "uri", redactedURI, logKeyError, err.Error())
 		return nil, errors.New("mongo ping failed: check MINNOW_MONGO_URI and network reachability")
 	}
 

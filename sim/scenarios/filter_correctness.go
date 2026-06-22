@@ -8,15 +8,9 @@ import (
 	"github.com/mikills/minnow/sim"
 )
 
-// FilterCorrectness ingests docs across two tenants, then verifies that
-// filtered queries return only matching docs — across multiple shards,
-// after cache eviction, and under blob faults.
-//
-// Invariant under test: a filtered top-k never returns a doc whose metadata
-// does not satisfy the predicate.
 func FilterCorrectness(h *sim.Harness) {
 	const (
-		kbID    = "filter-correctness"
+		kbID      = "filter-correctness"
 		perTenant = 15
 	)
 
@@ -42,46 +36,30 @@ func FilterCorrectness(h *sim.Harness) {
 	queryVec := h.RandomVec(32)
 
 	for _, tenant := range tenants {
-		filter := &search.FilterExpr{
-			Field: "tenant",
-			Op:    search.FilterOpEq,
-			Value: tenant,
-		}
-		results, err := h.SearchWithFilter(kbID, queryVec, len(allDocs), filter)
-		if err != nil {
-			h.Fatalf("filter query tenant=%s: %v", tenant, err)
-		}
-		for _, r := range results {
-			got, _ := r.Metadata["tenant"].(string)
-			if got != tenant {
-				h.Errorf("filter tenant=%s: got doc %s with tenant=%q", tenant, r.ID, got)
-			}
-		}
-		if len(results) != perTenant {
-			h.Errorf("filter tenant=%s: expected %d results, got %d", tenant, perTenant, len(results))
-		}
+		assertTenantFilterResults(h, kbID, queryVec, tenant, perTenant)
 	}
 
-	// Verify after cache eviction — forces a fresh shard download.
 	if err := h.WipeCache(); err != nil {
 		h.Fatalf("wipe cache: %v", err)
 	}
+	assertTenantFilterResults(h, kbID, queryVec, "alpha", perTenant)
 
-	filter := &search.FilterExpr{
-		Field: "tenant",
-		Op:    search.FilterOpEq,
-		Value: "alpha",
-	}
-	results, err := h.SearchWithFilter(kbID, queryVec, len(allDocs), filter)
+	h.RecordManifestVersion(kbID)
+}
+
+func assertTenantFilterResults(h *sim.Harness, kbID string, queryVec []float32, tenant string, expected int) {
+	filter := &search.FilterExpr{Field: "tenant", Op: search.FilterOpEq, Value: tenant}
+	results, err := h.SearchWithFilter(kbID, queryVec, expected*2, filter)
 	if err != nil {
-		h.Fatalf("post-eviction filter query: %v", err)
+		h.Fatalf("filter query tenant=%s: %v", tenant, err)
 	}
 	for _, r := range results {
 		got, _ := r.Metadata["tenant"].(string)
-		if got != "alpha" {
-			h.Errorf("post-eviction filter: got doc %s with tenant=%q", r.ID, got)
+		if got != tenant {
+			h.Errorf("filter tenant=%s: got doc %s with tenant=%q", tenant, r.ID, got)
 		}
 	}
-
-	h.RecordManifestVersion(kbID)
+	if len(results) != expected {
+		h.Errorf("filter tenant=%s: expected %d results, got %d", tenant, expected, len(results))
+	}
 }
