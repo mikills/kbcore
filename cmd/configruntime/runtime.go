@@ -45,10 +45,13 @@ type Runtime struct {
 	logger      *slog.Logger
 	dryRun      bool
 	kb          *kb.KB
+	format      *kbduckdb.DuckDBArtifactFormat
 	app         *appcmd.App
 	scheduler   *kb.Scheduler
 	workerPools []*kb.WorkerPool
 	cleanups    []func(context.Context) error
+	warmCancel  context.CancelFunc
+	warmDone    chan struct{}
 }
 
 const logKeyError = "error"
@@ -96,6 +99,7 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 	if err := k.RegisterFormat(af); err != nil {
 		return nil, fmt.Errorf("register artifact format: %w", err)
 	}
+	rt.format = af
 
 	rt.app = appcmd.NewApp(k, appConfigFromConfig(cfg, logger))
 	if err := rt.wireSchedulerAndWorkers(cfg); err != nil {
@@ -260,6 +264,15 @@ func (r *Runtime) StartBackground(ctx context.Context) error {
 	for _, pool := range r.workerPools {
 		pool.Start(ctx)
 	}
+	if n := r.cfg.Storage.Cache.WarmShards; n > 0 && r.format != nil {
+		warmCtx, cancel := context.WithCancel(ctx)
+		r.warmCancel = cancel
+		r.warmDone = make(chan struct{})
+		go func() {
+			defer close(r.warmDone)
+			r.format.WarmCache(warmCtx, n, r.logger)
+		}()
+	}
 	return nil
 }
 
@@ -315,6 +328,10 @@ func (r *Runtime) Wait() error {
 // scheduler, HTTP app, then any connection cleanups (e.g. Mongo disconnect).
 // Safe to call multiple times.
 func (r *Runtime) Stop(ctx context.Context) error {
+	if r.warmCancel != nil {
+		r.warmCancel()
+		<-r.warmDone // drain before cleanups tear down the stores it reads
+	}
 	for _, pool := range r.workerPools {
 		pool.Stop()
 	}

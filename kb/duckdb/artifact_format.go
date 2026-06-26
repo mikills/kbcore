@@ -509,3 +509,83 @@ func (f *DuckDBArtifactFormat) ensureGraphModeAvailable(ctx context.Context, kbI
 
 	return nil
 }
+
+// WarmCache pre-downloads up to n shards per KB into the local cache.
+// Shards are selected by most-recently sealed first. Runs until ctx is
+// cancelled or all eligible shards are warm. Errors are logged, not returned.
+func (f *DuckDBArtifactFormat) WarmCache(ctx context.Context, n int, logger warmLogger) {
+	if n <= 0 {
+		return
+	}
+	objects, err := f.deps.BlobStore.List(ctx, "")
+	if err != nil {
+		logger.Warn("shard pre-warm: list blobs failed", "error", err)
+		return
+	}
+	kbIDs := kbIDsFromManifestObjects(objects)
+	for _, kbID := range kbIDs {
+		if ctx.Err() != nil {
+			return
+		}
+		f.warmKB(ctx, kbID, n, logger)
+	}
+}
+
+type warmLogger interface {
+	Info(msg string, args ...any)
+	Warn(msg string, args ...any)
+}
+
+func (f *DuckDBArtifactFormat) warmKB(ctx context.Context, kbID string, n int, logger warmLogger) {
+	doc, err := f.deps.ManifestStore.Get(ctx, kbID)
+	if err != nil {
+		return // KB may not be initialized yet; skip silently
+	}
+	if err := f.validateManifestFormat(&doc.Manifest); err != nil {
+		return
+	}
+	shards := selectShardsForWarm(doc.Manifest.Shards, n)
+	for _, shard := range shards {
+		if ctx.Err() != nil {
+			return
+		}
+		_, hit, err := f.ensureLocalShardFile(ctx, kbID, shard)
+		if err != nil {
+			logger.Warn("shard pre-warm: download failed", "kb_id", kbID, "shard", shard.ShardID, "error", err)
+			continue
+		}
+		if !hit {
+			logger.Info("shard pre-warm: warmed", "kb_id", kbID, "shard", shard.ShardID)
+		}
+	}
+}
+
+func selectShardsForWarm(shards []kb.SnapshotShardMetadata, n int) []kb.SnapshotShardMetadata {
+	sorted := make([]kb.SnapshotShardMetadata, len(shards))
+	copy(sorted, shards)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].SealedAt.After(sorted[j].SealedAt)
+	})
+	if n < len(sorted) {
+		return sorted[:n]
+	}
+	return sorted
+}
+
+func kbIDsFromManifestObjects(objects []kb.BlobObjectInfo) []string {
+	const suffix = ".duckdb.manifest.json"
+	seen := make(map[string]struct{})
+	ids := make([]string, 0)
+	for _, obj := range objects {
+		if strings.HasSuffix(obj.Key, suffix) {
+			id := strings.TrimSuffix(obj.Key, suffix)
+			if id != "" {
+				if _, ok := seen[id]; !ok {
+					seen[id] = struct{}{}
+					ids = append(ids, id)
+				}
+			}
+		}
+	}
+	return ids
+}
