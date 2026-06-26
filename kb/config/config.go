@@ -72,6 +72,7 @@ type CacheConfig struct {
 	Dir           string    `yaml:"dir"                      json:"dir"`
 	MaxBytes      int64     `yaml:"max_bytes"                json:"max_bytes"`
 	EntryTTL      Duration  `yaml:"entry_ttl"                json:"entry_ttl"`
+	WarmShards    int       `yaml:"warm_shards,omitempty"    json:"warm_shards,omitempty"`
 	EvictInterval *Duration `yaml:"evict_interval,omitempty" json:"evict_interval,omitempty"`
 }
 
