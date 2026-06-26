@@ -69,12 +69,23 @@ That config enables both HTTP and stdio MCP, uses `text-embedding-3-small`, and
 stores local blobs/cache under the same user config directory. The first ingest
 fixes each KB's embedding dimension to the model output dimension.
 
-Index the current repository for code-aware retrieval:
+Index the current repository for code-aware retrieval. From inside the repo, no
+flags are required:
 
 ```bash
-minnow index codebase --index-key default --kb my-project --description "Default codebase index" --root .
-minnow index status --index-key default --root .
+minnow index codebase     # indexes . , index-key "default", kb_id auto-derived
+minnow index status
 ```
+
+Optional overrides:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--root` | `.` | Repository root to index. |
+| `--index-key` | `default` | Stable agent-facing key for this index. |
+| `--kb` | derived from index-key | Backing knowledge base id. |
+| `--description` | empty | Human label stored in the registry. |
+| `--include-untracked` | off | Index files not tracked by Git. |
 
 The first run creates `.minnow/codebase-indexes.json` in the repository:
 
@@ -100,8 +111,8 @@ Optional Git hooks can keep the index warm after commits, checkouts, merges, and
 rebases:
 
 ```bash
-minnow index hooks install --index-key default --root .
-minnow index hooks status --root .
+minnow index hooks install
+minnow index hooks status
 ```
 
 Code index refreshes are state-based, not commit-based. On each refresh Minnow
