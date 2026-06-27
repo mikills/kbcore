@@ -8,28 +8,11 @@
 
 ## Configuration
 
-minnow is configured from a single YAML file, discovered at:
-
-1. `$MINNOW_CONFIG` if set, or
-2. `./minnow.yaml` in the process working directory, or
-3. the per-user config path (`~/Library/Application Support/minnow/minnow.yaml`
-   on macOS, `~/.config/minnow/minnow.yaml` on Linux).
-
-See [configuration.md](configuration.md) for the full schema and
-[`examples/minnow.min.yaml`](../examples/minnow.min.yaml) /
-[`examples/minnow.yaml`](../examples/minnow.yaml) for ready-to-copy starting
-points.
-
-Only two environment variables are read directly by the binary; every other
-deployment knob lives in the YAML.
-
-| Env var             | Purpose                                                  |
-| ------------------- | -------------------------------------------------------- |
-| `MINNOW_CONFIG`     | Path to the YAML config. Overrides default discovery.     |
-| `MINNOW_LOG_FORMAT` | Logger format (`text` / `json`). Read before the config. |
-
-Secret values (Mongo URI, tokens) are referenced from YAML via `${VAR}`
-interpolation and set as regular environment variables.
+minnow reads a single YAML file (discovered via `$MINNOW_CONFIG`, `./minnow.yaml`,
+or the per-user config path). Copy
+[`examples/minnow.min.yaml`](../examples/minnow.min.yaml) to start. The full
+schema, discovery rules, env vars, and secret handling live in
+[configuration.md](configuration.md).
 
 ## Run locally
 
@@ -69,6 +52,8 @@ That config enables both HTTP and stdio MCP, uses `text-embedding-3-small`, and
 stores local blobs/cache under the same user config directory. The first ingest
 fixes each KB's embedding dimension to the model output dimension.
 
+## Index a codebase
+
 Index the current repository for code-aware retrieval. From inside the repo, no
 flags are required:
 
@@ -87,90 +72,31 @@ Optional overrides:
 | `--description` | empty | Human label stored in the registry. |
 | `--include-untracked` | off | Index files not tracked by Git. |
 
-The first run creates `.minnow/codebase-indexes.json` in the repository:
+The first run writes `.minnow/codebase-indexes.json`, a repo-local registry
+mapping each `index_key` to its backing `kb_id`, so MCP clients pass only
+`index_key: "default"`. One repo can hold several indexes (`default`, `backend`,
+`docs`), each with its own KB.
 
-```json
-{
-  "schema_version": "minnow.codebase_indexes/v1",
-  "codebase_indexes": {
-    "default": {
-      "kb_id": "my-project",
-      "root": ".",
-      "description": "Default codebase index",
-      "include_untracked": false
-    }
-  }
-}
-```
-
-MCP clients can then use the stable `index_key` instead of remembering the
-backing `kb_id`. This also lets an agent create multiple codebase indexes, such
-as `default`, `backend`, or `docs`, each with its own description and KB.
-
-Optional Git hooks can keep the index warm after commits, checkouts, merges, and
-rebases:
+Optionally install Git hooks to refresh on commit / checkout / merge / rebase:
 
 ```bash
 minnow index hooks install
 minnow index hooks status
 ```
 
-Code index refreshes are state-based, not commit-based. On each refresh Minnow
-scans the current tree, uses Git tracked files by default (`git ls-files`), hashes
-eligible files, and compares them with the previous code-index manifest. Unchanged
-files are skipped, changed files are re-chunked and re-embedded, new files are
-added, and chunks for deleted files are hard-deleted from the backing KB. Pass the
-include-untracked option when creating or refreshing an index if untracked files
-should be indexed too. Without installed hooks, run `minnow index refresh`
-manually after code changes.
+Refreshes are state-based: Minnow hashes tracked files (`git ls-files`) against
+the previous manifest and only re-embeds what changed (deleted files' chunks are
+removed). Without hooks, run `minnow index refresh` after code changes.
 
-The default bind address is `127.0.0.1:8080` (override `http.address` in the YAML).
+## MCP endpoints
 
 The minimal config enables MCP for local coding-agent workflows:
 
-- Streamable HTTP MCP endpoint: `http://127.0.0.1:8080/mcp`
-- Stdio MCP command: `go run . mcp stdio`
+- Streamable HTTP: `http://127.0.0.1:8080/mcp` (override `http.address` in the YAML)
+- Stdio (for editor registration): `go run . mcp stdio`
 
-For editors that register MCP servers as a command, use the stdio mode. If your
-config is not at `./minnow.yaml`, pass it through `MINNOW_CONFIG` in the editor's
-MCP server environment.
-
-Example MCP registration shape:
-
-```json
-{
-  "mcpServers": {
-    "minnow": {
-      "command": "go",
-      "args": ["run", ".", "mcp", "stdio"],
-      "env": {
-        "MINNOW_CONFIG": "./minnow.yaml"
-      }
-    }
-  }
-}
-```
-
-If you install Minnow as a binary, replace the command and args with the binary:
-
-```json
-{
-  "mcpServers": {
-    "minnow": {
-      "command": "minnow",
-      "args": ["mcp", "stdio"],
-      "env": {
-        "OPENAI_API_KEY": "sk-..."
-      }
-    }
-  }
-}
-```
-
-If you keep the config outside the default user config path, add `MINNOW_CONFIG`
-to the `env` block as well. GUI editors may not inherit shell environment
-variables on macOS, so pass `OPENAI_API_KEY` explicitly unless your editor has a
-known environment loading mechanism.
+For editor registration JSON and the full MCP tool/gate reference, see the `mcp`
+section of [configuration.md](configuration.md).
 
 ## Validate a config
 
