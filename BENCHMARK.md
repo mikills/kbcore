@@ -57,8 +57,30 @@ go run ./scripts/fetch_corpus/
 
 The 768-dim real case requires Ollama running with `nomic-embed-text` pulled (`ollama pull nomic-embed-text`). The bench skips cleanly if Ollama is unavailable.
 
-Operational use cases, including real-repo code indexing timings and learned
-defaults, live in [`USECASES.md`](USECASES.md).
+## Real-world runs (code indexing)
+
+Indexing real repositories with `minnow index codebase`, OpenAI
+`text-embedding-3-small` via `openai_compatible`, Apple M4 / local SSD.
+
+**Minnow source tree** — 110 files, 22,601 lines, 1,360 chunks (DuckDB limit 2 GB):
+
+| Case | Wall time | Files/s | Chunks/s | Notes |
+|------|-----------|---------|----------|-------|
+| First index | 5m 56s | 0.31 | 3.82 | Embeds and writes chunks. |
+| No-op refresh | 0.26s | 423 | n/a | Hash check only; 0 files re-indexed. |
+
+**Django (`django__django-11333`)** — 2,091 files, 33,861 chunks (DuckDB limit 4 GB):
+
+| Case | Wall time | Files/s | Chunks/s | Notes |
+|------|-----------|---------|----------|-------|
+| First index | 8m 26s | 4.1 | 66.9 | Streams embedding batches into DuckDB. |
+| No-op refresh | 2.41s | 868 | n/a | Hash check only; 0 files re-indexed. |
+
+First-index cost is dominated by the embedder; refreshes are state-based, so an
+unchanged tree costs only a hash scan. Keep `include` source-focused — a broad
+`["**/*"]` without strong excludes pulls in binaries, fixtures, and generated
+files. Minnow's defaults already skip those (see `code_index` in
+[configuration.md](docs/configuration.md)).
 
 ## vs. Turbopuffer
 
