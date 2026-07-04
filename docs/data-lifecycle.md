@@ -95,6 +95,25 @@ Cache-miss path for a shard: stat the file → SHA-256 → atomic rename into ca
 - `true`: graph extraction is required for this request; fails if the graph builder is not configured.
 - `false`: graph extraction is explicitly skipped.
 
+## Vector API
+
+The `/v1/vectors/*` endpoints operate on pre-computed vectors and bypass the
+embedder — the caller owns the embeddings. `kb_id` defaults to `default` when
+omitted. Upsert is async (returns an operation handle); the rest are synchronous.
+
+| Endpoint | Body | Response |
+|---|---|---|
+| `POST /v1/vectors/upsert` | `{kb_id, vectors: [{id, vector, metadata?}]}` | `202 {operation_id, event_id}` |
+| `POST /v1/vectors/query` | `{kb_id, vector, k, filter?}` | `200 {results: [{id, distance, metadata?}]}` |
+| `POST /v1/vectors/fetch` | `{kb_id, ids}` | `200 {records: [{id, metadata?}]}` |
+| `DELETE /v1/vectors` | `{kb_id, ids}` | `200 {ids}` |
+
+`query.k` and `fetch.ids` are capped at 200. **Fetch is metadata-only** — it
+returns records by ID without a similarity search and never includes the vector,
+so it's the cheap path when you already know the IDs. `query.filter` is a
+metadata predicate (`=`, `!=`, `<`, `in`, AND/OR); see `POST /rag/query` for the
+same filter grammar.
+
 ## Compaction
 
 Shards merge via size-tiered selection (log₂ bucketing relative to `target_shard_bytes`) or tombstone pressure (`TombstoneRatio ≥ compaction_tombstone_ratio`). Up to 4 shards per pass. Replaced shards are enqueued for delayed GC so in-flight readers finish before deletion.
