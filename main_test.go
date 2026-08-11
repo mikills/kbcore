@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,37 +11,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestIndexCLIOptions(t *testing.T) {
-	t.Run("flagset parser accepts aliases and typed values", func(t *testing.T) {
-		opts, err := parseIndexCLIOptions(
-			[]string{
-				"--kb",
-				"code",
-				"--index-key",
-				"api",
-				"--root",
-				".",
-				"--batch-size",
-				"4",
-				"--max-rss-bytes",
-				"1024",
-				"--throttle",
-				"5ms",
-				"-y",
-			},
-		)
-		require.NoError(t, err)
-		require.Equal(t, "code", opts.kbID)
-		require.Equal(t, "api", opts.indexKey)
-		require.Equal(t, 4, opts.embedBatchSize)
-		require.Equal(t, uint64(1024), opts.maxRSSBytes)
-		require.True(t, opts.yes)
-	})
+func TestLegacyCodeIndexCommandDoesNotStartMinnowServer(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
 
-	t.Run("rejects positional args", func(t *testing.T) {
-		_, err := parseIndexCLIOptions([]string{"unexpected"})
-		require.ErrorContains(t, err, "unexpected argument")
-	})
+	code, handled := runTopLevelCommand(context.Background(), []string{"index", "refresh"}, slog.Default())
+	require.True(t, handled)
+	require.Equal(t, 1, code)
+}
+
+func TestLegacyCodeIndexArgsPassSiblingBinaryToHookInstall(t *testing.T) {
+	require.Equal(
+		t,
+		[]string{"index", "hooks", "install", "--binary", "/tmp/codeindex"},
+		legacyCodeIndexArgs("/tmp/codeindex", []string{"hooks", "install"}),
+	)
+	require.Equal(
+		t,
+		[]string{"index", "hooks", "install", "--binary", "custom"},
+		legacyCodeIndexArgs("/tmp/codeindex", []string{"hooks", "install", "--binary", "custom"}),
+	)
 }
 
 func TestConfigInit(t *testing.T) {

@@ -61,6 +61,12 @@ func runSetupSubcommand(args []string) int {
 	return 0
 }
 
+func writeJSON(v any) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
+}
+
 func detectSetupInfo() (setupInfo, error) {
 	goBin, err := goInstallBin()
 	if err != nil {

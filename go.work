@@ -1,0 +1,8 @@
+go 1.24.0
+
+use (
+	.
+	./codeindex
+)
+
+replace github.com/mikills/minnow v0.1.0 => .

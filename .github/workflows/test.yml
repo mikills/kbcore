@@ -17,7 +17,22 @@ jobs:
           go-version-file: go.mod
 
       - name: Build
+        env:
+          GOWORK: off
         run: go build ./...
+
+      - name: Build codeindex
+        run: go build -o /tmp/minnow-codeindex ./codeindex
 
       - name: Test
         run: go test ./... -count=1 -tags=long
+
+      - name: Test codeindex
+        run: go test ./codeindex/...
+
+      - name: Test codeindex outside workspace on release tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: codeindex
+        env:
+          GOWORK: off
+        run: go test ./...

@@ -120,7 +120,7 @@ Ollama's OpenAI-compatible API.
 
 ### `code_index`
 
-Defaults used by `minnow index ...` commands and MCP code-indexing tools.
+Defaults used by the separate `codeindex ...` CLI and MCP code-indexing tools.
 
 | Field                 | Type     | Default                                                                  | Notes                                      |
 | --------------------- | -------- | ------------------------------------------------------------------------ | ------------------------------------------ |
@@ -154,7 +154,7 @@ before exceeding configured Go heap or process RSS guards. The CLI also requires
 indexing.
 
 The repo-local codebase index registry lives at `.minnow/codebase-indexes.json`.
-It is created or updated by `minnow index codebase` and maps stable keys to KBs:
+It is created or updated by `codeindex codebase` and maps stable keys to KBs:
 
 ```json
 {

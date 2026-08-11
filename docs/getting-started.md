@@ -58,8 +58,9 @@ Index the current repository for code-aware retrieval. From inside the repo, no
 flags are required:
 
 ```bash
-minnow index codebase     # indexes . , index-key "default", kb_id auto-derived
-minnow index status
+go install github.com/mikills/minnow/codeindex@latest
+codeindex codebase        # indexes . , index-key "default", kb_id auto-derived
+codeindex status
 ```
 
 Optional overrides:
@@ -80,13 +81,13 @@ mapping each `index_key` to its backing `kb_id`, so MCP clients pass only
 Optionally install Git hooks to refresh on commit / checkout / merge / rebase:
 
 ```bash
-minnow index hooks install
-minnow index hooks status
+codeindex hooks install
+codeindex hooks status
 ```
 
 Refreshes are state-based: Minnow hashes tracked files (`git ls-files`) against
 the previous manifest and only re-embeds what changed (deleted files' chunks are
-removed). Without hooks, run `minnow index refresh` after code changes.
+removed). Without hooks, run `codeindex refresh` after code changes.
 
 ## MCP endpoints
 
