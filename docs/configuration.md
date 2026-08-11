@@ -59,10 +59,23 @@ All other deployment knobs are YAML fields.
 
 ### `storage.blob`
 
-| Field  | Type   | Default             | Notes                           |
-| ------ | ------ | ------------------- | ------------------------------- |
-| `kind` | string | `local`             | Only `local` is supported today.|
-| `root` | path   | `./.temp/fixtures`  | Relative to YAML file.          |
+| Field  | Type   | Default             | Notes                                          |
+| ------ | ------ | ------------------- | ---------------------------------------------- |
+| `kind` | enum   | `local`             | `local` \| `s3`.                               |
+| `root` | path   | `./.temp/fixtures`  | Relative to YAML file. Used when `kind: local`.|
+
+When `kind: s3`, provide an `s3` block. Works with AWS S3, MinIO, Cloudflare R2,
+and any S3-compatible store via `endpoint`.
+
+| Field                    | Type   | Default     | Notes                                                              |
+| ------------------------ | ------ | ----------- | ------------------------------------------------------------------ |
+| `s3.bucket`              | string | —           | Required.                                                          |
+| `s3.region`              | string | `us-east-1` |                                                                    |
+| `s3.prefix`              | string | empty       | Key prefix for all objects.                                        |
+| `s3.lease_prefix`        | string | empty       | Namespaces the S3 write lease across deployments sharing a bucket. |
+| `s3.endpoint`            | string | empty       | HTTP(S) URL for MinIO / R2 / other S3-compatible stores.           |
+| `s3.access_key_id`       | string | empty       | Use `${VAR}`. Both keys must be set together, or both empty.       |
+| `s3.secret_access_key`   | string | empty       | Use `${VAR}`. When both are empty, the AWS credential chain is used.|
 
 ### `storage.cache`
 
@@ -71,7 +84,12 @@ All other deployment knobs are YAML fields.
 | `dir`            | path     | `./.temp/cache` | Relative to YAML file.       |
 | `max_bytes`      | int      | `0`             | `0` = unbounded.             |
 | `entry_ttl`      | duration | `0s`            | `0` = no TTL.                |
+| `warm_shards`    | int      | `0`             | Pre-download the N most-recently-sealed shards per KB into the cache at startup, in the background. `0` = off. |
 | `evict_interval` | duration | `30s`           |                              |
+
+Queries run against local shard files, so a shard not yet in `dir` is fetched
+from the blob store on first touch (a cold `GET` in S3 mode). `warm_shards` pays
+that cost up front at startup instead of on the first query per shard.
 
 ### `format`
 
@@ -102,7 +120,7 @@ Ollama's OpenAI-compatible API.
 
 ### `code_index`
 
-Defaults used by `minnow index ...` commands and MCP code-indexing tools.
+Defaults used by the separate `codeindex ...` CLI and MCP code-indexing tools.
 
 | Field                 | Type     | Default                                                                  | Notes                                      |
 | --------------------- | -------- | ------------------------------------------------------------------------ | ------------------------------------------ |
@@ -136,7 +154,7 @@ before exceeding configured Go heap or process RSS guards. The CLI also requires
 indexing.
 
 The repo-local codebase index registry lives at `.minnow/codebase-indexes.json`.
-It is created or updated by `minnow index codebase` and maps stable keys to KBs:
+It is created or updated by `codeindex codebase` and maps stable keys to KBs:
 
 ```json
 {

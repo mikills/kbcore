@@ -2,22 +2,19 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"flag"
+	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	appcmd "github.com/mikills/minnow/cmd"
 	"github.com/mikills/minnow/cmd/configruntime"
-	"github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/kb/config"
 	"github.com/mikills/minnow/mcpserver"
 )
@@ -52,7 +49,7 @@ func runTopLevelCommand(ctx context.Context, args []string, logger *slog.Logger)
 	case "mcp":
 		return runMCPSubcommand(ctx, args[1:]), true
 	case "index":
-		return runIndexSubcommand(ctx, args[1:], logger), true
+		return runLegacyCodeIndexCommand(ctx, args[1:]), true
 	case "config":
 		return runConfigSubcommand(ctx, args[1:], logger), true
 	case "setup":
@@ -63,12 +60,61 @@ func runTopLevelCommand(ctx context.Context, args []string, logger *slog.Logger)
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: minnow [mcp|index|config|setup|version]")
+	fmt.Fprintln(os.Stderr, "usage: minnow [mcp|config|setup|version]")
 	fmt.Fprintln(os.Stderr, "       minnow --version")
 	fmt.Fprintln(os.Stderr, "       minnow mcp stdio")
-	fmt.Fprintln(os.Stderr, "       minnow index <codebase|refresh|status|hooks>")
+	fmt.Fprintln(os.Stderr, "       minnow index ... (compatibility alias for codeindex)")
 	fmt.Fprintln(os.Stderr, "       minnow config <validate|init>")
 	fmt.Fprintln(os.Stderr, "       minnow setup")
+}
+
+func runLegacyCodeIndexCommand(ctx context.Context, args []string) int {
+	binary, err := findCodeIndexBinary()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "minnow index has moved to codeindex; install github.com/mikills/minnow/codeindex@latest or use --binary with codeindex")
+		return 1
+	}
+	cmd := exec.CommandContext(ctx, binary, legacyCodeIndexArgs(binary, args)...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		fmt.Fprintf(os.Stderr, "run codeindex: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func legacyCodeIndexArgs(binary string, args []string) []string {
+	forwarded := append([]string{"index"}, args...)
+	if len(args) >= 2 && args[0] == "hooks" && args[1] == "install" && !hasBinaryFlag(args[2:]) {
+		forwarded = append(forwarded, "--binary", binary)
+	}
+	return forwarded
+}
+
+func hasBinaryFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--binary" || strings.HasPrefix(arg, "--binary=") {
+			return true
+		}
+	}
+	return false
+}
+
+func findCodeIndexBinary() (string, error) {
+	if binary, err := exec.LookPath("codeindex"); err == nil {
+		return binary, nil
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	sibling := filepath.Join(filepath.Dir(executable), "codeindex")
+	return exec.LookPath(sibling)
 }
 
 func runMCPSubcommand(baseCtx context.Context, args []string) int {
@@ -242,310 +288,6 @@ func parseConfigInitArg(arg string, path string, force bool) (string, bool, int,
 		fmt.Fprintln(os.Stderr, "usage: minnow config init dev-openai [path] [--force]")
 		return "", false, 2, false
 	}
-}
-
-func runIndexSubcommand(ctx context.Context, args []string, logger *slog.Logger) int {
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: minnow index <codebase|refresh|status|hooks>")
-		return 2
-	}
-	switch args[0] {
-	case "codebase", "refresh":
-		return runIndexRefresh(ctx, args[1:], logger)
-	case "status":
-		return runIndexStatus(ctx, args[1:], logger)
-	case "hooks":
-		return runIndexHooks(ctx, args[1:])
-	case "-h", "--help":
-		fmt.Fprintln(os.Stderr, "usage: minnow index <codebase|refresh|status|hooks>")
-		return 0
-	default:
-		fmt.Fprintf(os.Stderr, "unknown index subcommand: %s\n", args[0])
-		return 2
-	}
-}
-
-type indexCLIOptions struct {
-	kbID             string
-	indexKey         string
-	description      string
-	root             string
-	binary           string
-	includeUntracked bool
-	quiet            bool
-	force            bool
-	yes              bool
-	lowResource      bool
-	embedBatchSize   int
-	maxBatchBytes    int
-	maxHeapBytes     uint64
-	maxRSSBytes      uint64
-	largeRepoFiles   int
-	throttle         time.Duration
-}
-
-func parseIndexCLIOptions(args []string) (indexCLIOptions, error) {
-	opts := indexCLIOptions{indexKey: "default", root: os.Getenv("MINNOW_REPO_ROOT")}
-	if opts.root == "" {
-		opts.root = "."
-	}
-
-	fs := flag.NewFlagSet("minnow index", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.kbID, "kb", opts.kbID, "knowledge base id")
-	fs.StringVar(&opts.indexKey, "index-key", opts.indexKey, "code index registry key")
-	fs.StringVar(&opts.description, "description", opts.description, "code index description")
-	fs.StringVar(&opts.root, "root", opts.root, "repository root")
-	fs.BoolVar(&opts.includeUntracked, "include-untracked", opts.includeUntracked, "include untracked git files")
-	fs.StringVar(&opts.binary, "binary", opts.binary, "minnow binary path for hooks")
-	fs.BoolVar(&opts.quiet, "quiet", opts.quiet, "suppress JSON output")
-	fs.BoolVar(&opts.force, "force", opts.force, "force operation or confirm large indexes")
-	fs.BoolVar(&opts.yes, "yes", opts.yes, "confirm prompts")
-	fs.BoolVar(&opts.yes, "y", opts.yes, "confirm prompts")
-	fs.BoolVar(&opts.lowResource, "low-resource", opts.lowResource, "use conservative indexing resource defaults")
-	fs.IntVar(&opts.embedBatchSize, "batch-size", opts.embedBatchSize, "embedding batch size")
-	fs.IntVar(&opts.maxBatchBytes, "max-batch-bytes", opts.maxBatchBytes, "maximum text bytes per embedding batch")
-	fs.Uint64Var(&opts.maxHeapBytes, "max-heap-bytes", opts.maxHeapBytes, "maximum Go heap/system bytes")
-	fs.Uint64Var(&opts.maxRSSBytes, "max-rss-bytes", opts.maxRSSBytes, "maximum resident set bytes")
-	fs.IntVar(&opts.largeRepoFiles, "large-repo-files", opts.largeRepoFiles, "large repository confirmation threshold")
-	fs.DurationVar(&opts.throttle, "throttle", opts.throttle, "delay between embedding batches")
-	if err := fs.Parse(args); err != nil {
-		return opts, err
-	}
-	if fs.NArg() > 0 {
-		return opts, fmt.Errorf("unexpected argument: %s", fs.Arg(0))
-	}
-	return opts, validateIndexCLIOptions(opts)
-}
-
-func validateIndexCLIOptions(opts indexCLIOptions) error {
-	return firstCLIValidationErr(
-		validateOptionalCLIValue("--kb", opts.kbID),
-		validateRequiredCLIValue("--index-key", opts.indexKey),
-		validateRequiredCLIValue("--root", opts.root),
-		validateOptionalCLIValue("--binary", opts.binary),
-		validateNonNegativeIndexNumbers(opts),
-		validateNonNegativeDuration("--throttle", opts.throttle),
-	)
-}
-
-func firstCLIValidationErr(errs ...error) error {
-	for _, err := range errs {
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func validateOptionalCLIValue(name string, value string) error {
-	if value != "" && strings.TrimSpace(value) == "" {
-		return fmt.Errorf("%s requires a value", name)
-	}
-	return nil
-}
-
-func validateRequiredCLIValue(name string, value string) error {
-	if strings.TrimSpace(value) == "" {
-		return fmt.Errorf("%s requires a value", name)
-	}
-	return nil
-}
-
-func validateNonNegativeIndexNumbers(opts indexCLIOptions) error {
-	if opts.embedBatchSize < 0 || opts.maxBatchBytes < 0 || opts.largeRepoFiles < 0 {
-		return fmt.Errorf("numeric index flags must be non-negative")
-	}
-	return nil
-}
-
-func validateNonNegativeDuration(name string, value time.Duration) error {
-	if value < 0 {
-		return fmt.Errorf("%s must be a non-negative duration", name)
-	}
-	return nil
-}
-
-func buildRuntimeForCLI(ctx context.Context, logger *slog.Logger) (*config.Config, *configruntime.Runtime, error) {
-	cfg, err := config.Load(os.Getenv("MINNOW_CONFIG"))
-	if err != nil {
-		return nil, nil, fmt.Errorf("load config: %w", err)
-	}
-	rt, err := configruntime.Build(ctx, cfg, configruntime.BuildOptions{Logger: logger})
-	if err != nil {
-		return nil, nil, fmt.Errorf("build runtime: %w", err)
-	}
-	if err := rt.StartBackground(ctx); err != nil {
-		return nil, nil, fmt.Errorf("start runtime: %w", err)
-	}
-	return cfg, rt, nil
-}
-
-func runIndexRefresh(ctx context.Context, args []string, logger *slog.Logger) int {
-	opts, err := parseIndexCLIOptions(args)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		return 2
-	}
-	cfg, rt, err := buildRuntimeForCLI(ctx, logger)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		return 1
-	}
-	defer stopRuntimeForCLI(ctx, logger, rt)
-
-	result, err := rt.KB().IndexCodebase(ctx, codeIndexOptionsForCLI(cfg, opts))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "index codebase: %v\n", err)
-		return 1
-	}
-	if !opts.quiet {
-		if err := writeJSON(result); err != nil {
-			fmt.Fprintf(os.Stderr, "write json: %v\n", err)
-			return 1
-		}
-	}
-	return 0
-}
-
-func stopRuntimeForCLI(ctx context.Context, logger *slog.Logger, rt *configruntime.Runtime) {
-	if err := rt.Stop(context.WithoutCancel(ctx)); err != nil {
-		logger.Warn("runtime stop failed", "error", err)
-	}
-}
-
-func codeIndexOptionsForCLI(cfg *config.Config, opts indexCLIOptions) kb.CodeIndexOptions {
-	indexOpts := configruntime.CodeIndexOptionsFromConfig(cfg, opts.kbID, opts.root)
-	indexOpts.IndexKey = opts.indexKey
-	indexOpts.Description = opts.description
-	indexOpts.ConfirmedLarge = opts.yes || opts.force
-	if opts.includeUntracked {
-		indexOpts.IncludeUntracked = true
-	}
-	applyLowResourceCLIOptions(&opts)
-	applyCLIResourceOverrides(&indexOpts, opts)
-	return indexOpts
-}
-
-func applyLowResourceCLIOptions(opts *indexCLIOptions) {
-	if !opts.lowResource {
-		return
-	}
-	if opts.embedBatchSize == 0 {
-		opts.embedBatchSize = 16
-	}
-	if opts.maxBatchBytes == 0 {
-		opts.maxBatchBytes = 128 * 1024
-	}
-	if opts.throttle == 0 {
-		opts.throttle = 250 * time.Millisecond
-	}
-}
-
-func applyCLIResourceOverrides(indexOpts *kb.CodeIndexOptions, opts indexCLIOptions) {
-	if opts.embedBatchSize > 0 {
-		indexOpts.EmbedBatchSize = opts.embedBatchSize
-	}
-	if opts.maxBatchBytes > 0 {
-		indexOpts.MaxBatchBytes = opts.maxBatchBytes
-	}
-	if opts.maxHeapBytes > 0 {
-		indexOpts.MaxHeapBytes = opts.maxHeapBytes
-	}
-	if opts.maxRSSBytes > 0 {
-		indexOpts.MaxRSSBytes = opts.maxRSSBytes
-	}
-	if opts.largeRepoFiles > 0 {
-		indexOpts.LargeRepoFiles = opts.largeRepoFiles
-	}
-	if opts.throttle > 0 {
-		indexOpts.Throttle = opts.throttle
-	}
-}
-
-func runIndexStatus(ctx context.Context, args []string, logger *slog.Logger) int {
-	opts, err := parseIndexCLIOptions(args)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		return 2
-	}
-	_, rt, err := buildRuntimeForCLI(ctx, logger)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		return 1
-	}
-	defer stopRuntimeForCLI(ctx, logger, rt)
-	selection, err := kb.ResolveCodeIndexSelection(opts.root, opts.indexKey, opts.kbID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "resolve code index: %v\n", err)
-		return 1
-	}
-	status, err := rt.KB().CodeIndexStatus(ctx, selection.KBID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "code index status: %v\n", err)
-		return 1
-	}
-	status.IndexKey = selection.IndexKey
-	status.Description = selection.Description
-	writeJSON(status)
-	return 0
-}
-
-func runIndexHooks(ctx context.Context, args []string) int {
-	if len(args) == 0 {
-		fmt.Fprintln(
-			os.Stderr,
-			"usage: minnow index hooks <install|uninstall|status> [--kb id] [--index-key key] [--root path] [--binary minnow] [--force]",
-		)
-		return 2
-	}
-	action := args[0]
-	opts, err := parseIndexCLIOptions(args[1:])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		return 2
-	}
-	var status any
-	switch action {
-	case "install":
-		selection, selErr := kb.ResolveCodeIndexSelection(opts.root, opts.indexKey, opts.kbID)
-		if selErr != nil {
-			fmt.Fprintf(os.Stderr, "resolve code index: %v\n", selErr)
-			return 1
-		}
-		status, err = kb.InstallCodeIndexHooks(
-			ctx,
-			kb.CodeHookOptions{
-				Root:     opts.root,
-				KBID:     selection.KBID,
-				IndexKey: selection.IndexKey,
-				Binary:   opts.binary,
-				Force:    opts.force,
-			},
-		)
-	case "uninstall":
-		status, err = kb.UninstallCodeIndexHooks(ctx, opts.root)
-	case "status":
-		status, err = kb.CodeIndexHookStatus(ctx, opts.root)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown hooks subcommand: %s\n", action)
-		return 2
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "index hooks %s: %v\n", action, err)
-		return 1
-	}
-	if err := writeJSON(status); err != nil {
-		fmt.Fprintf(os.Stderr, "write json: %v\n", err)
-		return 1
-	}
-	return 0
-}
-
-func writeJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
 }
 
 func writeConfigTemplate(path string, data []byte, force bool) error {

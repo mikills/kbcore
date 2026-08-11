@@ -6,9 +6,11 @@ MAX_LEN ?= 120
 
 test:
 	go test ./... -v -race -count=1
+	go test ./codeindex/... -count=1
 
 build:
-	go build ./...
+	GOWORK=off go build ./...
+	go build -o /tmp/minnow-codeindex ./codeindex
 
 run:
 	go run .

@@ -16,21 +16,24 @@ For globally installed MCP use with OpenAI embeddings:
 
 ```bash
 go install github.com/mikills/minnow@latest
+go install github.com/mikills/minnow/codeindex@latest
 $(go env GOPATH)/bin/minnow setup
 minnow config init dev-openai
 OPENAI_API_KEY=sk-... minnow mcp stdio
 ```
 
 `minnow setup` checks whether Go's install directory is on your shell `PATH` and
-can update your shell profile for you. If `minnow` is already on `PATH`, just run
-`minnow setup` directly.
+can update your shell profile for you. Install `codeindex` separately when you
+want codebase indexing. If `minnow` is already on `PATH`, just run `minnow setup`
+directly.
 
 Index a codebase for MCP/code-agent retrieval. From inside the repo, no flags
 needed — it indexes `.`, auto-derives the `kb_id`, and uses the `default` index key:
 
 ```bash
-minnow index codebase          # symbol-aware index of the current repo
-minnow index hooks install     # auto-refresh on commit / checkout / merge
+go install github.com/mikills/minnow/codeindex@latest
+codeindex codebase             # symbol-aware index of the current repo
+codeindex hooks install        # auto-refresh on commit / checkout / merge
 ```
 
 Then search it via `POST /rag/query` or the `minnow_code_search` MCP tool.
@@ -51,7 +54,7 @@ The default config at `./minnow.yaml` is sufficient for local development (embed
 ## What it does
 
 - Vector and graph RAG over your corpus, exposed at `/rag/query` and `/rag/ingest`.
-- Code indexing for coding agents: `minnow index codebase` indexes the current repo (30+ file types; symbol-aware chunking for Go, JS/TS, Python, and Rust), with optional git hooks to keep it fresh.
+- Code indexing for coding agents: the separate `codeindex` CLI indexes the current repo (30+ file types; symbol-aware chunking for Go, JS/TS, Python, and Rust) through Minnow, with optional git hooks to keep it fresh.
 - Per-tenant isolation through knowledge bases. Each one has its own manifest, shards, and HNSW indexes.
 - Two storage modes: local disk for always-hot workloads, S3-backed for SaaS with a long-tail distribution of cold tenants.
 - Event-driven ingest pipeline with at-least-once delivery, durable operation lineage, and retry semantics.

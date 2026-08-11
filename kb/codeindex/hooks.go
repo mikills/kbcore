@@ -32,11 +32,14 @@ type CodeHookStatus struct {
 }
 
 func InstallCodeIndexHooks(ctx context.Context, opts CodeHookOptions) (CodeHookStatus, error) {
+	binary, kbID, indexKey := normalizeCodeHookOptions(opts)
+	if err := validateCodeIndexBinary(binary); err != nil {
+		return CodeHookStatus{}, err
+	}
 	root, hooksDir, err := gitHooksDir(ctx, opts.Root)
 	if err != nil {
 		return CodeHookStatus{}, err
 	}
-	binary, kbID, indexKey := normalizeCodeHookOptions(opts)
 	block := renderCodeHookBlock(binary, kbID, indexKey, root)
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		return CodeHookStatus{}, err
@@ -49,10 +52,17 @@ func InstallCodeIndexHooks(ctx context.Context, opts CodeHookOptions) (CodeHookS
 	return CodeIndexHookStatus(ctx, opts.Root)
 }
 
+func validateCodeIndexBinary(binary string) error {
+	if _, err := exec.LookPath(binary); err != nil {
+		return fmt.Errorf("codeindex hooks require executable %q; install codeindex or pass --binary: %w", binary, err)
+	}
+	return nil
+}
+
 func normalizeCodeHookOptions(opts CodeHookOptions) (string, string, string) {
 	binary := strings.TrimSpace(opts.Binary)
 	if binary == "" {
-		binary = "minnow"
+		binary = "codeindex"
 	}
 	kbID := strings.TrimSpace(opts.KBID)
 	if kbID == "" {
@@ -143,10 +153,14 @@ func CodeIndexHookStatus(ctx context.Context, root string) (CodeHookStatus, erro
 }
 
 func renderCodeHookBlock(binary, kbID, indexKey, root string) string {
+	command := fmt.Sprintf("%q refresh", binary)
+	if strings.TrimSuffix(filepath.Base(binary), filepath.Ext(binary)) == "minnow" {
+		command = fmt.Sprintf("%q index refresh", binary)
+	}
 	return fmt.Sprintf(`%s
-MINNOW_REPO_ROOT=%q %q index refresh --kb %q --index-key %q --root %q --yes --quiet >/dev/null 2>&1 || true
+CODEINDEX_REPO_ROOT=%q %s --kb %q --index-key %q --root %q --yes --quiet >/dev/null 2>&1 || true
 %s
-`, codeHookStart, root, binary, kbID, indexKey, root, codeHookEnd)
+`, codeHookStart, root, command, kbID, indexKey, root, codeHookEnd)
 }
 
 func gitHooksDir(ctx context.Context, root string) (string, string, error) {

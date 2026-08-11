@@ -59,7 +59,7 @@ The 768-dim real case requires Ollama running with `nomic-embed-text` pulled (`o
 
 ## Real-world runs (code indexing)
 
-Indexing real repositories with `minnow index codebase`, OpenAI
+Indexing real repositories with `codeindex codebase`, OpenAI
 `text-embedding-3-small` via `openai_compatible`, Apple M4 / local SSD.
 
 **Minnow source tree** — 110 files, 22,601 lines, 1,360 chunks (DuckDB limit 2 GB):
