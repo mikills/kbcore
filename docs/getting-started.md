@@ -93,9 +93,11 @@ codeindex hooks status
 ```
 
 Refreshes are state-based: codeindex hashes tracked files (`git ls-files`) against
-the branch-specific state in `.minnow/codeindex/`, sends only changed chunks to
-Minnow, and removes stale IDs after publish. Without hooks, run
-`codeindex refresh` after code changes.
+the branch-specific state in `.minnow/codeindex/`, rechunks only changed files,
+and removes stale IDs after publishing replacements. Codeindex adds `/.minnow/`
+to `.git/info/exclude` so generated state is not staged. If that state is lost, a
+new KB generation is created to avoid mixing a full upload with stale remote
+chunks. Without hooks, run `codeindex refresh` after code changes.
 
 ## MCP endpoints
 

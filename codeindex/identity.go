@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -13,15 +14,17 @@ import (
 )
 
 type indexTarget struct {
-	Root        string
-	StateRoot   string
-	Scope       string
-	RepoID      string
-	Ref         string
-	IndexKey    string
-	KBID        string
-	Description string
-	Git         bool
+	Root           string
+	StateRoot      string
+	Scope          string
+	RepoID         string
+	Ref            string
+	IndexKey       string
+	LegacyIndexKey string
+	KBID           string
+	LegacyKBID     string
+	Description    string
+	Git            bool
 }
 
 func resolveTarget(opts indexCLIOptions) (indexTarget, error) {
@@ -37,7 +40,7 @@ func resolveTarget(opts indexCLIOptions) (indexTarget, error) {
 	scope := minnowcode.RelativeRoot(gitRoot, root)
 	ref, ok := gitOutput(gitRoot, "branch", "--show-current")
 	if !ok || strings.TrimSpace(ref) == "" {
-		sha, shaOK := gitOutput(gitRoot, "rev-parse", "--short", "HEAD")
+		sha, shaOK := gitOutput(gitRoot, "rev-parse", "HEAD")
 		if !shaOK {
 			return indexTarget{}, fmt.Errorf("resolve current Git branch or revision")
 		}
@@ -46,22 +49,30 @@ func resolveTarget(opts indexCLIOptions) (indexTarget, error) {
 	repoIdentity, repoName := gitRepositoryIdentity(gitRoot)
 	repoID := shortHash(repoIdentity)
 	key := strings.TrimSpace(opts.indexKey)
+	legacyIndexKey := ""
 	if key == "" {
 		key = branchIndexKey(ref)
 		if scope != "." {
 			key += "-" + shortHash(scope)
 		}
 	} else {
-		key = minnowcode.SanitizeKey(key) + "-" + branchIndexKey(ref)
+		legacyIndexKey = minnowcode.SanitizeKey(key) + "-" + branchIndexKey(ref)
+		key = explicitIdentityPrefix(key) + "-" + branchIndexKey(ref)
 		if scope != "." {
+			legacyIndexKey += "-" + shortHash(scope)
 			key += "-" + shortHash(scope)
 		}
 	}
 	kbID := strings.TrimSpace(opts.kbID)
+	legacyKBID := ""
 	if kbID == "" {
 		kbID = minnowcode.SanitizeKey("code-" + repoName + "-" + key + "-" + repoID + "-" + shortHash(scope))
+		if legacyIndexKey != "" {
+			legacyKBID = minnowcode.SanitizeKey("code-" + repoName + "-" + legacyIndexKey + "-" + repoID + "-" + shortHash(scope))
+		}
 	} else {
-		kbID = minnowcode.SanitizeKey(kbID + "-" + branchIndexKey(ref) + "-" + shortHash(scope))
+		legacyKBID = minnowcode.SanitizeKey(kbID + "-" + branchIndexKey(ref) + "-" + shortHash(scope))
+		kbID = minnowcode.SanitizeKey(explicitIdentityPrefix(kbID) + "-" + branchIndexKey(ref) + "-" + repoID + "-" + shortHash(scope))
 	}
 	description := strings.TrimSpace(opts.description)
 	if description == "" {
@@ -69,7 +80,7 @@ func resolveTarget(opts indexCLIOptions) (indexTarget, error) {
 	}
 	return indexTarget{
 		Root: root, StateRoot: gitRoot, Scope: scope, RepoID: repoID, Ref: ref, IndexKey: key,
-		KBID: kbID, Description: description, Git: true,
+		LegacyIndexKey: legacyIndexKey, KBID: kbID, LegacyKBID: legacyKBID, Description: description, Git: true,
 	}, nil
 }
 
@@ -77,15 +88,24 @@ func directoryTarget(root string, opts indexCLIOptions) indexTarget {
 	identity := filepath.Clean(root)
 	repoID := shortHash(identity)
 	key := strings.TrimSpace(opts.indexKey)
+	legacyIndexKey := ""
 	if key == "" {
 		key = "directory-" + repoID
 	} else {
-		key = minnowcode.SanitizeKey(key)
+		legacyIndexKey = minnowcode.SanitizeKey(key)
+		key = explicitIdentityPrefix(key)
 	}
 	name := minnowcode.SanitizeKey(filepath.Base(root))
 	kbID := strings.TrimSpace(opts.kbID)
+	legacyKBID := ""
 	if kbID == "" {
 		kbID = minnowcode.SanitizeKey("code-" + name + "-" + repoID)
+		if legacyIndexKey != "" {
+			legacyKBID = kbID
+		}
+	} else {
+		legacyKBID = kbID
+		kbID = minnowcode.SanitizeKey(explicitIdentityPrefix(kbID) + "-" + repoID)
 	}
 	description := strings.TrimSpace(opts.description)
 	if description == "" {
@@ -93,12 +113,30 @@ func directoryTarget(root string, opts indexCLIOptions) indexTarget {
 	}
 	return indexTarget{
 		Root: root, StateRoot: root, Scope: ".", RepoID: repoID, IndexKey: key,
-		KBID: kbID, Description: description,
+		LegacyIndexKey: legacyIndexKey, KBID: kbID, LegacyKBID: legacyKBID, Description: description,
 	}
 }
 
 func branchIndexKey(ref string) string {
 	return minnowcode.SanitizeKey(ref) + "-" + shortHash(ref)
+}
+
+func explicitIdentityPrefix(value string) string {
+	value = strings.TrimSpace(value)
+	return minnowcode.SanitizeKey(value) + "-" + identityHash(value)
+}
+
+func assignIndexGeneration(target indexTarget, state indexState, stateExists bool) (indexTarget, error) {
+	if stateExists {
+		target.KBID = state.KBID
+		return target, nil
+	}
+	var generation [8]byte
+	if _, err := rand.Read(generation[:]); err != nil {
+		return indexTarget{}, fmt.Errorf("create index generation: %w", err)
+	}
+	target.KBID = minnowcode.SanitizeKey(target.KBID + "-" + hex.EncodeToString(generation[:]))
+	return target, nil
 }
 
 func gitRepositoryIdentity(root string) (string, string) {
@@ -140,4 +178,9 @@ func gitOutput(root string, args ...string) (string, bool) {
 func shortHash(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:4])
+}
+
+func identityHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:8])
 }

@@ -149,9 +149,14 @@ func runStatus(args []string) int {
 	if err != nil {
 		return writeCommandError(fmt.Errorf("resolve index: %w", err), 1)
 	}
-	state, path, err := loadIndexState(target)
+	state, path, stateExists, err := loadIndexState(target)
 	if err != nil {
 		return writeCommandError(fmt.Errorf("load index state: %w", err), 1)
+	}
+	if stateExists {
+		target.KBID = state.KBID
+	} else {
+		target.KBID = ""
 	}
 	status := statusFromState(target, strings.TrimSpace(opts.minnowURL), path, state)
 	if err := writeJSON(status); err != nil {

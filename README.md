@@ -41,10 +41,12 @@ codeindex hooks install                          # refreshes after Git changes
 The command output includes the derived `kb_id`; use it with `POST /rag/query` or
 the `minnow_code_search` MCP tool. Each Git branch gets an isolated KB by
 default. Outside Git, identity is derived from the absolute directory. Refreshes
-are state-based, so only changed chunks are sent to Minnow.
+are state-based, so only changed files are rechunked and sent to Minnow.
 
 Codeindex stores its connection at the user config path and branch state under
-`.minnow/codeindex/`. Override discovery with `CODEINDEX_CONFIG`, the endpoint
+`.minnow/codeindex/`, which it adds to Git's repository-local excludes. A fresh
+state generation uses a new KB suffix rather than reusing potentially stale
+remote data. Override discovery with `CODEINDEX_CONFIG`, the endpoint
 with `CODEINDEX_MINNOW_URL`, or either identity with `--kb`/`--index-key`.
 
 The default `minnow.yaml` also exposes MCP for coding agents:

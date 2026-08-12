@@ -43,8 +43,27 @@ func InstallCodeIndexHooks(ctx context.Context, opts CodeHookOptions) (CodeHookS
 	if err != nil {
 		return CodeHookStatus{}, err
 	}
-	block := renderCodeHookBlock(binary, kbID, indexKey, root, opts.Config)
+	if err := EnsureLocalStateIgnored(root); err != nil {
+		return CodeHookStatus{}, err
+	}
+	block := renderCodeHookBlock()
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		return CodeHookStatus{}, err
+	}
+	if err := validateCodeHookInstall(hooksDir, block, opts.Force); err != nil {
+		return CodeHookStatus{}, err
+	}
+	if legacyManagedHooksPresent(hooksDir) {
+		if usesCustomHooksPath(ctx, root) {
+			return CodeHookStatus{}, fmt.Errorf("custom hooks path contains a legacy Minnow block with unknown repository ownership; remove it manually before installing")
+		}
+		return CodeHookStatus{}, fmt.Errorf("legacy Minnow hook detected; run `codeindex hooks uninstall`, then reinstall with the original --kb and --index-key overrides")
+	}
+	kbID, indexKey, err = preserveConfiguredIdentity(ctx, root, kbID, indexKey)
+	if err != nil {
+		return CodeHookStatus{}, err
+	}
+	if err := saveCodeHookConfig(ctx, root, binary, kbID, indexKey, opts.Config); err != nil {
 		return CodeHookStatus{}, err
 	}
 	for _, name := range CodeHookNames {
@@ -74,10 +93,48 @@ func normalizeCodeHookOptions(opts CodeHookOptions) (string, string, string) {
 	}
 	kbID := strings.TrimSpace(opts.KBID)
 	indexKey := strings.TrimSpace(opts.IndexKey)
-	if indexKey != "" {
-		indexKey = sanitizeCodeIndexKey(indexKey)
-	}
 	return binary, kbID, indexKey
+}
+
+func preserveConfiguredIdentity(ctx context.Context, root, kbID, indexKey string) (string, string, error) {
+	var err error
+	if kbID == "" {
+		kbID, err = localGitConfig(ctx, root, "minnow.codeindex.kb")
+		if err != nil {
+			return "", "", err
+		}
+	}
+	if indexKey == "" {
+		indexKey, err = localGitConfig(ctx, root, "minnow.codeindex.index-key")
+		if err != nil {
+			return "", "", err
+		}
+	}
+	return kbID, indexKey, nil
+}
+
+func localGitConfig(ctx context.Context, root, key string) (string, error) {
+	output, err := exec.CommandContext(ctx, "git", "-C", root, "config", "--local", "--get", key).Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return "", nil
+		}
+		return "", fmt.Errorf("read codeindex hook setting %s: %w", key, err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func validateCodeHookInstall(hooksDir, block string, force bool) error {
+	for _, name := range CodeHookNames {
+		data, err := os.ReadFile(filepath.Join(hooksDir, name))
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if _, err := updatedCodeHookContent(name, string(data), block, force); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func installCodeHook(hooksDir string, name string, block string, force bool) error {
@@ -86,37 +143,82 @@ func installCodeHook(hooksDir string, name string, block string, force bool) err
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	mode := os.FileMode(0o755)
+	if info, statErr := os.Stat(path); statErr == nil {
+		mode = info.Mode().Perm() | 0o100
+	} else if !os.IsNotExist(statErr) {
+		return statErr
+	}
 	content, err := updatedCodeHookContent(name, string(data), block, force)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(content), 0o755)
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		return err
+	}
+	return os.Chmod(path, mode)
 }
 
 func updatedCodeHookContent(name string, content string, block string, force bool) (string, error) {
+	if !hasShellShebang(content) {
+		return "", fmt.Errorf("git hook %s uses a non-shell interpreter; cannot safely add the Minnow shell block", name)
+	}
 	if strings.Contains(content, codeHookStart) {
 		return replaceManagedHookBlock(content, block), nil
 	}
 	if strings.TrimSpace(content) != "" && !force {
-		return "", fmt.Errorf("git hook %s already exists; rerun with force to append Minnow managed block", name)
+		return "", fmt.Errorf("git hook %s already exists; rerun with force to add the Minnow managed block", name)
 	}
 	return appendManagedHookBlock(content, block), nil
 }
 
+func hasShellShebang(content string) bool {
+	if strings.TrimSpace(content) == "" || !strings.HasPrefix(content, "#!") {
+		return true
+	}
+	firstLine, _, _ := strings.Cut(content, "\n")
+	interpreter := filepath.Base(strings.Fields(firstLine)[0])
+	if interpreter == "env" {
+		fields := strings.Fields(firstLine)
+		if len(fields) < 2 {
+			return false
+		}
+		interpreter = filepath.Base(fields[len(fields)-1])
+	}
+	switch interpreter {
+	case "sh", "bash", "dash", "ksh", "zsh":
+		return true
+	default:
+		return false
+	}
+}
+
 func appendManagedHookBlock(content string, block string) string {
 	if strings.TrimSpace(content) == "" {
-		content = "#!/bin/sh\n"
+		return "#!/bin/sh\n" + block
 	}
-	if !strings.HasSuffix(content, "\n") {
-		content += "\n"
+	if strings.HasPrefix(content, "#!") {
+		if newline := strings.IndexByte(content, '\n'); newline >= 0 {
+			return content[:newline+1] + block + content[newline+1:]
+		}
+		return content + "\n" + block
 	}
-	return content + block
+	return "#!/bin/sh\n" + block + content
 }
 
 func UninstallCodeIndexHooks(ctx context.Context, root string) (CodeHookStatus, error) {
-	_, hooksDir, err := gitHooksDir(ctx, root)
+	resolvedRoot, hooksDir, err := gitHooksDir(ctx, root)
 	if err != nil {
 		return CodeHookStatus{}, err
+	}
+	if usesCustomHooksPath(ctx, resolvedRoot) {
+		if legacyManagedHooksPresent(hooksDir) {
+			return CodeHookStatus{}, fmt.Errorf("custom hooks path contains a legacy Minnow block with unknown repository ownership; remove it manually")
+		}
+		if err := clearCodeHookConfig(ctx, resolvedRoot); err != nil {
+			return CodeHookStatus{}, err
+		}
+		return CodeIndexHookStatus(ctx, resolvedRoot)
 	}
 	for _, name := range CodeHookNames {
 		path := filepath.Join(hooksDir, name)
@@ -138,7 +240,42 @@ func UninstallCodeIndexHooks(ctx context.Context, root string) (CodeHookStatus, 
 			return CodeHookStatus{}, err
 		}
 	}
+	if err := clearCodeHookConfig(ctx, resolvedRoot); err != nil {
+		return CodeHookStatus{}, err
+	}
 	return CodeIndexHookStatus(ctx, root)
+}
+
+func clearCodeHookConfig(ctx context.Context, root string) error {
+	for _, key := range []string{
+		"minnow.codeindex.binary", "minnow.codeindex.config", "minnow.codeindex.kb",
+		"minnow.codeindex.index-key", "minnow.codeindex.mode",
+	} {
+		cmd := exec.CommandContext(ctx, "git", "-C", root, "config", "--local", "--unset-all", key)
+		if err := cmd.Run(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 5 {
+				continue
+			}
+			return fmt.Errorf("remove codeindex hook setting %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func legacyManagedHooksPresent(hooksDir string) bool {
+	for _, name := range CodeHookNames {
+		data, err := os.ReadFile(filepath.Join(hooksDir, name))
+		if err == nil && strings.Contains(string(data), codeHookStart) &&
+			!strings.Contains(string(data), "minnow.codeindex.binary") {
+			return true
+		}
+	}
+	return false
+}
+
+func usesCustomHooksPath(ctx context.Context, root string) bool {
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "config", "--get", "core.hooksPath")
+	return cmd.Run() == nil
 }
 
 func CodeIndexHookStatus(ctx context.Context, root string) (CodeHookStatus, error) {
@@ -152,33 +289,57 @@ func CodeIndexHookStatus(ctx context.Context, root string) (CodeHookStatus, erro
 		Installed: map[string]bool{},
 		Paths:     map[string]string{},
 	}
+	configured := exec.CommandContext(
+		ctx, "git", "-C", resolvedRoot, "config", "--local", "--get", "minnow.codeindex.binary",
+	).Run() == nil
 	for _, name := range CodeHookNames {
 		path := filepath.Join(hooksDir, name)
 		status.Paths[name] = path
 		data, err := os.ReadFile(path)
-		status.Installed[name] = err == nil && strings.Contains(string(data), codeHookStart)
+		status.Installed[name] = configured && err == nil && strings.Contains(string(data), codeHookStart)
 	}
 	return status, nil
 }
 
-func renderCodeHookBlock(binary, kbID, indexKey, root, config string) string {
-	command := shellQuote(binary) + " refresh"
-	if strings.TrimSuffix(filepath.Base(binary), filepath.Ext(binary)) == "minnow" {
-		command = shellQuote(binary) + " index refresh"
-	}
-	if strings.TrimSpace(config) != "" {
-		command += " --config " + shellQuote(config)
-	}
-	if kbID != "" {
-		command += " --kb " + shellQuote(kbID)
-	}
-	if indexKey != "" {
-		command += " --index-key " + shellQuote(indexKey)
-	}
+func renderCodeHookBlock() string {
 	return fmt.Sprintf(`%s
-CODEINDEX_REPO_ROOT=%s %s --root %s --yes --quiet >/dev/null 2>&1 || true
+(
+codeindex_log=$(git rev-parse --git-path minnow-codeindex-hook.log 2>/dev/null || printf '%%s' "${TMPDIR:-/tmp}/minnow-codeindex-hook.log")
+codeindex_root=$(git rev-parse --show-toplevel 2>>"$codeindex_log") || { printf 'codeindex: cannot resolve repository root\n' >>"$codeindex_log"; exit 0; }
+codeindex_binary=$(git config --local --get minnow.codeindex.binary 2>>"$codeindex_log") || { printf 'codeindex: hook is not configured for this repository\n' >>"$codeindex_log"; exit 0; }
+codeindex_config=$(git config --local --get minnow.codeindex.config 2>/dev/null || true)
+codeindex_kb=$(git config --local --get minnow.codeindex.kb 2>/dev/null || true)
+codeindex_key=$(git config --local --get minnow.codeindex.index-key 2>/dev/null || true)
+codeindex_mode=$(git config --local --get minnow.codeindex.mode 2>/dev/null || true)
+set -- refresh --root "$codeindex_root" --yes --quiet
+[ -z "$codeindex_config" ] || set -- "$@" --config "$codeindex_config"
+[ -z "$codeindex_kb" ] || set -- "$@" --kb "$codeindex_kb"
+[ -z "$codeindex_key" ] || set -- "$@" --index-key "$codeindex_key"
+[ "$codeindex_mode" != index ] || set -- index "$@"
+CODEINDEX_REPO_ROOT="$codeindex_root" "$codeindex_binary" "$@" >/dev/null 2>>"$codeindex_log" || true
+)
 %s
-`, codeHookStart, shellQuote(root), command, shellQuote(root), codeHookEnd)
+`, codeHookStart, codeHookEnd)
+}
+
+func saveCodeHookConfig(ctx context.Context, root, binary, kbID, indexKey, config string) error {
+	values := map[string]string{
+		"minnow.codeindex.binary":    binary,
+		"minnow.codeindex.config":    strings.TrimSpace(config),
+		"minnow.codeindex.kb":        kbID,
+		"minnow.codeindex.index-key": indexKey,
+		"minnow.codeindex.mode":      "",
+	}
+	if strings.TrimSuffix(filepath.Base(binary), filepath.Ext(binary)) == "minnow" {
+		values["minnow.codeindex.mode"] = "index"
+	}
+	for key, value := range values {
+		args := []string{"-C", root, "config", "--local", "--replace-all", key, value}
+		if output, err := exec.CommandContext(ctx, "git", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("save codeindex hook setting %s: %w: %s", key, err, strings.TrimSpace(string(output)))
+		}
+	}
+	return nil
 }
 
 func shellQuote(value string) string {
@@ -205,7 +366,7 @@ func gitHooksDir(ctx context.Context, root string) (string, string, error) {
 }
 
 func replaceManagedHookBlock(content, block string) string {
-	return removeManagedHookBlock(content) + block
+	return appendManagedHookBlock(removeManagedHookBlock(content), block)
 }
 
 func removeManagedHookBlock(content string) string {
@@ -224,28 +385,15 @@ func removeManagedHookBlock(content string) string {
 	return strings.TrimRight(content[:start]+content[endAbs:], "\n") + "\n"
 }
 
-func sanitizeCodeIndexKey(key string) string {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return "default"
-	}
-	return strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			return r
-		case r == '-' || r == '_' || r == '.':
-			return r
-		default:
-			return '-'
-		}
-	}, key)
-}
-
 func resolveCodeRoot(root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
 		root = "."
 	}
 	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	abs, err = filepath.EvalSymlinks(abs)
 	if err != nil {
 		return "", err
 	}
