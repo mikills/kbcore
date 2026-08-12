@@ -51,9 +51,14 @@ codeindex hooks install
 
 For Git repositories, the repository identity and current branch derive the
 default index key and `kb_id`. Switching branches selects a separate index. In a
-non-Git directory, codeindex derives identity from the absolute directory.
+non-Git directory, codeindex derives identity from the absolute directory. A new
+local state generation receives a unique KB suffix, so a fresh clone or deleted
+state cannot accidentally reuse stale remote chunks from an older index.
 
-The first run writes branch-specific state under `.minnow/codeindex/`. A refresh
+The first run writes branch-specific state under `.minnow/codeindex/` and adds
+`/.minnow/` to Git's repository-local exclude file (`.git/info/exclude`). If an
+older setup already committed that directory, untrack it first with
+`git rm -r --cached .minnow`. A refresh
 hashes the current files, uploads changed chunks, waits for Minnow to publish
 them, deletes stale chunk IDs, and then atomically saves the new state.
 `codeindex status` reads only this repository-local state, so it remains usable
@@ -68,6 +73,8 @@ codeindex codebase --kb explicit-kb --index-key explicit-key
 ```
 
 Inside Git, explicit `--index-key` and `--kb` values are stable prefixes: the
-current branch and indexed subdirectory are appended so switching branches
-cannot reuse incompatible local state or mix branch data in one KB. Hooks keep
-the prefix in their command and resolve the current branch each time they run.
+repository, current branch, indexed subdirectory, and local generation are used
+to prevent incompatible state or cross-repository data from sharing one KB.
+Hooks resolve the invoking worktree and repository-local settings each time they
+run. Hook failures do not block Git operations; diagnostics are appended to
+Git's `minnow-codeindex-hook.log` path.

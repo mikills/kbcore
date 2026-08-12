@@ -21,7 +21,7 @@ import (
 
 var backgroundContext = context.Background()
 
-const version = "v0.1.0"
+const version = "v0.2.0"
 
 func main() {
 	logger := newLogger(os.Getenv("MINNOW_LOG_FORMAT"))

@@ -35,7 +35,7 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 	if err != nil {
 		return indexResult{}, err
 	}
-	releaseLock, err := acquireIndexLock(target, operationTTL+time.Minute)
+	target, previous, releaseLock, err := prepareRefreshTarget(target, operationTTL+time.Minute)
 	if err != nil {
 		return indexResult{}, err
 	}
@@ -52,10 +52,6 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 		return indexResult{}, err
 	}
 	if err := minnowcode.ValidateConfirmation(opts, len(files)); err != nil {
-		return indexResult{}, err
-	}
-	previous, _, err := loadIndexState(target)
-	if err != nil {
 		return indexResult{}, err
 	}
 	pipeline := pipelineFingerprint(opts)
@@ -85,6 +81,58 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 	return plan.result, nil
 }
 
+func prepareRefreshTarget(target indexTarget, staleAfter time.Duration) (indexTarget, indexState, func(), error) {
+	releaseLock, err := acquireRefreshLocks(target, staleAfter)
+	if err != nil {
+		return indexTarget{}, indexState{}, nil, err
+	}
+	prepared := false
+	defer func() {
+		if !prepared {
+			releaseLock()
+		}
+	}()
+	if target.Git {
+		if err := minnowcode.EnsureLocalStateIgnored(target.StateRoot); err != nil {
+			return indexTarget{}, indexState{}, nil, err
+		}
+	}
+	previous, _, stateExists, err := loadIndexState(target)
+	if err != nil {
+		return indexTarget{}, indexState{}, nil, err
+	}
+	target, err = assignIndexGeneration(target, previous, stateExists)
+	if err != nil {
+		return indexTarget{}, indexState{}, nil, err
+	}
+	prepared = true
+	return target, previous, releaseLock, nil
+}
+
+func acquireRefreshLocks(target indexTarget, staleAfter time.Duration) (func(), error) {
+	releaseCurrent, err := acquireIndexLock(target, staleAfter)
+	if err != nil {
+		return nil, err
+	}
+	if target.LegacyIndexKey == "" {
+		return releaseCurrent, nil
+	}
+	legacyTarget := target
+	legacyTarget.IndexKey = target.LegacyIndexKey
+	if indexStatePath(legacyTarget) == indexStatePath(target) {
+		return releaseCurrent, nil
+	}
+	releaseLegacy, err := acquireIndexLock(legacyTarget, staleAfter)
+	if err != nil {
+		releaseCurrent()
+		return nil, fmt.Errorf("acquire legacy index lock: %w", err)
+	}
+	return func() {
+		releaseLegacy()
+		releaseCurrent()
+	}, nil
+}
+
 type indexPlan struct {
 	state     indexState
 	documents []minnowcode.Document
@@ -103,6 +151,7 @@ func buildIndexPlan(
 ) (indexPlan, error) {
 	plan := indexPlan{
 		state: indexState{
+			SourcePath:    previous.SourcePath,
 			SchemaVersion: indexStateSchema, KBID: target.KBID, RepoID: target.RepoID,
 			Ref: target.Ref, Root: target.Root, Pipeline: pipeline, Files: make(map[string]stateFile, len(files)),
 		},
@@ -168,14 +217,21 @@ func buildIndexPlan(
 	return plan, nil
 }
 
+const codeIndexPipelineVersion = "codeindex.pipeline/v2"
+
 func pipelineFingerprint(opts minnowcode.Options) string {
+	return pipelineFingerprintForVersion(opts, codeIndexPipelineVersion)
+}
+
+func pipelineFingerprintForVersion(opts minnowcode.Options, version string) string {
 	data, _ := json.Marshal(struct {
+		Version      string   `json:"version"`
 		Include      []string `json:"include"`
 		Exclude      []string `json:"exclude"`
 		MaxFileBytes int64    `json:"max_file_bytes"`
 		ChunkSize    int      `json:"chunk_size"`
 		Overlap      int      `json:"chunk_overlap"`
-	}{opts.Include, opts.Exclude, opts.MaxFileBytes, opts.ChunkSize, opts.ChunkOverlap})
+	}{version, opts.Include, opts.Exclude, opts.MaxFileBytes, opts.ChunkSize, opts.ChunkOverlap})
 	return shortHash(string(data))
 }
 
@@ -281,6 +337,9 @@ func saveRegistrySelection(target indexTarget, opts minnowcode.Options) error {
 	registry.Indexes[target.IndexKey] = minnowcode.RegistryEntry{
 		KBID: target.KBID, Root: minnowcode.RelativeRoot(target.StateRoot, target.Root),
 		Description: target.Description, IncludeUntracked: opts.IncludeUntracked,
+	}
+	if target.LegacyIndexKey != "" && target.LegacyIndexKey != target.IndexKey {
+		delete(registry.Indexes, target.LegacyIndexKey)
 	}
 	return minnowcode.SaveRegistry(target.StateRoot, registry)
 }

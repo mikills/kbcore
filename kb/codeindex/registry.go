@@ -146,6 +146,10 @@ func ResolveRequestedRoot(root string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	abs, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
 	info, err := os.Stat(abs)
 	if err != nil {
 		return "", err

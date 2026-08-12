@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 const indexStateSchema = "codeindex.state/v1"
 
 type indexState struct {
+	SourcePath    string               `json:"-"`
 	SchemaVersion string               `json:"schema_version"`
 	KBID          string               `json:"kb_id"`
 	RepoID        string               `json:"repo_id"`
@@ -49,32 +51,53 @@ type indexStatus struct {
 	StatePath   string     `json:"state_path"`
 }
 
-func loadIndexState(target indexTarget) (indexState, string, error) {
+func loadIndexState(target indexTarget) (indexState, string, bool, error) {
 	path := indexStatePath(target)
-	state := indexState{
-		SchemaVersion: indexStateSchema, KBID: target.KBID, RepoID: target.RepoID,
-		Ref: target.Ref, Root: target.Root, Files: map[string]stateFile{},
-	}
 	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) && target.LegacyIndexKey != "" {
+		legacyPath := indexStatePathForKey(target, target.LegacyIndexKey)
+		if legacyData, legacyErr := os.ReadFile(legacyPath); legacyErr == nil {
+			data, err, path = legacyData, nil, legacyPath
+		} else if !errors.Is(legacyErr, os.ErrNotExist) {
+			return indexState{}, legacyPath, false, legacyErr
+		}
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return state, path, nil
+			return emptyIndexState(target), indexStatePath(target), false, nil
 		}
-		return indexState{}, path, err
+		return indexState{}, path, false, err
 	}
+	var state indexState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return indexState{}, path, err
+		return indexState{}, path, false, err
 	}
 	if state.SchemaVersion != indexStateSchema {
-		return indexState{}, path, fmt.Errorf("unsupported state schema %q", state.SchemaVersion)
+		return indexState{}, path, false, fmt.Errorf("unsupported state schema %q", state.SchemaVersion)
 	}
-	if state.KBID != target.KBID || state.RepoID != target.RepoID || state.Ref != target.Ref || state.Root != target.Root {
-		return indexState{}, path, fmt.Errorf("state identity does not match the selected index")
+	if !kbIDMatchesTarget(state.KBID, target) || state.RepoID != target.RepoID || state.Ref != target.Ref || state.Root != target.Root {
+		return indexState{}, path, false, fmt.Errorf("state identity does not match the selected index")
 	}
 	if state.Files == nil {
 		state.Files = map[string]stateFile{}
 	}
-	return state, path, nil
+	state.SourcePath = path
+	return state, path, true, nil
+}
+
+func emptyIndexState(target indexTarget) indexState {
+	return indexState{
+		SchemaVersion: indexStateSchema, KBID: target.KBID, RepoID: target.RepoID,
+		Ref: target.Ref, Root: target.Root, Files: map[string]stateFile{},
+	}
+}
+
+func kbIDMatchesTarget(kbID string, target indexTarget) bool {
+	if kbID == "" || target.KBID == "" {
+		return false
+	}
+	return (target.LegacyKBID != "" && kbID == target.LegacyKBID) ||
+		kbID == target.KBID || strings.HasPrefix(kbID, target.KBID+"-")
 }
 
 func saveIndexState(target indexTarget, state indexState) (string, error) {
@@ -103,11 +126,23 @@ func saveIndexState(target indexTarget, state indexState) (string, error) {
 	if err := tmp.Close(); err != nil {
 		return path, err
 	}
-	return path, os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return path, err
+	}
+	if state.SourcePath != "" && state.SourcePath != path {
+		if err := os.Remove(state.SourcePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return path, fmt.Errorf("remove migrated state %s: %w", state.SourcePath, err)
+		}
+	}
+	return path, nil
 }
 
 func indexStatePath(target indexTarget) string {
-	name := minnowcode.SanitizeKey(target.IndexKey) + "-" + shortHash(target.Root) + ".json"
+	return indexStatePathForKey(target, target.IndexKey)
+}
+
+func indexStatePathForKey(target indexTarget, key string) string {
+	name := minnowcode.SanitizeKey(key) + "-" + shortHash(target.Root) + ".json"
 	return filepath.Join(target.StateRoot, ".minnow", "codeindex", name)
 }
 
