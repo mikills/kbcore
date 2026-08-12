@@ -32,6 +32,7 @@ type DocumentUpsertPayload struct {
 	Documents   []Document         `json:"documents"`
 	FileSources []FileIngestSource `json:"file_sources,omitempty"`
 	ChunkSize   int                `json:"chunk_size,omitempty"`
+	PreChunked  bool               `json:"pre_chunked,omitempty"`
 	Options     UpsertDocsOptions  `json:"options"`
 }
 

@@ -27,22 +27,25 @@ can update your shell profile for you. Install `codeindex` separately when you
 want codebase indexing. If `minnow` is already on `PATH`, just run `minnow setup`
 directly.
 
-Index a codebase for MCP/code-agent retrieval. From inside the repo, no flags
-needed — it indexes `.`, auto-derives the `kb_id`, and uses the `default` index key:
+Index a codebase through a running Minnow HTTP service. Codeindex keeps its own
+connection config and never reads `minnow.yaml`:
 
 ```bash
 go install github.com/mikills/minnow/codeindex@latest
-codeindex codebase             # symbol-aware index of the current repo
-codeindex hooks install        # auto-refresh on commit / checkout / merge
+minnow                                           # serves http://127.0.0.1:8080
+codeindex setup --minnow-url http://127.0.0.1:8080
+codeindex codebase                               # indexes the current branch
+codeindex hooks install                          # refreshes after Git changes
 ```
 
-Then search it via `POST /rag/query` or the `minnow_code_search` MCP tool.
-Refreshes are state-based (only changed files re-embed), so re-running is cheap.
+The command output includes the derived `kb_id`; use it with `POST /rag/query` or
+the `minnow_code_search` MCP tool. Each Git branch gets an isolated KB by
+default. Outside Git, identity is derived from the absolute directory. Refreshes
+are state-based, so only changed chunks are sent to Minnow.
 
-The first run writes `.minnow/codebase-indexes.json`, a small repo-local registry
-mapping stable agent-facing keys like `default` to the backing `kb_id`, root, and
-settings — so later MCP calls pass only `index_key: "default"`. Override any
-default with `--kb`, `--index-key`, `--root`, or `--include-untracked`.
+Codeindex stores its connection at the user config path and branch state under
+`.minnow/codeindex/`. Override discovery with `CODEINDEX_CONFIG`, the endpoint
+with `CODEINDEX_MINNOW_URL`, or either identity with `--kb`/`--index-key`.
 
 The default `minnow.yaml` also exposes MCP for coding agents:
 

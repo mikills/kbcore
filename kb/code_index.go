@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mikills/minnow/kb/codeindex"
+	codeindex "github.com/mikills/minnow/kb/codeindex"
 )
 
 const (
@@ -555,7 +555,35 @@ func (k *KB) SearchCode(ctx context.Context, kbID, query string, opts CodeSearch
 	if err != nil {
 		return nil, err
 	}
-	return filterCodeSearchResults(results, manifest, opts), nil
+	return filterCodeSearchResultsWithMetadata(results, manifest, opts), nil
+}
+
+func filterCodeSearchResultsWithMetadata(
+	results []ExpandedResult,
+	manifest codeIndexManifest,
+	opts CodeSearchOptions,
+) []CodeSearchResult {
+	out := make([]CodeSearchResult, 0, opts.TopK)
+	pathFilter := strings.TrimSpace(opts.Path)
+	langFilter := strings.ToLower(strings.TrimSpace(opts.Language))
+	for _, result := range results {
+		meta, ok := manifest.Chunks[result.ID]
+		if !ok {
+			meta, ok = codeMetadataFromResult(result.Metadata)
+		}
+		if !ok || !codeSearchMetaMatches(meta, pathFilter, langFilter) {
+			continue
+		}
+		out = append(out, CodeSearchResult{
+			ID: result.ID, Content: result.Content, Distance: result.Distance,
+			Path: meta.Path, Language: meta.Language, Symbol: meta.Symbol, Kind: meta.Kind,
+			StartLine: meta.StartLine, EndLine: meta.EndLine,
+		})
+		if len(out) >= opts.TopK {
+			break
+		}
+	}
+	return out
 }
 
 func normalizeCodeSearchOptions(opts CodeSearchOptions) CodeSearchOptions {
@@ -630,4 +658,44 @@ func codeSearchMetaMatches(meta CodeChunkMetadata, pathFilter string, langFilter
 		return false
 	}
 	return true
+}
+
+func filterRemoteCodeSearchResults(results []ExpandedResult, opts CodeSearchOptions) []CodeSearchResult {
+	return filterCodeSearchResultsWithMetadata(results, codeIndexManifest{}, opts)
+}
+
+func codeMetadataFromResult(metadata map[string]any) (CodeChunkMetadata, bool) {
+	path, ok := metadataString(metadata, "code_path")
+	if !ok {
+		return CodeChunkMetadata{}, false
+	}
+	language, _ := metadataString(metadata, "code_language")
+	symbol, _ := metadataString(metadata, "code_symbol")
+	kind, _ := metadataString(metadata, "code_kind")
+	hash, _ := metadataString(metadata, "code_file_hash")
+	return CodeChunkMetadata{
+		Path: path, Language: language, Symbol: symbol, Kind: kind, Hash: hash,
+		StartLine: metadataInt(metadata["code_start_line"]), EndLine: metadataInt(metadata["code_end_line"]),
+	}, true
+}
+
+func metadataString(metadata map[string]any, key string) (string, bool) {
+	value, ok := metadata[key].(string)
+	return value, ok && value != ""
+}
+
+func metadataInt(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return int(parsed)
+	default:
+		return 0
+	}
 }
