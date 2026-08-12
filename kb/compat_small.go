@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
+	codeindex "github.com/mikills/minnow/kb/codeindex"
 	"github.com/mikills/minnow/kb/blobstore"
-	"github.com/mikills/minnow/kb/codeindex"
 	"github.com/mikills/minnow/kb/eventing"
 	"github.com/mikills/minnow/kb/graphbuild"
 	"github.com/mikills/minnow/kb/lease"

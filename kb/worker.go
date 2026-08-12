@@ -175,15 +175,24 @@ func (w *DocumentUpsertWorker) Handle(ctx context.Context, event *KBEvent) (Work
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return WorkerResult{}, fmt.Errorf("decode payload: %w", err)
 	}
-	chunkedDocs, fileResults, _, stagedBlobKeys, err := w.normalizeDocuments(
-		ctx,
-		payload.KBID,
-		payload.Documents,
-		payload.FileSources,
-		payload.ChunkSize,
-	)
-	if err != nil {
-		return WorkerResult{}, err
+	chunkedDocs := payload.Documents
+	var fileResults []FileIngestResult
+	var stagedBlobKeys []string
+	if payload.PreChunked && len(payload.FileSources) != 0 {
+		return WorkerResult{}, fmt.Errorf("pre-chunked ingest does not accept file sources")
+	}
+	if !payload.PreChunked {
+		var err error
+		chunkedDocs, fileResults, _, stagedBlobKeys, err = w.normalizeDocuments(
+			ctx,
+			payload.KBID,
+			payload.Documents,
+			payload.FileSources,
+			payload.ChunkSize,
+		)
+		if err != nil {
+			return WorkerResult{}, err
+		}
 	}
 	nextPayload, _ := json.Marshal(DocumentChunkedPayload{
 		KBID:          payload.KBID,

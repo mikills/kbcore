@@ -3,6 +3,9 @@ name: Test
 on:
   push:
     branches: [main]
+    tags:
+      - "v*"
+      - "codeindex/v*"
   pull_request:
     branches: [main]
 
@@ -30,8 +33,17 @@ jobs:
       - name: Test codeindex
         run: go test ./codeindex/...
 
+      - name: Build, install, and test codeindex independently
+        working-directory: codeindex
+        env:
+          GOWORK: off
+        run: |
+          go test ./...
+          go build ./...
+          go install .
+
       - name: Test codeindex outside workspace on release tags
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/')
         working-directory: codeindex
         env:
           GOWORK: off

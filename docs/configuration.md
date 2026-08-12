@@ -120,7 +120,9 @@ Ollama's OpenAI-compatible API.
 
 ### `code_index`
 
-Defaults used by the separate `codeindex ...` CLI and MCP code-indexing tools.
+Defaults used by Minnow's MCP code-indexing tools. The separate `codeindex` CLI
+does not read this deployment file; it has a user-level client config described
+below.
 
 | Field                 | Type     | Default                                                                  | Notes                                      |
 | --------------------- | -------- | ------------------------------------------------------------------------ | ------------------------------------------ |
@@ -173,6 +175,40 @@ It is created or updated by `codeindex codebase` and maps stable keys to KBs:
 CLI and MCP code tools accept `index_key`; when `kb_id` is omitted, Minnow reads
 this registry and resolves the key to the right KB. If no entry exists,
 `default` maps to KB `default`, and other keys map to `code-<key>`.
+
+### Codeindex client config
+
+Run `codeindex setup --minnow-url http://127.0.0.1:8080` to write the client
+config under the operating system's user config directory. Use
+`CODEINDEX_CONFIG` or `--config` to select another path.
+
+```yaml
+minnow:
+  url: http://127.0.0.1:8080
+  token: ${MINNOW_TOKEN}
+
+code_index:
+  include: ["**/*.go", "**/*.ts", "**/*.md"]
+  exclude: [".git/**", "node_modules/**", "vendor/**"]
+  max_file_bytes: 1048576
+  chunk_size: 1200
+  chunk_overlap: 120
+  request_batch_size: 32
+  max_batch_bytes: 262144
+  throttle: 100ms
+  max_heap_bytes: 1073741824
+  max_rss_bytes: 1073741824
+  large_repo_files: 1000
+  require_confirm: true
+  poll_interval: 500ms
+  operation_timeout: 10m
+```
+
+`minnow.url` is the only required connection setting. `token` is sent as a
+Bearer token and should reference an environment variable rather than storing a
+secret directly. `CODEINDEX_MINNOW_URL` and `CODEINDEX_TOKEN` override the file.
+Codeindex sends prepared chunks to `POST /rag/ingest`, polls operation status,
+and deletes stale IDs through the vector API.
 
 ### `graph` (optional, RAG graph extraction)
 

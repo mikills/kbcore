@@ -54,12 +54,19 @@ fixes each KB's embedding dimension to the model output dimension.
 
 ## Index a codebase
 
-Index the current repository for code-aware retrieval. From inside the repo, no
-flags are required:
+Codeindex is an HTTP client of Minnow; it does not load `minnow.yaml` or embed
+content itself. Start Minnow's HTTP service and configure the connection once:
 
 ```bash
 go install github.com/mikills/minnow/codeindex@latest
-codeindex codebase        # indexes . , index-key "default", kb_id auto-derived
+minnow
+codeindex setup --minnow-url http://127.0.0.1:8080
+```
+
+Then index from inside a repository or ordinary directory:
+
+```bash
+codeindex codebase
 codeindex status
 ```
 
@@ -68,15 +75,15 @@ Optional overrides:
 | Flag | Default | Purpose |
 |---|---|---|
 | `--root` | `.` | Repository root to index. |
-| `--index-key` | `default` | Stable agent-facing key for this index. |
-| `--kb` | derived from index-key | Backing knowledge base id. |
+| `--index-key` | repository branch or directory identity | Stable agent-facing key. |
+| `--kb` | repository + branch derived | Backing knowledge base id. |
 | `--description` | empty | Human label stored in the registry. |
 | `--include-untracked` | off | Index files not tracked by Git. |
 
-The first run writes `.minnow/codebase-indexes.json`, a repo-local registry
-mapping each `index_key` to its backing `kb_id`, so MCP clients pass only
-`index_key: "default"`. One repo can hold several indexes (`default`, `backend`,
-`docs`), each with its own KB.
+For Git repositories, codeindex combines repository identity with the checked-out
+branch. Branches remain independently searchable instead of overwriting one KB.
+Without Git, the absolute directory provides stable identity. The command output
+and `codeindex status` show the selected `kb_id` for HTTP or MCP searches.
 
 Optionally install Git hooks to refresh on commit / checkout / merge / rebase:
 
@@ -85,9 +92,10 @@ codeindex hooks install
 codeindex hooks status
 ```
 
-Refreshes are state-based: Minnow hashes tracked files (`git ls-files`) against
-the previous manifest and only re-embeds what changed (deleted files' chunks are
-removed). Without hooks, run `codeindex refresh` after code changes.
+Refreshes are state-based: codeindex hashes tracked files (`git ls-files`) against
+the branch-specific state in `.minnow/codeindex/`, sends only changed chunks to
+Minnow, and removes stale IDs after publish. Without hooks, run
+`codeindex refresh` after code changes.
 
 ## MCP endpoints
 

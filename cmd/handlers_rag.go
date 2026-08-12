@@ -25,6 +25,7 @@ type ragIngestRequest struct {
 	KBID         string           `json:"kb_id"`
 	ChunkSize    int              `json:"chunk_size"`
 	GraphEnabled *bool            `json:"graph_enabled"`
+	PreChunked   bool             `json:"pre_chunked,omitempty"`
 	Documents    []ragIngestDocIn `json:"documents"`
 }
 
@@ -160,7 +161,9 @@ func appendRagIngestEvent(
 	idemKey, corr := requestIDs(c)
 	return deps.AppendDocumentUpsert(
 		c.Request().Context(),
-		kb.DocumentUpsertPayload{KBID: req.KBID, Documents: docs, ChunkSize: req.ChunkSize, Options: opts},
+		kb.DocumentUpsertPayload{
+			KBID: req.KBID, Documents: docs, ChunkSize: req.ChunkSize, PreChunked: req.PreChunked, Options: opts,
+		},
 		idemKey,
 		corr,
 	)
@@ -363,6 +366,9 @@ func buildIngestDocuments(req ragIngestRequest) ([]kb.Document, []string, kb.Ups
 	docIDs := make([]string, 0, len(req.Documents))
 	for _, doc := range req.Documents {
 		id := strings.TrimSpace(doc.ID)
+		if req.PreChunked && id == "" {
+			return nil, nil, kb.UpsertDocsOptions{}, fmt.Errorf("pre-chunked documents require non-empty ids")
+		}
 		text := strings.TrimSpace(doc.Text)
 		if id == "" {
 			id = generateDocID()
