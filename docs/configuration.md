@@ -376,7 +376,7 @@ Destructive tools (`minnow_delete_knowledge_base`, `minnow_delete_media`,
 `minnow_clear_cache`) require `allow_destructive: true`; admin maintenance tools
 require `allow_admin: true`.
 
-For editor MCP registration, prefer stdio:
+For an agent running on the Minnow host, stdio launches the server directly:
 
 ```json
 {
@@ -391,6 +391,13 @@ For editor MCP registration, prefer stdio:
   }
 }
 ```
+
+Agents on another computer should use the streamable HTTP endpoint instead.
+Current Codex CLI, Claude Code, and OpenCode registration examples are in
+[getting-started.md](getting-started.md#mcp-endpoints). Keep credentials in
+environment variables rather than client config. Bearer-token examples require
+an authenticating HTTPS reverse proxy or API gateway until Minnow has native
+authentication.
 
 ## Secret policy
 

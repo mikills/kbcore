@@ -106,8 +106,47 @@ The minimal config enables MCP for local coding-agent workflows:
 - Streamable HTTP: `http://127.0.0.1:8080/mcp` (override `http.address` in the YAML)
 - Stdio (for editor registration): `go run . mcp stdio`
 
-For editor registration JSON and the full MCP tool/gate reference, see the `mcp`
-section of [configuration.md](configuration.md).
+On a different computer, install `codeindex` to publish local repository changes,
+then register the hosted Minnow MCP endpoint with the coding client that should
+search it. Minnow itself runs only on the host:
+
+```bash
+# Codex CLI
+codex mcp add minnow \
+  --url https://minnow.example.com/mcp \
+  --bearer-token-env-var MINNOW_TOKEN
+
+# Claude Code (the JSON keeps token lookup in the environment)
+claude mcp add-json --scope user minnow \
+  '{"type":"http","url":"https://minnow.example.com/mcp","headers":{"Authorization":"Bearer ${MINNOW_TOKEN}"}}'
+```
+
+For OpenCode, add this to `~/.config/opencode/opencode.json` or
+`opencode.jsonc`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "minnow": {
+      "type": "remote",
+      "url": "https://minnow.example.com/mcp",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer {env:MINNOW_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+Check registration with `codex mcp get minnow --json`, `claude mcp get minnow`,
+or `opencode mcp list`. Omit the token option/header for an unauthenticated
+endpoint. Minnow does not yet validate bearer tokens itself, so the authenticated
+examples require an HTTPS reverse proxy or API gateway that does.
+
+For the full MCP tool and gate reference, see the `mcp` section of
+[configuration.md](configuration.md).
 
 ## Validate a config
 

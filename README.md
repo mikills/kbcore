@@ -54,6 +54,10 @@ The default `minnow.yaml` also exposes MCP for coding agents:
 - Streamable HTTP: `http://127.0.0.1:8080/mcp`
 - Stdio: `go run . mcp stdio`
 
+Codex CLI, Claude Code, and OpenCode can connect directly to a hosted streamable
+HTTP endpoint; see [MCP endpoints](docs/getting-started.md#mcp-endpoints) for
+verified registration commands and token handling.
+
 The default config at `./minnow.yaml` is sufficient for local development (embedder-only, no external services). See [`docs/getting-started.md`](docs/getting-started.md) for a deployment-grade setup.
 
 ## What it does
