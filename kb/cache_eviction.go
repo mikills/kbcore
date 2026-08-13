@@ -75,17 +75,36 @@ type PooledConnCloser interface {
 	ClosePooledConns(pathPrefix string)
 }
 
+type PooledConnEvictionBarrier interface {
+	BeginPooledConnEviction(pathPrefix string) func()
+}
+
 func (l *KB) removeCacheEntry(entry cacheevict.Entry) bool {
 	lock := l.LockFor(entry.KBID)
-	lock.Lock()
+	// Never wait while a mutation may itself be requesting cache eviction;
+	// fixed lock stripes can otherwise self-deadlock or cross-deadlock. A busy
+	// entry is skipped and reconsidered by the next sweep.
+	if !lock.TryLock() {
+		return false
+	}
 	defer lock.Unlock()
 
 	formats := l.registeredFormatsSnapshot()
+	var releases []func()
 	for _, format := range formats {
+		if barrier, ok := format.(PooledConnEvictionBarrier); ok {
+			releases = append(releases, barrier.BeginPooledConnEviction(entry.Path))
+			continue
+		}
 		if closer, ok := format.(PooledConnCloser); ok {
 			closer.ClosePooledConns(entry.Path)
 		}
 	}
+	defer func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}()
 
 	return removeCacheDir(entry.Path)
 }

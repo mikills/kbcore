@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	codeindex "github.com/mikills/minnow/kb/codeindex"
 	"github.com/mikills/minnow/kb/blobstore"
+	codeindex "github.com/mikills/minnow/kb/codeindex"
 	"github.com/mikills/minnow/kb/eventing"
 	"github.com/mikills/minnow/kb/graphbuild"
 	"github.com/mikills/minnow/kb/lease"
@@ -360,6 +360,7 @@ const (
 	EventDocumentGraphExtracted = eventing.EventDocumentGraphExtracted
 	EventKBPublished            = eventing.EventKBPublished
 	EventWorkerFailed           = eventing.EventWorkerFailed
+	EventStagingCleanup         = eventing.EventStagingCleanup
 	EventStatusPending          = eventing.EventStatusPending
 	EventStatusClaimed          = eventing.EventStatusClaimed
 	EventStatusDone             = eventing.EventStatusDone

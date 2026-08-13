@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -142,6 +143,36 @@ media:
 	addr := rt.App().Address()
 	require.NotEmpty(t, addr)
 	require.NotContains(t, addr, ":0", "address should be resolved to a real port after Start")
+}
+
+func TestRuntimeStartRollsBackWhenHTTPBindFails(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+	path := writeTempConfig(t, `
+http:
+  address: `+listener.Addr().String()+`
+embedder:
+  provider: local
+  local:
+    dim: 16
+scheduler:
+  enabled: false
+media:
+  enabled: false
+`)
+	cfg, err := config.Load(path)
+	require.NoError(t, err)
+	rt, err := Build(context.Background(), cfg, BuildOptions{Logger: quietLogger()})
+	require.NoError(t, err)
+	err = rt.Start(context.Background())
+	require.Error(t, err)
+	require.True(t, rt.stopped)
+	for _, pool := range rt.workerPools {
+		poolCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		require.NoError(t, pool.StopContext(poolCtx))
+		cancel()
+	}
 }
 
 func TestBuildRejectsNilConfig(t *testing.T) {

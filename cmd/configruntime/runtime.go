@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -41,17 +42,22 @@ type BuildOptions struct {
 // Runtime is a fully wired but not-yet-started deployment. Call Start to
 // take traffic. call Stop to shut down cleanly.
 type Runtime struct {
-	cfg         *config.Config
-	logger      *slog.Logger
-	dryRun      bool
-	kb          *kb.KB
-	format      *kbduckdb.DuckDBArtifactFormat
-	app         *appcmd.App
-	scheduler   *kb.Scheduler
-	workerPools []*kb.WorkerPool
-	cleanups    []func(context.Context) error
-	warmCancel  context.CancelFunc
-	warmDone    chan struct{}
+	cfg               *config.Config
+	logger            *slog.Logger
+	dryRun            bool
+	kb                *kb.KB
+	format            *kbduckdb.DuckDBArtifactFormat
+	app               *appcmd.App
+	scheduler         *kb.Scheduler
+	workerPools       []*kb.WorkerPool
+	cleanups          []func(context.Context) error
+	warmCancel        context.CancelFunc
+	warmDone          chan struct{}
+	backgroundStarted bool
+	lifecycleMu       sync.Mutex
+	started           bool
+	stopping          bool
+	stopped           bool
 }
 
 const logKeyError = "error"
@@ -84,6 +90,7 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 
 	k, err := rt.buildKB(ctx, cfg)
 	if err != nil {
+		rt.cleanupBuildFailure(ctx)
 		return nil, err
 	}
 	rt.kb = k
@@ -94,18 +101,36 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 		kbduckdb.WithOfflineExt(cfg.Format.DuckDB.Offline),
 	))
 	if err != nil {
+		rt.cleanupBuildFailure(ctx)
 		return nil, fmt.Errorf("build duckdb artifact format: %w", err)
 	}
 	if err := k.RegisterFormat(af); err != nil {
+		_ = af.Close()
+		rt.cleanupBuildFailure(ctx)
 		return nil, fmt.Errorf("register artifact format: %w", err)
 	}
 	rt.format = af
 
 	rt.app = appcmd.NewApp(k, appConfigFromConfig(cfg, logger))
 	if err := rt.wireSchedulerAndWorkers(cfg); err != nil {
+		rt.cleanupBuildFailure(ctx)
 		return nil, err
 	}
 	return rt, nil
+}
+
+func (r *Runtime) cleanupBuildFailure(ctx context.Context) {
+	if r.kb != nil {
+		r.kb.Close()
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	for i := len(r.cleanups) - 1; i >= 0; i-- {
+		if err := r.cleanups[i](cleanupCtx); err != nil {
+			r.logger.Warn("runtime build rollback", logKeyError, err)
+		}
+	}
+	r.cleanups = nil
 }
 
 func (r *Runtime) buildKB(ctx context.Context, cfg *config.Config) (*kb.KB, error) {
@@ -208,7 +233,7 @@ func appConfigFromConfig(cfg *config.Config, logger *slog.Logger) appcmd.AppConf
 }
 
 func (r *Runtime) wireSchedulerAndWorkers(cfg *config.Config) error {
-	if cfg.Scheduler.Enabled {
+	if cfg.SchedulerEnabled() {
 		r.scheduler = kb.NewScheduler(r.kb.WriteLeaseManager, cfg.SchedulerTick(), cfg.Scheduler.DisabledJobs, nil)
 		if err := r.kb.RegisterDefaultJobs(r.scheduler); err != nil {
 			return fmt.Errorf("register scheduler jobs: %w", err)
@@ -230,50 +255,74 @@ func (r *Runtime) wireSchedulerAndWorkers(cfg *config.Config) error {
 // only once. In DryRun mode, Start returns nil without side effects (no
 // mkdir, no port bind, no goroutines).
 func (r *Runtime) Start(ctx context.Context) error {
-	if r.dryRun {
-		return nil
-	}
-	if err := r.StartBackground(ctx); err != nil {
-		return err
-	}
-	if err := r.app.Start(); err != nil {
-		return fmt.Errorf("start app: %w", err)
-	}
-	r.logger.Info("minnow listening", "address", r.app.Address())
-	return nil
+	return r.start(ctx, true)
 }
 
 // StartBackground starts filesystem state, scheduler, and worker pools without
 // binding the HTTP app. It is used by stdio MCP mode.
 func (r *Runtime) StartBackground(ctx context.Context) error {
+	return r.start(ctx, false)
+}
+
+func (r *Runtime) start(ctx context.Context, withHTTP bool) (err error) {
 	if r.dryRun {
 		return nil
 	}
+	r.lifecycleMu.Lock()
+	if r.started || r.stopping || r.stopped {
+		r.lifecycleMu.Unlock()
+		return kb.ErrAlreadyStarted
+	}
+	r.started = true
 	if r.cfg.Storage.Blob.Kind == "local" {
-		if err := os.MkdirAll(r.cfg.Storage.Blob.Root, 0o755); err != nil {
-			return fmt.Errorf("create blob root %q: %w", r.cfg.Storage.Blob.Root, err)
+		if err = os.MkdirAll(r.cfg.Storage.Blob.Root, 0o755); err != nil {
+			err = fmt.Errorf("create blob root %q: %w", r.cfg.Storage.Blob.Root, err)
 		}
 	}
-	if err := os.MkdirAll(r.cfg.Storage.Cache.Dir, 0o755); err != nil {
-		return fmt.Errorf("create cache dir %q: %w", r.cfg.Storage.Cache.Dir, err)
+	if err == nil {
+		err = os.MkdirAll(r.cfg.Storage.Cache.Dir, 0o755)
+		if err != nil {
+			err = fmt.Errorf("create cache dir %q: %w", r.cfg.Storage.Cache.Dir, err)
+		}
 	}
-	if r.scheduler != nil {
+	if err == nil && r.scheduler != nil {
 		r.scheduler.Start()
 		r.logger.Info("scheduler started", "tick_interval", r.cfg.SchedulerTick(), "jobs", r.scheduler.JobIDs())
 	}
-	for _, pool := range r.workerPools {
-		pool.Start(ctx)
+	if err == nil {
+		r.backgroundStarted = true
+		for _, pool := range r.workerPools {
+			if startErr := pool.Start(ctx); startErr != nil {
+				err = fmt.Errorf("start worker pool: %w", startErr)
+				break
+			}
+		}
 	}
-	if n := r.cfg.Storage.Cache.WarmShards; n > 0 && r.format != nil {
-		warmCtx, cancel := context.WithCancel(ctx)
-		r.warmCancel = cancel
-		r.warmDone = make(chan struct{})
-		go func() {
-			defer close(r.warmDone)
-			r.format.WarmCache(warmCtx, n, r.logger)
-		}()
+	if err == nil {
+		if n := r.cfg.Storage.Cache.WarmShards; n > 0 && r.format != nil {
+			warmCtx, cancel := context.WithCancel(ctx)
+			r.warmCancel = cancel
+			r.warmDone = make(chan struct{})
+			go func() {
+				defer close(r.warmDone)
+				r.format.WarmCache(warmCtx, n, r.logger)
+			}()
+		}
 	}
-	return nil
+	if err == nil && withHTTP {
+		if startErr := r.app.Start(); startErr != nil {
+			err = fmt.Errorf("start app: %w", startErr)
+		} else {
+			r.logger.Info("minnow listening", "address", r.app.Address())
+		}
+	}
+	r.lifecycleMu.Unlock()
+	if err == nil {
+		return nil
+	}
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	return errors.Join(err, r.Stop(rollbackCtx))
 }
 
 func mcpConfigFromConfig(cfg *config.Config) mcpserver.Config {
@@ -294,7 +343,10 @@ func mcpConfigFromConfig(cfg *config.Config) mcpserver.Config {
 		DefaultSyncTimeout: cfg.MCP.DefaultSyncTimeout.AsDuration(),
 		MaxSyncTimeout:     cfg.MCP.MaxSyncTimeout.AsDuration(),
 		HTTPJSONResponse:   cfg.MCP.HTTPJSONResponse,
-		HTTPStateless:      cfg.MCP.HTTPStateless,
+		HTTPStateless:      cfg.MCPHTTPStateless(),
+		HTTPStateful:       !cfg.MCPHTTPStateless(),
+		HTTPSessionTimeout: cfg.MCP.HTTPSessionTimeout.AsDuration(),
+		HTTPMaxSessions:    cfg.MCP.HTTPMaxSessions,
 		CodeIndex: mcpserver.CodeIndexDefaults{
 			Include:          append([]string(nil), cfg.CodeIndex.Include...),
 			Exclude:          append([]string(nil), cfg.CodeIndex.Exclude...),
@@ -324,31 +376,69 @@ func (r *Runtime) Wait() error {
 	return r.app.Wait()
 }
 
-// Stop performs graceful shutdown in reverse startup order: worker pools,
-// scheduler, HTTP app, then any connection cleanups (e.g. Mongo disconnect).
-// Safe to call multiple times.
+// Stop first closes HTTP intake, then drains background work before closing
+// database handles and external connections. Safe to call multiple times.
 func (r *Runtime) Stop(ctx context.Context) error {
-	if r.warmCancel != nil {
-		r.warmCancel()
-		<-r.warmDone // drain before cleanups tear down the stores it reads
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	if r.stopped {
+		return nil
 	}
-	for _, pool := range r.workerPools {
-		pool.Stop()
+	if r.stopping {
+		return errors.New("runtime stop already in progress")
 	}
-	if r.scheduler != nil {
-		r.scheduler.Stop()
+	r.stopping = true
+	completed := false
+	defer func() {
+		r.stopping = false
+		if completed {
+			r.stopped = true
+		}
+	}()
+	if ctx == nil {
+		ctx = context.Background()
 	}
+
+	var stopErr error
 	if !r.dryRun && r.app != nil {
 		if err := r.app.Stop(ctx); err != nil {
-			r.logger.Error("shutdown error", logKeyError, err)
+			stopErr = errors.Join(stopErr, fmt.Errorf("stop HTTP app: %w", err))
 		}
 	}
-	for _, fn := range r.cleanups {
-		if err := fn(ctx); err != nil {
-			r.logger.Error("runtime cleanup", logKeyError, err)
+	if r.warmCancel != nil {
+		r.warmCancel()
+	}
+	if r.backgroundStarted {
+		if r.scheduler != nil {
+			r.scheduler.BeginStop()
+		}
+		for _, pool := range r.workerPools {
+			pool.BeginStop()
+		}
+		if r.scheduler != nil {
+			stopErr = errors.Join(stopErr, r.scheduler.StopContext(ctx))
+		}
+		for _, pool := range r.workerPools {
+			stopErr = errors.Join(stopErr, pool.StopContext(ctx))
 		}
 	}
-	return nil
+	if r.warmDone != nil {
+		select {
+		case <-r.warmDone:
+		case <-ctx.Done():
+			stopErr = errors.Join(stopErr, ctx.Err())
+		}
+	}
+	if stopErr == nil && r.kb != nil {
+		r.kb.Close()
+	}
+	for i := len(r.cleanups) - 1; i >= 0; i-- {
+		if err := r.cleanups[i](ctx); err != nil {
+			stopErr = errors.Join(stopErr, err)
+		}
+	}
+	completed = stopErr == nil
+	return stopErr
 }
 
 func buildBlobStore(ctx context.Context, cfg *config.Config) (kb.BlobStore, *blobstore.S3BlobStore, error) {
@@ -582,6 +672,7 @@ func buildWorkerPools(k *kb.KB, cfg *config.Config, app *appcmd.App) ([]*kb.Work
 	// fail every Handle call with "media subsystem not configured", driving
 	// retries and dead-letters for events the operator explicitly disabled.
 	entries := []entry{
+		{&kb.StagingCleanupWorker{KB: k, ID: "staging-cleanup-worker"}, cfg.Workers.DocumentUpsert},
 		{&kb.DocumentUpsertWorker{KB: k, ID: "document-upsert-worker"}, cfg.Workers.DocumentUpsert},
 		{&kb.DocumentChunkedWorker{KB: k, ID: "document-chunked-worker"}, cfg.Workers.DocumentChunked},
 		{

@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,35 +18,51 @@ import (
 // the operation polling endpoint. operationsPollBurst is the one-shot burst
 // allowance before throttling kicks in.
 const (
-	operationsPollRate  = 10.0
-	operationsPollBurst = 20.0
+	operationsPollRate         = 10.0
+	operationsPollBurst        = 20.0
+	operationsLimiterStripes   = 256
+	operationsBucketsPerStripe = 16
 )
 
 type ipRateLimiter struct {
 	rate    float64
 	burst   float64
-	buckets sync.Map
+	stripes []rateLimitStripe
+}
+
+type rateLimitStripe struct {
+	mu      sync.Mutex
+	buckets map[string]*tokenBucket
 }
 
 type tokenBucket struct {
-	mu        sync.Mutex
 	tokens    float64
 	updatedNS int64
 }
 
 func newIPRateLimiter(rate, burst float64) *ipRateLimiter {
-	return &ipRateLimiter{rate: rate, burst: burst}
+	return &ipRateLimiter{rate: rate, burst: burst, stripes: make([]rateLimitStripe, operationsLimiterStripes)}
 }
 
 func (l *ipRateLimiter) Allow(ip string) bool {
 	if ip == "" {
 		ip = "unknown"
 	}
-	v, _ := l.buckets.LoadOrStore(ip, &tokenBucket{tokens: l.burst, updatedNS: time.Now().UnixNano()})
-	bucket := v.(*tokenBucket)
-	bucket.mu.Lock()
-	defer bucket.mu.Unlock()
+	stripe := &l.stripes[rateLimitStripeFor(ip)]
+	stripe.mu.Lock()
+	defer stripe.mu.Unlock()
+	if stripe.buckets == nil {
+		stripe.buckets = make(map[string]*tokenBucket)
+	}
 	nowNS := time.Now().UnixNano()
+	bucket := stripe.buckets[ip]
+	if bucket == nil {
+		if len(stripe.buckets) >= operationsBucketsPerStripe {
+			evictOldestRateLimitBucket(stripe.buckets)
+		}
+		bucket = &tokenBucket{tokens: l.burst, updatedNS: nowNS}
+		stripe.buckets[ip] = bucket
+	}
 	elapsed := float64(nowNS-bucket.updatedNS) / float64(time.Second)
 	if elapsed > 0 {
 		bucket.tokens += elapsed * l.rate
@@ -59,6 +76,27 @@ func (l *ipRateLimiter) Allow(ip string) bool {
 		return true
 	}
 	return false
+}
+
+func evictOldestRateLimitBucket(buckets map[string]*tokenBucket) {
+	var oldestKey string
+	var oldestNS int64
+	for key, bucket := range buckets {
+		if oldestKey == "" || bucket.updatedNS < oldestNS {
+			oldestKey = key
+			oldestNS = bucket.updatedNS
+		}
+	}
+	delete(buckets, oldestKey)
+}
+
+func rateLimitStripeFor(value string) int {
+	var hash uint32 = 2166136261
+	for i := 0; i < len(value); i++ {
+		hash ^= uint32(value[i])
+		hash *= 16777619
+	}
+	return int(hash % operationsLimiterStripes)
 }
 
 func registerOpsRoutes(e *echo.Echo, deps Dependencies) {
@@ -78,9 +116,38 @@ func registerOpsRoutes(e *echo.Echo, deps Dependencies) {
 	e.GET("/rag/operations/:id", operationStatusHandler(deps, operationsLimiter))
 }
 
+func remoteClientIP(r *http.Request) string {
+	if r == nil {
+		return "unknown"
+	}
+	peer := parseRequestIP(r.RemoteAddr)
+	if peer == nil {
+		return "unknown"
+	}
+	// The bundled reverse-proxy topology connects over loopback. Private/LAN
+	// peers are not implicitly trusted and cannot select their own identity.
+	if peer.IsLoopback() {
+		if forwarded := parseRequestIP(r.Header.Get("X-Real-IP")); forwarded != nil {
+			return forwarded.String()
+		}
+	}
+	return peer.String()
+}
+
+func parseRequestIP(value string) net.IP {
+	value = strings.TrimSpace(value)
+	if len(value) > net.IPv6len*3 {
+		return nil
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	return net.ParseIP(strings.Trim(value, "[]"))
+}
+
 func operationStatusHandler(deps Dependencies, operationsLimiter *ipRateLimiter) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		if !operationsLimiter.Allow(c.RealIP()) {
+		if !operationsLimiter.Allow(remoteClientIP(c.Request())) {
 			c.Response().Header().Set("Retry-After", "1")
 			return c.JSON(http.StatusTooManyRequests, map[string]any{errorResponseKey: "rate limit exceeded"})
 		}

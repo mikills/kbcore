@@ -188,24 +188,26 @@ func (w *MediaUploadWorker) Handle(ctx context.Context, event *KBEvent) (WorkerR
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return WorkerResult{}, fmt.Errorf("decode payload: %w", err)
 	}
+	cleanup := mediaUploadCommit(w.KB.BlobStore, payload.StagedBlobKey)
 	if err := w.ensureMediaObject(ctx, payload); err != nil {
-		return WorkerResult{}, err
+		return WorkerResult{AfterTerminal: cleanup}, err
 	}
 	mediaUploadedPayload, err := json.Marshal(mediapkg.UploadedPayloadFromUpload(payload, event.EventID))
 	if err != nil {
 		return WorkerResult{}, fmt.Errorf("marshal media.uploaded: %w", err)
 	}
-	child := w.KB.newChildPendingEvent(
+	child := w.KB.newChildDoneEvent(
 		event,
 		EventMediaUploaded,
 		"media.uploaded/v1",
 		event.EventID+"|media.uploaded",
 		mediaUploadedPayload,
 	)
-	return WorkerResult{
-		FollowUps: []KBEvent{child},
-		Commit:    mediaUploadCommit(w.KB.BlobStore, payload.StagedBlobKey),
-	}, nil
+	cleanupPayload, _ := json.Marshal(StagingCleanupPayload{Keys: []string{payload.StagedBlobKey}})
+	cleanupEvent := w.KB.newChildPendingEvent(
+		event, EventStagingCleanup, "staging.cleanup/v1", event.EventID+"|staging.cleanup", cleanupPayload,
+	)
+	return WorkerResult{FollowUps: []KBEvent{child, cleanupEvent}}, nil
 }
 
 func (w *MediaUploadWorker) ensureMediaObject(ctx context.Context, payload MediaUploadPayload) error {
@@ -220,8 +222,7 @@ func (w *MediaUploadWorker) ensureMediaObject(ctx context.Context, payload Media
 
 func mediaUploadCommit(store BlobStore, stagedBlobKey string) func(context.Context) error {
 	return func(ctx context.Context) error {
-		if err := store.Delete(ctx, stagedBlobKey); err != nil && !errors.Is(err, ErrBlobNotFound) &&
-			!errors.Is(err, os.ErrNotExist) {
+		if err := deleteStagedBlobWithRetry(ctx, store, stagedBlobKey); err != nil {
 			return fmt.Errorf("media: delete staged blob %q: %w", stagedBlobKey, err)
 		}
 		return nil

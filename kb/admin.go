@@ -73,8 +73,9 @@ func (l *KB) deleteKBCache(kbID string) []error {
 		return nil
 	}
 	var errs []error
-	if err := os.RemoveAll(filepath.Join(l.CacheDir, kbID)); err != nil && !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("remove cache dir for %q: %w", kbID, err))
+	path := filepath.Join(l.CacheDir, kbID)
+	if !l.removeCacheEntry(cacheevict.Entry{KBID: kbID, Path: path}) {
+		errs = append(errs, fmt.Errorf("remove cache dir for %q", kbID))
 	}
 	_, total := cacheevict.ScanEntries(l.CacheDir)
 	l.recordCacheBytesCurrent(total)
@@ -133,8 +134,9 @@ func (l *KB) ClearCache() error {
 		return err
 	}
 	for _, entry := range entries {
-		if err := os.RemoveAll(filepath.Join(l.CacheDir, entry.Name())); err != nil {
-			return err
+		path := filepath.Join(l.CacheDir, entry.Name())
+		if !l.removeCacheEntry(cacheevict.Entry{KBID: entry.Name(), Path: path}) {
+			return fmt.Errorf("remove cache entry %q", entry.Name())
 		}
 	}
 	l.recordCacheBytesCurrent(0)

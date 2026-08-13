@@ -168,4 +168,4 @@ mcp:
   default_sync_timeout: 30s
   max_sync_timeout: 2m
   http_json_response: false
-  http_stateless: false
+  http_stateless: true

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/mikills/minnow/kb"
 )
@@ -50,7 +51,16 @@ func (c *Config) validateMCP() error {
 		validateMCPHTTPPath(seen["http"], c.MCP.HTTPPath),
 		validateMCPToolGates(c.MCP),
 		validateMCPSyncTimeouts(c.MCP),
+		validateMCPSessionTimeout(c.MCP.HTTPSessionTimeout),
+		requirePositiveInt("mcp.http_max_sessions", c.MCP.HTTPMaxSessions),
 	)
+}
+
+func validateMCPSessionTimeout(value Duration) error {
+	if value.AsDuration() < time.Second {
+		return errors.New("mcp.http_session_timeout must be >= 1s")
+	}
+	return nil
 }
 
 func validateMCPTransports(transports []string) (map[string]bool, error) {
@@ -192,8 +202,8 @@ func validateHTTPURL(name, raw string) error {
 }
 
 func (c *Config) validateScheduler() error {
-	if c.Scheduler.Enabled && c.Scheduler.TickInterval == nil {
-		return errors.New("scheduler.tick_interval must be set when scheduler.enabled is true")
+	if !c.SchedulerEnabled() || c.Scheduler.TickInterval == nil {
+		return nil
 	}
 	return requirePositiveDuration("scheduler.tick_interval", c.Scheduler.TickInterval)
 }

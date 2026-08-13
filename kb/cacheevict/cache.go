@@ -74,7 +74,7 @@ func RetryUntilWithinBudget(cfg RetryConfig) (SweepResult, bool, error) {
 			return result, true, nil
 		}
 		wait := cfg.Tick
-		if remaining := time.Until(deadline); remaining < wait {
+		if remaining := deadline.Sub(cfg.Now()); remaining < wait {
 			wait = remaining
 		}
 		if err := cfg.Sleep(wait); err != nil {

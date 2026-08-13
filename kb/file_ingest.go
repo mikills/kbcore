@@ -35,14 +35,27 @@ func (l *KB) AppendFileIngestDetailed(
 	if err := l.validateFileIngestInput(input); err != nil {
 		return "", "", err
 	}
+	if l.EventStore == nil {
+		return "", "", errors.New("ingest: EventStore not configured")
+	}
+	idempotencyKey, correlationID = l.ensureEventKeys(idempotencyKey, correlationID)
+	if existing, err := l.EventStore.FindByIdempotency(ctx, EventDocumentUpsert, input.KBID, idempotencyKey); err != nil {
+		return "", "", err
+	} else if existing != nil {
+		return existing.EventID, idempotencyKey, nil
+	}
 	staged, cleanupAll, err := l.stageFileIngestUploads(ctx, input, maxBytes)
 	if err != nil {
 		return "", "", err
 	}
 	payload := fileIngestUpsertPayload(input, staged)
-	eventID, effectiveIdem, err := l.AppendDocumentUpsertDetailed(ctx, payload, idempotencyKey, correlationID)
-	if err != nil {
+	eventID, effectiveIdem, created, err := l.appendDocumentUpsertDetailed(
+		ctx, payload, idempotencyKey, correlationID,
+	)
+	if err != nil || !created {
 		cleanupAll()
+	}
+	if err != nil {
 		return "", "", err
 	}
 	return eventID, effectiveIdem, nil

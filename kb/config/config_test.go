@@ -66,6 +66,19 @@ func TestLoad(t *testing.T) {
 		require.True(t, *cfg.Sharding.CompactionEnabled)
 	})
 
+	t.Run("rejects misspelled nested lifecycle keys", func(t *testing.T) {
+		validBase := "embedder:\n  provider: local\n  local:\n    dim: 16\n"
+		for _, body := range []string{
+			validBase + "scheduler:\n  enabeld: false\n",
+			validBase + "mcp:\n  http_stateles: false\n",
+		} {
+			path := filepath.Join(t.TempDir(), "minnow.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+			_, err := Load(path)
+			require.Error(t, err)
+		}
+	})
+
 	t.Run("rejects unknown keys with key name", func(t *testing.T) {
 		_, err := Load("testdata/invalid_unknown_key.yaml")
 		require.Error(t, err)
@@ -482,7 +495,7 @@ mongo:
 		}
 	})
 
-	t.Run("scheduler_enabled_requires_tick_interval", func(t *testing.T) {
+	t.Run("scheduler_defaults_on_with_default_tick", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "minnow.yaml")
 		require.NoError(t, os.WriteFile(path, []byte(`
@@ -490,14 +503,29 @@ embedder:
   provider: local
   local:
     dim: 16
-
-scheduler:
-  enabled: true
 `), 0o644))
 
-		_, err := Load(path)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "scheduler.tick_interval")
+		cfg, err := Load(path)
+		require.NoError(t, err)
+		require.True(t, cfg.SchedulerEnabled())
+		require.Equal(t, time.Minute, cfg.SchedulerTick())
+	})
+
+	t.Run("scheduler_can_be_disabled", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "minnow.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(`
+embedder:
+  provider: local
+  local:
+    dim: 16
+scheduler:
+  enabled: false
+`), 0o644))
+
+		cfg, err := Load(path)
+		require.NoError(t, err)
+		require.False(t, cfg.SchedulerEnabled())
 	})
 
 	t.Run("media_tombstone_grace_bounded_by_pending_ttl", func(t *testing.T) {

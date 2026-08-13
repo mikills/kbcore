@@ -70,6 +70,12 @@ func (c *Config) HTTPShutdownTimeout() time.Duration {
 	return c.HTTP.ShutdownTimeout.AsDuration()
 }
 
+// MCPHTTPStateless reports whether HTTP MCP requests avoid retained sessions.
+func (c *Config) MCPHTTPStateless() bool { return c.MCP.HTTPStateless }
+
+// SchedulerEnabled reports whether periodic maintenance jobs should run.
+func (c *Config) SchedulerEnabled() bool { return c.Scheduler.Enabled }
+
 // SchedulerTick returns the resolved scheduler tick interval.
 func (c *Config) SchedulerTick() time.Duration {
 	if c.Scheduler.TickInterval == nil {

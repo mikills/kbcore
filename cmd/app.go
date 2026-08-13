@@ -20,7 +20,10 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 )
 
-const cacheSweepTimeout = 150 * time.Millisecond
+const (
+	cacheSweepTimeout   = 150 * time.Millisecond
+	defaultMaxHeaderLen = 64 << 10
+)
 
 var appRootContext = context.Background()
 
@@ -64,6 +67,7 @@ type App struct {
 
 	cacheEvictCancel context.CancelFunc
 	cacheEvictDone   chan struct{}
+	mcpHandlers      []*mcpserver.HTTPHandler
 }
 
 // Metrics returns the AppMetrics observer for this app.
@@ -88,6 +92,11 @@ func NewApp(loader *kb.KB, cfg AppConfig) *App {
 	e := echo.New()
 	e.HideBanner = true
 	e.Use(middleware.Recover())
+	bodyLimit := cfg.MaxMediaBytes + 1<<20 // allow multipart framing overhead
+	if bodyLimit <= 1<<20 {
+		bodyLimit = kb.DefaultMaxUploadBytes + 1<<20
+	}
+	e.Use(middleware.BodyLimit(fmt.Sprintf("%d", bodyLimit)))
 	e.Use(requestLoggerMiddleware(logger, metrics))
 	e.Use(kbIDMiddleware())
 
@@ -165,7 +174,7 @@ func requestLoggerMiddleware(logger *slog.Logger, metrics kb.AppMetrics) echo.Mi
 			latencyMS := time.Since(start).Milliseconds()
 			path := c.Path()
 			if path == "" {
-				path = c.Request().URL.Path
+				path = "<unmatched>"
 			}
 			metrics.RecordRequest(c.Request().Method, path, status, latencyMS)
 			attrs := []any{
@@ -220,7 +229,7 @@ func appMediaUploadFn(
 func appFileIngestFn(
 	loader *kb.KB,
 ) func(context.Context, kb.FileIngestInput, int64, string, string) (string, string, error) {
-	if loader == nil || loader.EventStore == nil {
+	if loader == nil || loader.EventStore == nil || loader.MediaStore == nil {
 		return nil
 	}
 	return loader.AppendFileIngestDetailed
@@ -232,7 +241,9 @@ func (a *App) registerMCPRoutes(deps Dependencies) {
 		return
 	}
 	server := mcpserver.New(mcpServiceFromDeps(cfg, deps))
-	a.echo.Any(cfg.HTTPPath, echo.WrapHandler(mcpserver.NewHTTPHandler(server, cfg)))
+	handler := mcpserver.NewHTTPHandler(server, cfg)
+	a.mcpHandlers = append(a.mcpHandlers, handler)
+	a.echo.Any(cfg.HTTPPath, echo.WrapHandler(handler))
 }
 
 func NewMCPServerFromKB(loader *kb.KB, cfg mcpserver.Config, logger *slog.Logger) *mcp.Server {
@@ -374,7 +385,11 @@ func (a *App) Start() error {
 	a.listener = ln
 	a.started = true
 
-	srv := &http.Server{Handler: a.echo, ReadHeaderTimeout: a.config.ReadHeaderTimeout}
+	srv := &http.Server{
+		Handler:           a.echo,
+		ReadHeaderTimeout: a.config.ReadHeaderTimeout,
+		MaxHeaderBytes:    defaultMaxHeaderLen,
+	}
 	a.echo.Server = srv
 
 	go func() {
@@ -413,7 +428,6 @@ func (a *App) Wait() error {
 func (a *App) Stop(ctx context.Context) error {
 	a.mu.Lock()
 	started := a.started
-	a.started = false
 	a.mu.Unlock()
 
 	if !started {
@@ -432,10 +446,21 @@ func (a *App) Stop(ctx context.Context) error {
 		ctx = c
 	}
 
-	if err := a.echo.Shutdown(ctx); err != nil {
-		return err
+	var closeErr error
+	for _, handler := range a.mcpHandlers {
+		closeErr = errors.Join(closeErr, handler.Shutdown(ctx))
 	}
-	return nil
+	shutdownErr := a.echo.Shutdown(ctx)
+	if shutdownErr != nil && a.echo.Server != nil {
+		shutdownErr = errors.Join(shutdownErr, a.echo.Server.Close())
+	}
+	stopErr := errors.Join(shutdownErr, closeErr)
+	if stopErr == nil {
+		a.mu.Lock()
+		a.started = false
+		a.mu.Unlock()
+	}
+	return stopErr
 }
 
 func (a *App) startCacheEvictionLoopLocked() {

@@ -81,7 +81,9 @@ type Scheduler struct {
 	leaseTTL  time.Duration
 	tickEvery time.Duration
 	started   bool
+	stopping  bool
 	stopped   bool
+	stopDone  chan struct{}
 
 	// Job lifecycle: every wrapped job runs in a goroutine that participates
 	// in jobWG. rootCtx is canceled in Stop to signal cooperative shutdown.
@@ -205,7 +207,7 @@ func (s *Scheduler) Register(id, cronExpr string, fn Job) error {
 func (s *Scheduler) Start() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.started || s.stopped {
+	if s.started || s.stopping || s.stopped {
 		return
 	}
 	s.started = true
@@ -213,44 +215,70 @@ func (s *Scheduler) Start() {
 	s.cron.Start()
 }
 
-// Stop halts the cron loop and waits for running jobs to drain up to the
-// configured timeout. Safe to call multiple times.
+// Stop halts the cron loop and waits for running jobs to drain.
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
-	if s.stopped {
+	timeout := s.stopTimeout
+	s.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_ = s.StopContext(ctx)
+}
+
+// BeginStop prevents new jobs and signals in-flight work without waiting.
+func (s *Scheduler) BeginStop() {
+	s.mu.Lock()
+	if s.stopped || s.stopping {
 		s.mu.Unlock()
 		return
 	}
-	s.stopped = true
+	s.stopping = true
+	s.stopDone = make(chan struct{})
 	wasStarted := s.started
-	timeout := s.stopTimeout
 	cancel := s.rootCancel
+	done := s.stopDone
 	s.mu.Unlock()
-
 	if wasStarted {
 		s.cron.Stop()
 	}
 	cancel()
-
-	done := make(chan struct{})
 	go func() {
 		s.jobWG.Wait()
+		s.stopObserverDispatcher()
+		s.mu.Lock()
+		s.stopped = true
+		s.stopping = false
 		close(done)
+		s.mu.Unlock()
 	}()
+}
+
+// StopContext bounds the wait for in-flight scheduler jobs.
+func (s *Scheduler) StopContext(ctx context.Context) error {
+	s.BeginStop()
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return nil
+	}
+	done := s.stopDone
+	s.mu.Unlock()
 	select {
 	case <-done:
-	case <-time.After(timeout):
-		s.logger.Warn("scheduler stop timeout exceeded; in-flight jobs may still be running",
-			"timeout_ms", timeout.Milliseconds())
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-
-	s.stopObserverDispatcher()
 }
 
 // RunOnce executes a registered job synchronously, bypassing the cron schedule
 // but still acquiring its lease. Returns the outcome and any error.
 func (s *Scheduler) RunOnce(ctx context.Context, jobID string) (Outcome, error) {
 	s.mu.Lock()
+	if s.stopping || s.stopped {
+		s.mu.Unlock()
+		return OutcomeFailed, errors.New("scheduler: stopping")
+	}
 	var fn Job
 	for _, j := range s.jobs {
 		if j.id == jobID {
@@ -259,10 +287,14 @@ func (s *Scheduler) RunOnce(ctx context.Context, jobID string) (Outcome, error) 
 		}
 	}
 	leaseTTL := s.leaseTTL
+	if fn != nil {
+		s.jobWG.Add(1)
+	}
 	s.mu.Unlock()
 	if fn == nil {
 		return OutcomeFailed, fmt.Errorf("scheduler: unknown job %q", jobID)
 	}
+	defer s.jobWG.Done()
 	return s.runWithLease(ctx, jobID, fn, leaseTTL)
 }
 
@@ -285,16 +317,15 @@ func (s *Scheduler) JobIDs() []string {
 func (s *Scheduler) makeLeasedRunner(id string, fn Job) func() {
 	return func() {
 		s.mu.Lock()
-		leaseTTL := s.leaseTTL
-		rootCtx := s.rootCtx
-		stopped := s.stopped
-		s.mu.Unlock()
-
-		if stopped {
+		if s.stopped || s.stopping {
+			s.mu.Unlock()
 			return
 		}
-
+		leaseTTL := s.leaseTTL
+		rootCtx := s.rootCtx
 		s.jobWG.Add(1)
+		s.mu.Unlock()
+
 		go s.runLeasedJobTrampoline(rootCtx, id, fn, leaseTTL)
 	}
 }
@@ -426,10 +457,10 @@ func (s *Scheduler) stopObserverDispatcher() {
 		return
 	}
 	close(ch)
-	if s.observerDone != nil {
-		<-s.observerDone
-		s.observerDone = nil
-	}
+	// Observer callbacks are external code and may block forever. Do not let
+	// them hold scheduler/resource shutdown hostage; the channel is detached
+	// so no additional callbacks can be admitted.
+	s.observerDone = nil
 }
 
 func (s *Scheduler) report(id string, outcome Outcome, dur time.Duration, err error) {

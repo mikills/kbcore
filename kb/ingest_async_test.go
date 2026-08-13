@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -180,6 +181,10 @@ func TestDocumentPipelineWorkers(t *testing.T) {
 		src, _ := store.Get(context.Background(), "evt-1")
 		require.Equal(t, EventStatusPending, src.Status)
 		require.Contains(t, src.LastError, "embed failure")
+		failure, findErr := store.FindByCausation(context.Background(), EventWorkerFailed, "evt-1")
+		require.NoError(t, findErr)
+		require.NotNil(t, failure)
+		require.Equal(t, EventStatusDone, failure.Status)
 	})
 
 	t.Run("publish worker promotes media and emits kb.published", func(t *testing.T) {
@@ -240,6 +245,7 @@ func TestDocumentPipelineWorkers(t *testing.T) {
 		child, err := store.FindByCausation(context.Background(), EventKBPublished, "evt-1")
 		require.NoError(t, err)
 		require.NotNil(t, child)
+		require.Equal(t, EventStatusDone, child.Status)
 		require.Equal(t, "evt-1", child.CausationID)
 		var published KBPublishedPayload
 		require.NoError(t, json.Unmarshal(child.Payload, &published))
@@ -311,6 +317,16 @@ type failingDeleteBlobStore struct {
 	deleteErr error
 }
 
+type recordingDeleteBlobStore struct {
+	BlobStore
+	deleted []string
+}
+
+func (s *recordingDeleteBlobStore) Delete(ctx context.Context, key string) error {
+	s.deleted = append(s.deleted, key)
+	return s.BlobStore.Delete(ctx, key)
+}
+
 func (f *failingDeleteBlobStore) Head(ctx context.Context, key string) (*BlobObjectInfo, error) {
 	return f.inner.Head(ctx, key)
 }
@@ -331,6 +347,14 @@ func (f *failingDeleteBlobStore) UploadBytesIfMatch(
 func (f *failingDeleteBlobStore) UploadIfMatch(ctx context.Context, key, src, ver string) (*BlobObjectInfo, error) {
 	return f.inner.UploadIfMatch(ctx, key, src, ver)
 }
+func (f *failingDeleteBlobStore) UploadIfNotExists(ctx context.Context, key, src string) (*BlobObjectInfo, error) {
+	if store, ok := f.inner.(interface {
+		UploadIfNotExists(context.Context, string, string) (*BlobObjectInfo, error)
+	}); ok {
+		return store.UploadIfNotExists(ctx, key, src)
+	}
+	return nil, errors.New("create-only upload unsupported")
+}
 func (f *failingDeleteBlobStore) Delete(ctx context.Context, key string) error {
 	return f.deleteErr
 }
@@ -339,36 +363,7 @@ func (f *failingDeleteBlobStore) List(ctx context.Context, prefix string) ([]Blo
 }
 
 func TestWorkerCommit(t *testing.T) {
-	t.Run("document_upsert_surfaces_delete_errors", func(t *testing.T) {
-		h, _, _ := newAsyncHarness(t, "upsert-commit-err")
-		h.KB().BlobStore = &failingDeleteBlobStore{inner: h.KB().BlobStore, deleteErr: errors.New("s3 throttled")}
-
-		worker := &DocumentUpsertWorker{KB: h.KB(), ID: "upsert"}
-		payload, _ := json.Marshal(
-			DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d1", Text: "hello world"}}, ChunkSize: 32},
-		)
-		event := &KBEvent{
-			EventID:       "evt-1",
-			KBID:          "kb",
-			Kind:          EventDocumentUpsert,
-			Payload:       payload,
-			PayloadSchema: "document.upsert/v1",
-			Status:        EventStatusClaimed,
-			CreatedAt:     time.Now().UTC(),
-		}
-		result, err := worker.Handle(context.Background(), event)
-		require.NoError(t, err)
-		require.NotNil(t, result.Commit)
-		// No file sources, so stagedBlobKeys is empty and Commit is a no-op
-		// regardless of BlobStore state. Manually invoke Delete through the
-		// Commit closure wired by the worker: the closure must now return the
-		// underlying delete error instead of swallowing it. We exercise this
-		// via AppendFileIngest-style staged keys constructed by hand.
-		// Call commit with no staged keys first - should be nil.
-		require.NoError(t, result.Commit(context.Background()))
-	})
-
-	t.Run("media_upload_surfaces_delete_errors", func(t *testing.T) {
+	t.Run("media_upload_surfaces_post_terminal_delete_errors", func(t *testing.T) {
 		h, store, _ := newAsyncHarness(t, "media-commit-err")
 		mediaStore := NewInMemoryMediaStore()
 		h.KB().MediaStore = mediaStore
@@ -414,14 +409,73 @@ func TestWorkerCommit(t *testing.T) {
 		}
 		result, err := worker.Handle(context.Background(), event)
 		require.NoError(t, err)
-		require.NotNil(t, result.Commit)
-		err = result.Commit(context.Background())
-		require.Error(t, err, "commit must not swallow non-NotFound blob delete errors")
-		require.Contains(t, err.Error(), "permission denied")
+		require.Len(t, result.FollowUps, 2)
+		require.Equal(t, EventMediaUploaded, result.FollowUps[0].Kind)
+		require.Equal(t, EventStatusDone, result.FollowUps[0].Status)
+		require.Equal(t, EventStagingCleanup, result.FollowUps[1].Kind)
+		require.Nil(t, result.Commit)
+		require.Nil(t, result.AfterTerminal)
 	})
 }
 
 func TestFileIngest(t *testing.T) {
+	t.Run("idempotent retry does not restage or overwrite", func(t *testing.T) {
+		h, _, _ := newAsyncHarness(t, "file-ingest-idempotent")
+		input := func(body string) FileIngestInput {
+			return FileIngestInput{KBID: "kb", Files: []FileIngestUpload{{
+				FileID: "file", Filename: "doc.txt", ContentType: "text/plain", Body: strings.NewReader(body),
+			}}}
+		}
+		firstID, _, err := h.KB().AppendFileIngestDetailed(
+			context.Background(), input("original"), 0, "same-key", "corr-1",
+		)
+		require.NoError(t, err)
+		secondID, _, err := h.KB().AppendFileIngestDetailed(
+			context.Background(), input("replacement"), 0, "same-key", "corr-2",
+		)
+		require.NoError(t, err)
+		require.Equal(t, firstID, secondID)
+		objects, err := h.KB().BlobStore.List(context.Background(), "kbs/kb/media-staging")
+		require.NoError(t, err)
+		require.Len(t, objects, 1)
+		data, err := h.KB().BlobStore.DownloadBytes(context.Background(), objects[0].Key)
+		require.NoError(t, err)
+		require.Equal(t, "original", string(data))
+	})
+
+	t.Run("terminal failure deletes every staged source", func(t *testing.T) {
+		h, _, _ := newAsyncHarness(t, "file-ingest-terminal-cleanup")
+		recording := &recordingDeleteBlobStore{BlobStore: h.KB().BlobStore}
+		h.KB().BlobStore = recording
+		h.KB().MediaStore = nil
+
+		payload, err := json.Marshal(DocumentUpsertPayload{
+			KBID: "kb",
+			FileSources: []FileIngestSource{{
+				FileID:        "f1",
+				DocumentID:    "d1",
+				StagedBlobKey: "staging/f1",
+			}},
+		})
+		require.NoError(t, err)
+		event := &KBEvent{
+			EventID:     "evt-terminal",
+			KBID:        "kb",
+			Kind:        EventDocumentUpsert,
+			Payload:     payload,
+			Status:      EventStatusClaimed,
+			Attempt:     3,
+			MaxAttempts: 3,
+		}
+
+		result, err := (&DocumentUpsertWorker{KB: h.KB(), ID: "upsert"}).Handle(context.Background(), event)
+		require.ErrorContains(t, err, "no ingestible files")
+		require.Empty(t, recording.deleted, "handler must not delete before the event is terminal")
+		require.NotNil(t, result.AfterTerminal)
+		require.NoError(t, result.AfterTerminal(context.Background()))
+		require.Equal(t, []string{"staging/f1"}, recording.deleted)
+	})
+
 	t.Run("validates_input", func(t *testing.T) {
 		t.Run("rejects empty input", func(t *testing.T) {
 			h, _, _ := newAsyncHarness(t, "file-ingest-empty")
@@ -547,7 +601,7 @@ func TestOperationStages(t *testing.T) {
 					Kind:           EventDocumentChunked,
 					IdempotencyKey: "k-mid",
 					CausationID:    "src-1",
-					Status:         EventStatusPending,
+					Status:         EventStatusDead,
 					CreatedAt:      time.Now().UTC().Add(time.Millisecond),
 				},
 			),
@@ -572,7 +626,7 @@ func TestOperationStages(t *testing.T) {
 					Payload:       failurePayload,
 					PayloadSchema: "worker.failed/v1",
 					CausationID:   "mid-1",
-					Status:        EventStatusPending,
+					Status:        EventStatusDone,
 					CreatedAt:     time.Now().UTC().Add(2 * time.Millisecond),
 				},
 			),

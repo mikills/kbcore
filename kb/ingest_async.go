@@ -75,6 +75,10 @@ type KBPublishedPayload struct {
 }
 
 // WorkerFailedPayload is the payload carried by worker.failed events.
+type StagingCleanupPayload struct {
+	Keys []string `json:"keys"`
+}
+
 type WorkerFailedPayload struct {
 	Stage         string             `json:"stage"`
 	SourceEventID string             `json:"source_event_id"`
@@ -149,17 +153,36 @@ func (l *KB) newChildPendingEvent(
 	schema, idempotencyKey string,
 	payload []byte,
 ) KBEvent {
-	return l.newPendingEvent(
-		pendingEventInput{
-			kind:           kind,
-			kbID:           parent.KBID,
-			schema:         schema,
-			correlationID:  parent.CorrelationID,
-			causationID:    parent.EventID,
-			idempotencyKey: idempotencyKey,
-			payload:        payload,
-		},
-	)
+	return l.newChildEvent(parent, kind, schema, idempotencyKey, payload, EventStatusPending)
+}
+
+func (l *KB) newChildDoneEvent(
+	parent *KBEvent,
+	kind EventKind,
+	schema, idempotencyKey string,
+	payload []byte,
+) KBEvent {
+	return l.newChildEvent(parent, kind, schema, idempotencyKey, payload, EventStatusDone)
+}
+
+func (l *KB) newChildEvent(
+	parent *KBEvent,
+	kind EventKind,
+	schema, idempotencyKey string,
+	payload []byte,
+	status EventStatus,
+) KBEvent {
+	event := l.newPendingEvent(pendingEventInput{
+		kind:           kind,
+		kbID:           parent.KBID,
+		schema:         schema,
+		correlationID:  parent.CorrelationID,
+		causationID:    parent.EventID,
+		idempotencyKey: idempotencyKey,
+		payload:        payload,
+	})
+	event.Status = status
+	return event
 }
 
 // NewULIDLike on *KB uses the KB's Clock. Prefer this over the package-level
@@ -178,19 +201,31 @@ func (l *KB) AppendDocumentUpsertDetailed(
 	p DocumentUpsertPayload,
 	idempotencyKey, correlationID string,
 ) (string, string, error) {
+	eventID, effectiveKey, _, err := l.appendDocumentUpsertDetailed(ctx, p, idempotencyKey, correlationID)
+	return eventID, effectiveKey, err
+}
+
+// appendDocumentUpsertDetailed additionally reports whether this call created
+// the event. File ingest uses that distinction to reclaim request-local staged
+// blobs when a concurrent idempotent submission wins the append race.
+func (l *KB) appendDocumentUpsertDetailed(
+	ctx context.Context,
+	p DocumentUpsertPayload,
+	idempotencyKey, correlationID string,
+) (string, string, bool, error) {
 	if l.EventStore == nil {
-		return "", "", errors.New("ingest: EventStore not configured")
+		return "", "", false, errors.New("ingest: EventStore not configured")
 	}
 	payload, err := json.Marshal(p)
 	if err != nil {
-		return "", "", fmt.Errorf("marshal payload: %w", err)
+		return "", "", false, fmt.Errorf("marshal payload: %w", err)
 	}
 	idempotencyKey, correlationID = l.ensureEventKeys(idempotencyKey, correlationID)
 	if err := l.validateDocumentUpsertRequest(ctx, p); err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if err := l.ValidateDocumentReferences(ctx, p.KBID, p.Documents); err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	event := l.newRootPendingEvent(
 		pendingEventInput{
@@ -227,11 +262,12 @@ func (l *KB) appendDocumentUpsertEvent(
 	event KBEvent,
 	kbID string,
 	idempotencyKey string,
-) (string, string, error) {
+) (string, string, bool, error) {
 	if err := l.EventStore.Append(ctx, event); err != nil {
-		return l.handleDocumentUpsertAppendError(ctx, err, kbID, idempotencyKey)
+		existingID, effectiveKey, handleErr := l.handleDocumentUpsertAppendError(ctx, err, kbID, idempotencyKey)
+		return existingID, effectiveKey, false, handleErr
 	}
-	return event.EventID, idempotencyKey, nil
+	return event.EventID, idempotencyKey, true, nil
 }
 
 func (l *KB) handleDocumentUpsertAppendError(
@@ -268,7 +304,7 @@ type OperationStageSnapshot struct {
 }
 
 func (l *KB) FindOperationTerminal(ctx context.Context, sourceEventID string) (*KBEvent, error) {
-	for _, kind := range []EventKind{EventKBPublished, EventMediaUploaded, EventWorkerFailed} {
+	for _, kind := range []EventKind{EventKBPublished, EventMediaUploaded} {
 		ev, err := l.findOperationEvent(ctx, sourceEventID, kind)
 		if err != nil {
 			return nil, err
@@ -277,10 +313,40 @@ func (l *KB) FindOperationTerminal(ctx context.Context, sourceEventID string) (*
 			return ev, nil
 		}
 	}
+	stages, err := l.OperationStages(ctx, sourceEventID)
+	if err != nil {
+		return nil, err
+	}
+	for i := len(stages) - 1; i >= 0; i-- {
+		if stages[i].Event.Status != EventStatusDead {
+			continue
+		}
+		if stages[i].Failure != nil {
+			return stages[i].Failure, nil
+		}
+		// Fail notification persistence is best-effort relative to the Dead
+		// transition. Synthesize a stable terminal view from the source so a
+		// timestamp tie or transient notification failure cannot hide it.
+		payload, _ := json.Marshal(WorkerFailedPayload{
+			Stage: string(stages[i].Event.Kind), SourceEventID: stages[i].Event.EventID,
+			Attempt: stages[i].Event.Attempt, Error: stages[i].Event.LastError, WillRetry: false,
+		})
+		return &KBEvent{
+			EventID: stages[i].Event.EventID + "|terminal-failure", KBID: stages[i].Event.KBID,
+			Kind: EventWorkerFailed, Payload: payload, PayloadSchema: "worker.failed/v1",
+			CorrelationID: stages[i].Event.CorrelationID, CausationID: stages[i].Event.EventID,
+			Status: EventStatusDone, CreatedAt: stages[i].Event.CreatedAt,
+		}, nil
+	}
 	return nil, nil
 }
 
 const operationStageCapacity = 1 << 2
+
+func workerFailureWillRetry(payload []byte) bool {
+	var failure WorkerFailedPayload
+	return json.Unmarshal(payload, &failure) == nil && failure.WillRetry
+}
 
 func (l *KB) OperationStages(ctx context.Context, sourceEventID string) ([]OperationStageSnapshot, error) {
 	if l.EventStore == nil {
@@ -300,6 +366,9 @@ func (l *KB) OperationStages(ctx context.Context, sourceEventID string) ([]Opera
 		failure, err := l.EventStore.FindByCausation(ctx, EventWorkerFailed, current.EventID)
 		if err != nil {
 			return nil, err
+		}
+		if current.Status != EventStatusDead || (failure != nil && workerFailureWillRetry(failure.Payload)) {
+			failure = nil
 		}
 		stages = append(stages, OperationStageSnapshot{Event: current, Failure: failure})
 		next, err := l.nextOperationStage(ctx, current)

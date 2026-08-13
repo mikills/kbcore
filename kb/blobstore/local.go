@@ -16,8 +16,7 @@ import (
 type LocalBlobStore struct {
 	Root string
 
-	mu       sync.Mutex
-	keyLocks map[string]*sync.Mutex
+	keyLocks [256]sync.Mutex
 }
 
 func (l *LocalBlobStore) DownloadBytes(ctx context.Context, key string) ([]byte, error) {
@@ -156,6 +155,51 @@ func (l *LocalBlobStore) UploadIfMatch(
 	return &ObjectInfo{Key: key, Version: srcHash, UpdatedAt: info.ModTime().UTC(), Size: info.Size()}, nil
 }
 
+// UploadIfNotExists atomically creates key and rejects an existing object.
+func (l *LocalBlobStore) UploadIfNotExists(ctx context.Context, key, src string) (*ObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	keyLock := l.lockForKey(key)
+	keyLock.Lock()
+	defer keyLock.Unlock()
+
+	dest := filepath.Join(l.Root, key)
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return nil, err
+	}
+	srcHash, err := FileContentSHA256(ctx, src)
+	if err != nil {
+		return nil, err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return nil, err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return nil, fmt.Errorf("%w: object already exists at %s", ErrVersionMismatch, key)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dest)
+		return nil, err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dest)
+		return nil, err
+	}
+	info, err := os.Stat(dest)
+	if err != nil {
+		return nil, err
+	}
+	return &ObjectInfo{Key: key, Version: srcHash, UpdatedAt: info.ModTime().UTC(), Size: info.Size()}, nil
+}
+
 func (l *LocalBlobStore) checkUploadVersion(ctx context.Context, key string, expectedVersion string) error {
 	if expectedVersion == "" {
 		return nil
@@ -170,23 +214,15 @@ func (l *LocalBlobStore) checkUploadVersion(ctx context.Context, key string, exp
 	return nil
 }
 
-// lockForKey returns a per-key mutex for serializing uploads to the same blob.
-// The map grows proportionally to distinct blob keys, which are bounded by
-// KB manifest/shard paths (not user-generated), so unbounded growth is not a concern.
+// lockForKey uses fixed striping to serialize writes to the same key without
+// retaining attacker- or workload-controlled blob keys for the process lifetime.
 func (l *LocalBlobStore) lockForKey(key string) *sync.Mutex {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.keyLocks == nil {
-		l.keyLocks = make(map[string]*sync.Mutex)
+	var hash uint32 = 2166136261
+	for i := 0; i < len(key); i++ {
+		hash ^= uint32(key[i])
+		hash *= 16777619
 	}
-
-	if m, ok := l.keyLocks[key]; ok {
-		return m
-	}
-
-	m := &sync.Mutex{}
-	l.keyLocks[key] = m
-	return m
+	return &l.keyLocks[hash%uint32(len(l.keyLocks))]
 }
 
 func (l *LocalBlobStore) Delete(ctx context.Context, key string) error {
@@ -197,6 +233,10 @@ func (l *LocalBlobStore) Delete(ctx context.Context, key string) error {
 	if key == "" {
 		return nil
 	}
+
+	keyLock := l.lockForKey(key)
+	keyLock.Lock()
+	defer keyLock.Unlock()
 
 	path := filepath.Join(l.Root, key)
 	err := os.Remove(path)

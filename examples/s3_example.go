@@ -39,6 +39,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer func() {
+		if err := artifactFormat.Close(); err != nil {
+			log.Printf("close DuckDB format: %v", err)
+		}
+	}()
 
 	if err := knowledgeBase.RegisterFormat(artifactFormat); err != nil {
 		log.Fatal(err)
