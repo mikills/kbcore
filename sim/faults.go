@@ -106,6 +106,23 @@ func (s *FaultableBlobStore) UploadIfMatch(
 	return s.inner.UploadIfMatch(ctx, key, src, expectedVersion)
 }
 
+func (s *FaultableBlobStore) UploadIfNotExists(
+	ctx context.Context,
+	key string,
+	src string,
+) (*kb.BlobObjectInfo, error) {
+	if s.rollFault(func(f BlobFaults) float64 { return f.UploadFailRate }) {
+		return nil, ErrInjected
+	}
+	store, ok := s.inner.(interface {
+		UploadIfNotExists(context.Context, string, string) (*kb.BlobObjectInfo, error)
+	})
+	if !ok {
+		return nil, errors.New("create-only upload unsupported")
+	}
+	return store.UploadIfNotExists(ctx, key, src)
+}
+
 func (s *FaultableBlobStore) Delete(ctx context.Context, key string) error {
 	if s.rollFault(func(f BlobFaults) float64 { return f.DeleteFailRate }) {
 		return ErrInjected

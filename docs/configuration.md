@@ -91,6 +91,26 @@ Queries run against local shard files, so a shard not yet in `dir` is fetched
 from the blob store on first touch (a cold `GET` in S3 mode). `warm_shards` pays
 that cost up front at startup instead of on the first query per shard.
 
+For a small always-on server, set finite cache limits rather than accepting the
+unbounded disk-cache defaults. A conservative 1 GB VPS profile is:
+
+```yaml
+storage:
+  cache:
+    max_bytes: 268435456 # 256 MiB
+    entry_ttl: 30m
+format:
+  duckdb:
+    memory_limit: 64MB
+sharding:
+  query_shard_fanout: 2
+  query_shard_fanout_adaptive_max: 2
+  query_shard_parallelism: 1
+```
+
+Set `GOMEMLIMIT` in the service environment as an additional Go-heap guard.
+It does not include DuckDB native memory, so retain an OS/cgroup memory limit.
+
 ### `format`
 
 | Field                  | Type   | Default         | Notes                              |
@@ -254,12 +274,12 @@ startup to prevent silent cross-store corruption.
 
 | Field             | Type         | Default | Notes                                   |
 | ----------------- | ------------ | ------- | --------------------------------------- |
-| `enabled`         | bool         | `false` | Set to `true` in production deployments.|
-| `tick_interval`   | duration     | -       | Required when `enabled: true`.          |
+| `enabled`         | bool         | `true`  | Runs retention, reaper, shard-GC, and media maintenance jobs. Disable only for short-lived tests or specialized deployments. |
+| `tick_interval`   | duration     | `1m`    | Scheduler wake-up cadence.              |
 | `disabled_jobs`   | list[string] | `[]`    | Job IDs to skip registration for.       |
 
-When `scheduler.enabled: true`, `tick_interval` must be set explicitly;
-startup fails fast if it is missing.
+Keeping the scheduler enabled is important for long-running local deployments:
+it bounds completed event and inbox retention and requeues interrupted work.
 
 ### `workers`
 
@@ -348,7 +368,9 @@ discovering tools that always error.
 | `default_sync_timeout` | duration     | `30s`               | Default wait for sync indexing. |
 | `max_sync_timeout`     | duration     | `2m`                | Upper bound for caller-requested sync indexing waits. |
 | `http_json_response`   | bool         | `false`             | Prefer JSON responses over SSE where the SDK supports it. |
-| `http_stateless`       | bool         | `false`             | Runs HTTP MCP requests without retained sessions. |
+| `http_stateless`       | bool         | `true`              | Runs HTTP MCP requests without retained sessions. Set `false` only when session state is required. |
+| `http_session_timeout` | duration     | `30m`               | Closes inactive stateful HTTP sessions so crashed/disconnected clients cannot accumulate memory and goroutines. |
+| `http_max_sessions`    | int          | `128`               | Hard active-session admission limit when `http_stateless: false`. |
 
 Stdio mode is launched with:
 
@@ -370,6 +392,8 @@ mcp:
   allow_sync_indexing: true
   allow_admin: true
   allow_destructive: false
+  http_session_timeout: 30m
+  http_max_sessions: 128
 ```
 
 Destructive tools (`minnow_delete_knowledge_base`, `minnow_delete_media`,

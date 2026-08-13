@@ -34,7 +34,7 @@ type QueryResult struct {
 type Document struct {
 	ID        string
 	Text      string
-	Embedding []float32      // if non-empty, skips the embedder
+	Embedding []float32 // if non-empty, skips the embedder
 	MediaIDs  []string
 	MediaRefs []ChunkMediaRef
 	Metadata  map[string]any
@@ -83,9 +83,9 @@ type KB struct {
 	defaultFormatKind string
 	initErr           error
 
-	mu      sync.Mutex
-	locks   map[string]*sync.Mutex
-	shardGC []delayedShardGCEntry
+	mu          sync.Mutex
+	lockStripes [256]sync.Mutex
+	shardGC     []delayedShardGCEntry
 }
 
 type KBOption func(*KB)
@@ -202,7 +202,6 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 		ShardingPolicy:    NormalizeShardingPolicy(ShardingPolicy{}),
 		Clock:             RealClock,
 		formatRegistry:    make(map[string]ArtifactFormat),
-		locks:             make(map[string]*sync.Mutex),
 		shardMetrics:      metrics.NewShardRegistry(),
 	}
 
@@ -303,13 +302,14 @@ func (l *KB) SetGraphBuilder(builder *GraphBuilder) {
 }
 
 func (l *KB) LockFor(kbID string) *sync.Mutex {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if _, ok := l.locks[kbID]; !ok {
-		l.locks[kbID] = &sync.Mutex{}
+	// Fixed lock striping keeps per-KB serialization without retaining one
+	// mutex for every KB identifier ever observed by a long-running server.
+	var hash uint32 = 2166136261
+	for i := 0; i < len(kbID); i++ {
+		hash ^= uint32(kbID[i])
+		hash *= 16777619
 	}
-	return l.locks[kbID]
+	return &l.lockStripes[hash%uint32(len(l.lockStripes))]
 }
 
 func (l *KB) EvictCacheIfNeeded(ctx context.Context, protectKBID string) error {

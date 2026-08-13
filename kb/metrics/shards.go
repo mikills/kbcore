@@ -41,6 +41,7 @@ func (r *ShardRegistry) RecordCount(kbID string, shardCount int) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	kbID = boundedMetricsKey(r.byKB, kbID)
 	m := r.byKB[kbID]
 	m.ShardCount = shardCount
 	r.byKB[kbID] = m
@@ -55,6 +56,7 @@ func (r *ShardRegistry) RecordFanout(kbID string, fanout int, capped bool) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	kbID = boundedMetricsKey(r.byKB, kbID)
 	m := r.byKB[kbID]
 	m.FanoutUsedTotal += uint64(fanout)
 	if capped {
@@ -72,6 +74,7 @@ func (r *ShardRegistry) RecordExecution(kbID string, shardCount int) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	kbID = boundedMetricsKey(r.byKB, kbID)
 	m := r.byKB[kbID]
 	m.ShardExecTotal += uint64(shardCount)
 	r.byKB[kbID] = m
@@ -83,6 +86,7 @@ func (r *ShardRegistry) RecordExecutionFailure(kbID string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	kbID = boundedMetricsKey(r.byKB, kbID)
 	m := r.byKB[kbID]
 	m.ShardExecFailuresTotal++
 	r.byKB[kbID] = m
@@ -94,6 +98,7 @@ func (r *ShardRegistry) RecordCompaction(kbID string, duration time.Duration, pe
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	kbID = boundedMetricsKey(r.byKB, kbID)
 	m := r.byKB[kbID]
 	if err != nil {
 		m.CompactionFailuresTotal++
@@ -112,6 +117,7 @@ func (r *ShardRegistry) RecordManifestCASConflict(kbID string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	kbID = boundedMetricsKey(r.byKB, kbID)
 	m := r.byKB[kbID]
 	m.ManifestCASConflicts++
 	r.byKB[kbID] = m
@@ -123,6 +129,7 @@ func (r *ShardRegistry) RecordCacheAccess(kbID string, hit bool) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	kbID = boundedMetricsKey(r.byKB, kbID)
 	m := r.byKB[kbID]
 	if hit {
 		m.ShardCacheHitsTotal++

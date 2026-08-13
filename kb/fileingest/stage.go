@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"strings"
+	"time"
 
 	"github.com/mikills/minnow/kb/blobstore"
 	"github.com/mikills/minnow/kb/media"
@@ -19,6 +20,10 @@ type Store interface {
 	UploadIfMatch(ctx context.Context, key string, src string, expectedVersion string) (*blobstore.ObjectInfo, error)
 	Download(ctx context.Context, key string, dest string) error
 	Delete(ctx context.Context, key string) error
+}
+
+type createOnlyStore interface {
+	UploadIfNotExists(ctx context.Context, key string, src string) (*blobstore.ObjectInfo, error)
 }
 
 type Upload struct {
@@ -85,7 +90,11 @@ func ValidateInput(store Store, fileCount int, documentCount int) error {
 
 func StageUploads(ctx context.Context, input StageInput) ([]StagedUpload, func(), error) {
 	staged := make([]StagedUpload, 0, len(input.Files))
-	cleanupAll := func() { CleanupStagedUploads(ctx, staged) }
+	cleanupAll := func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		CleanupStagedUploads(cleanupCtx, staged)
+	}
 	for i, file := range input.Files {
 		s, err := StageUpload(ctx, input, file, i)
 		if err != nil {
@@ -128,8 +137,17 @@ func StageUpload(ctx context.Context, input StageInput, file Upload, index int) 
 	if documentID == "" {
 		documentID = GenerateDocumentID(cleanName)
 	}
-	stagedBlobKey := input.StagingBlobKey(input.KBID, fileID, cleanName)
-	if _, err := input.Store.UploadIfMatch(ctx, stagedBlobKey, tmp.Path(), ""); err != nil {
+	// The generated media ID makes each request's staging path unique, so an
+	// idempotent retry can never overwrite bytes referenced by an older event.
+	stagedBlobKey := input.StagingBlobKey(input.KBID, mediaID, cleanName)
+	createOnly, ok := input.Store.(createOnlyStore)
+	if !ok {
+		tmp.Cleanup()
+		return StagedUpload{}, errors.New("ingest: blob store does not support create-only staging uploads")
+	}
+	_, uploadErr := createOnly.UploadIfNotExists(ctx, stagedBlobKey, tmp.Path())
+	if uploadErr != nil {
+		err := uploadErr
 		tmp.Cleanup()
 		return StagedUpload{}, fmt.Errorf("ingest: stage file upload: %w", err)
 	}

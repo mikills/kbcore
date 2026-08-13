@@ -1,8 +1,10 @@
 package metrics
 
 import (
+	"hash/fnv"
 	"maps"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -114,7 +116,11 @@ func (NoopApp) Snapshot() MetricsSnapshot {
 	return MetricsSnapshot{}
 }
 
-const RecentCapacity = 200
+const (
+	RecentCapacity          = 200
+	MetricsCardinalityLimit = 1024
+	metricsOverflowKey      = "_other"
+)
 
 // in-memory implementation: records metrics into local maps and a ring buffer of recent requests.
 type InMemApp struct {
@@ -169,6 +175,7 @@ func (m *InMemApp) RecordRequest(method, path string, status int, latencyMS int6
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	key = boundedMetricsKey(m.routeStats, key)
 	v := m.routeStats[key]
 	v.Count++
 	if status >= 400 {
@@ -203,6 +210,7 @@ func (m *InMemApp) RecordEmbed(kbID string, latencyMS int64, err error) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	kbID = boundedMetricsKey(m.embedStats, kbID)
 	v := m.embedStats[kbID]
 	v.Count++
 	if err != nil {
@@ -229,6 +237,7 @@ func (m *InMemApp) RecordQuery(kbID string, latencyMS int64, resultCount int, to
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	kbID = boundedMetricsKey(m.queryStats, kbID)
 	v := m.queryStats[kbID]
 	v.Count++
 	if err != nil {
@@ -260,6 +269,7 @@ func (m *InMemApp) RecordIngest(kbID string, latencyMS int64, docCount int, chun
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	kbID = boundedMetricsKey(m.ingestStats, kbID)
 	v := m.ingestStats[kbID]
 	v.Count++
 	if err != nil {
@@ -284,6 +294,7 @@ func (m *InMemApp) RecordWorkerTick(kind, workerID, outcome string, latencyMS in
 	key := kind + "|" + outcome
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	key = boundedMetricsKey(m.workerStats, key)
 	v := m.workerStats[key]
 	v.Count++
 	v.LatencySumMS += latencyMS
@@ -301,6 +312,7 @@ func (m *InMemApp) RecordMediaUpload(kbID, contentType string, sizeBytes int64, 
 	key := kbID + "|" + normalizeContentType(contentType)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	key = boundedMetricsKey(m.mediaUploadStats, key)
 	v := m.mediaUploadStats[key]
 	v.Count++
 	if err != nil {
@@ -314,6 +326,28 @@ func (m *InMemApp) RecordMediaUpload(kbID, contentType string, sizeBytes int64, 
 // down to a fixed allowlist so metric keys cannot be used as a cardinality
 // attack vector. Charset / boundary parameters after "." are stripped before
 // matching.
+func boundedMetricsKey[V any](values map[string]V, key string) string {
+	key = compactMetricsKey(key)
+	if _, exists := values[key]; exists {
+		return key
+	}
+	if len(values) < MetricsCardinalityLimit-1 {
+		return key
+	}
+	return metricsOverflowKey
+}
+
+func compactMetricsKey(key string) string {
+	const maxKeyBytes = 256
+	if len(key) <= maxKeyBytes {
+		return key
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(key))
+	suffix := "~" + strconv.FormatUint(hash.Sum64(), 16)
+	return key[:maxKeyBytes-len(suffix)] + suffix
+}
+
 func normalizeContentType(ct string) string {
 	ct = strings.SplitN(strings.TrimSpace(ct), ";", 2)[0]
 	ct = strings.ToLower(strings.TrimSpace(ct))

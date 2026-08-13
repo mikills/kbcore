@@ -142,9 +142,31 @@ type MongoCollectionsConfig struct {
 
 // SchedulerConfig configures the periodic-jobs scheduler.
 type SchedulerConfig struct {
-	Enabled      bool      `yaml:"enabled"                 json:"enabled"`
+	Enabled      bool      `yaml:"-" json:"enabled"`
 	TickInterval *Duration `yaml:"tick_interval,omitempty" json:"tick_interval,omitempty"`
 	DisabledJobs []string  `yaml:"disabled_jobs"           json:"disabled_jobs"`
+	enabledSet   bool
+}
+
+func (c *SchedulerConfig) UnmarshalYAML(node *yaml.Node) error {
+	if err := rejectUnknownYAMLFields(node, "enabled", "tick_interval", "disabled_jobs"); err != nil {
+		return err
+	}
+	var raw struct {
+		Enabled      *bool     `yaml:"enabled"`
+		TickInterval *Duration `yaml:"tick_interval,omitempty"`
+		DisabledJobs []string  `yaml:"disabled_jobs"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	c.TickInterval = raw.TickInterval
+	c.DisabledJobs = raw.DisabledJobs
+	if raw.Enabled != nil {
+		c.Enabled = *raw.Enabled
+		c.enabledSet = true
+	}
+	return nil
 }
 
 // WorkersConfig configures per-worker-pool sizing and timeouts.
@@ -230,7 +252,10 @@ type MCPConfig struct {
 	DefaultSyncTimeout Duration `yaml:"default_sync_timeout" json:"default_sync_timeout"`
 	MaxSyncTimeout     Duration `yaml:"max_sync_timeout"     json:"max_sync_timeout"`
 	HTTPJSONResponse   bool     `yaml:"http_json_response"   json:"http_json_response"`
-	HTTPStateless      bool     `yaml:"http_stateless"       json:"http_stateless"`
+	HTTPStateless      bool     `yaml:"-" json:"http_stateless"`
+	HTTPSessionTimeout Duration `yaml:"http_session_timeout" json:"http_session_timeout"`
+	HTTPMaxSessions    int      `yaml:"http_max_sessions" json:"http_max_sessions"`
+	httpStatelessSet   bool
 }
 
 // Duration is a time.Duration that unmarshals from a YAML string like "5s"
@@ -241,6 +266,47 @@ type Duration time.Duration
 func (d Duration) AsDuration() time.Duration { return time.Duration(d) }
 
 // UnmarshalYAML parses a duration string with a line-number-aware error.
+func (c *MCPConfig) UnmarshalYAML(node *yaml.Node) error {
+	if err := rejectUnknownYAMLFields(node,
+		"enabled", "transports", "http_path", "read_only", "allow_indexing",
+		"allow_sync_indexing", "allow_destructive", "allow_admin",
+		"default_sync_timeout", "max_sync_timeout", "http_json_response",
+		"http_stateless", "http_session_timeout", "http_max_sessions"); err != nil {
+		return err
+	}
+	type plain MCPConfig
+	var raw struct {
+		plain         `yaml:",inline"`
+		HTTPStateless *bool `yaml:"http_stateless"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	*c = MCPConfig(raw.plain)
+	if raw.HTTPStateless != nil {
+		c.HTTPStateless = *raw.HTTPStateless
+		c.httpStatelessSet = true
+	}
+	return nil
+}
+
+func rejectUnknownYAMLFields(node *yaml.Node, allowed ...string) error {
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	known := make(map[string]struct{}, len(allowed))
+	for _, field := range allowed {
+		known[field] = struct{}{}
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i]
+		if _, ok := known[key.Value]; !ok {
+			return fmt.Errorf("line %d: field %s not found", key.Line, key.Value)
+		}
+	}
+	return nil
+}
+
 func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	var s string
 	if err := node.Decode(&s); err != nil {
@@ -259,12 +325,10 @@ func (d Duration) MarshalYAML() (any, error) {
 	return time.Duration(d).String(), nil
 }
 
-// applyDefaults fills in defaults for any non-pointer field the YAML left
-// unset. Pointer fields (HTTP timeouts, scheduler tick, cache evict
-// interval, graph parallelism) are intentionally NOT touched here so the
-// validator can distinguish "operator wrote 0 explicitly" from "operator
-// omitted the key". Helper accessors below resolve those pointers (or fall
-// back to defaults) at call time.
+// applyDefaults fills in defaults for fields the YAML left unset. Duration
+// pointers remain untouched so validation can distinguish an explicit zero
+// from omission. Scheduler and MCP mode booleans are tri-state pointers so
+// omission can safely default maintenance and stateless HTTP on.
 //
 // Called by Load after strict decoding, before validation.
 func (c *Config) applyDefaults() {
@@ -274,6 +338,7 @@ func (c *Config) applyDefaults() {
 	c.applyEmbedderDefaults()
 	c.applyGraphDefaults()
 	c.applyMongoDefaults()
+	c.applySchedulerDefaults()
 	c.applyWorkerDefaults()
 	c.applyMediaDefaults()
 	c.applyCodeIndexDefaults()
@@ -370,6 +435,12 @@ func (c *Config) applyMongoDefaults() {
 	}
 	if c.Mongo.Collections.Media == "" {
 		c.Mongo.Collections.Media = "media"
+	}
+}
+
+func (c *Config) applySchedulerDefaults() {
+	if !c.Scheduler.enabledSet {
+		c.Scheduler.Enabled = true
 	}
 }
 
@@ -539,5 +610,14 @@ func (c *Config) applyMCPDefaults() {
 	}
 	if c.MCP.MaxSyncTimeout == 0 {
 		c.MCP.MaxSyncTimeout = Duration(2 * time.Minute)
+	}
+	if c.MCP.HTTPSessionTimeout == 0 {
+		c.MCP.HTTPSessionTimeout = Duration(30 * time.Minute)
+	}
+	if c.MCP.HTTPMaxSessions == 0 {
+		c.MCP.HTTPMaxSessions = 128
+	}
+	if !c.MCP.httpStatelessSet {
+		c.MCP.HTTPStateless = true
 	}
 }

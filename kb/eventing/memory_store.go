@@ -133,6 +133,10 @@ func (s *InMemoryStore) Ack(_ context.Context, eventID string) error {
 	}
 	e.Status = EventStatusDone
 	e.LastError = ""
+	// Acked events have already produced their follow-up event, so their often
+	// large document/embedding payload is no longer needed. Keep the envelope
+	// for operation lineage and idempotency while releasing the bulk data.
+	e.Payload = nil
 	return nil
 }
 
@@ -158,6 +162,9 @@ func (s *InMemoryStore) Fail(_ context.Context, eventID string, observedAttempt 
 	}
 	if e.Attempt >= max {
 		e.Status = EventStatusDead
+		// The companion worker.failed event retains the diagnostic details;
+		// release the source document/embedding payload at terminal failure.
+		e.Payload = nil
 		return nil
 	}
 	e.Status = EventStatusPending
@@ -328,7 +335,7 @@ func (s *InMemoryStore) Cleanup(_ context.Context, olderThan time.Time) (int, er
 	return removed, nil
 }
 
-// FindByCausation returns the first event of the given kind whose
+// FindByCausation returns the latest event of the given kind whose
 // CausationID equals sourceEventID, or nil when none exists.
 func (s *InMemoryStore) FindByCausation(
 	_ context.Context,
@@ -337,17 +344,18 @@ func (s *InMemoryStore) FindByCausation(
 ) (*Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var oldest *Event
+	var latest *Event
 	for _, e := range s.events {
 		if e.Kind != kind || e.CausationID != sourceEventID {
 			continue
 		}
-		if oldest == nil || e.CreatedAt.Before(oldest.CreatedAt) {
+		if latest == nil || e.CreatedAt.After(latest.CreatedAt) ||
+			(e.CreatedAt.Equal(latest.CreatedAt) && e.EventID > latest.EventID) {
 			cp := *e
-			oldest = &cp
+			latest = &cp
 		}
 	}
-	return oldest, nil
+	return latest, nil
 }
 
 // InTransaction serializes fn against other store operations via txMu so the

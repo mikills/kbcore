@@ -17,6 +17,13 @@ func TestArtifactFormatRegistration(t *testing.T) {
 		require.False(t, kb.HasFormat())
 	})
 
+	t.Run("close drains registered closers", func(t *testing.T) {
+		format := &stubArtifactFormat{kind: "mock"}
+		loader := NewKB(&LocalBlobStore{Root: t.TempDir()}, t.TempDir(), WithArtifactFormat(format))
+		loader.Close()
+		require.True(t, format.closed)
+	})
+
 	t.Run("search uses registered artifact format", func(t *testing.T) {
 		format := &stubArtifactFormat{kind: "mock", resultID: "from-a"}
 		kb := NewKB(&LocalBlobStore{Root: t.TempDir()}, t.TempDir(), WithArtifactFormat(format))
@@ -36,6 +43,12 @@ func TestArtifactFormatRegistration(t *testing.T) {
 type stubArtifactFormat struct {
 	kind     string
 	resultID string
+	closed   bool
+}
+
+func (f *stubArtifactFormat) Close() error {
+	f.closed = true
+	return nil
 }
 
 func (f *stubArtifactFormat) Kind() string    { return f.kind }

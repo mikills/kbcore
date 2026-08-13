@@ -222,7 +222,10 @@ func (s *MongoStore) Claim(
 func (s *MongoStore) Ack(ctx context.Context, eventID string) error {
 	res, err := s.Collection.UpdateOne(ctx,
 		bson.M{mongoKeyID: eventID},
-		bson.M{"$set": bson.M{mongoKeyStatus: string(EventStatusDone), "last_error": ""}},
+		bson.M{
+			"$set":   bson.M{mongoKeyStatus: string(EventStatusDone), "last_error": ""},
+			"$unset": bson.M{"payload": ""},
+		},
 	)
 	if err != nil {
 		return err
@@ -277,6 +280,16 @@ func (s *MongoStore) Fail(ctx context.Context, eventID string, observedAttempt i
 						nil,
 					},
 				},
+				"payload": bson.M{
+					"$cond": bson.A{
+						bson.M{"$gte": bson.A{
+							"$attempt",
+							bson.M{"$ifNull": bson.A{"$max_attempts", DefaultEventMaxAttempts}},
+						}},
+						"$$REMOVE",
+						"$payload",
+					},
+				},
 			},
 		},
 	}
@@ -323,10 +336,10 @@ func (s *MongoStore) Requeue(ctx context.Context, now time.Time) (int, error) {
 	return int(res.ModifiedCount), nil
 }
 
-// FindByCausation returns the first event of the given kind whose
+// FindByCausation returns the latest event of the given kind whose
 // CausationID equals sourceEventID, or nil when none exists.
 func (s *MongoStore) FindByCausation(ctx context.Context, kind EventKind, sourceEventID string) (*Event, error) {
-	opts := options.FindOne().SetSort(bson.D{{Key: mongoKeyCreated, Value: 1}})
+	opts := options.FindOne().SetSort(bson.D{{Key: mongoKeyCreated, Value: -1}, {Key: mongoKeyID, Value: -1}})
 	var doc mongoEventDoc
 	err := s.Collection.FindOne(ctx,
 		bson.M{mongoKeyKind: string(kind), "causation_id": sourceEventID},

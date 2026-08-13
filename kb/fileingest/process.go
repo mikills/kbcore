@@ -59,6 +59,9 @@ func (p Processor) Normalize(
 	mediaIDs := CollectMediaIDs(sourceDocs)
 	stagedBlobKeys := make([]string, 0, len(sources))
 	for _, src := range sources {
+		// Every staged source must be reclaimed after this attempt reaches a
+		// terminal outcome, including files that fail extraction.
+		stagedBlobKeys = append(stagedBlobKeys, src.StagedBlobKey)
 		extracted, err := p.ExtractFileSource(ctx, kbID, src)
 		if err != nil {
 			results = append(results, FailedResult(src, err))
@@ -66,7 +69,6 @@ func (p Processor) Normalize(
 		}
 		results = append(results, extracted.Result)
 		mediaIDs = append(mediaIDs, src.MediaID)
-		stagedBlobKeys = append(stagedBlobKeys, src.StagedBlobKey)
 		chunkedDocs = append(chunkedDocs, extracted.Documents...)
 	}
 	if len(chunkedDocs) == 0 && len(sources) > 0 {

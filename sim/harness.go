@@ -155,7 +155,9 @@ func harnessGraphBuilder(loader *kb.KB) func() *kb.GraphBuilder {
 }
 
 func (h *Harness) close() {
-	h.format.Close()
+	if err := h.format.Close(); err != nil {
+		h.t.Errorf("close DuckDB format: %v", err)
+	}
 }
 
 // Seed returns the RNG seed this harness was constructed with. Useful in
@@ -320,6 +322,11 @@ func (h *Harness) RecordManifestVersion(kbID string) {
 // query to re-download shards from the blob store. Mimics a hostile eviction
 // or a pod-restart with an ephemeral cache volume.
 func (h *Harness) WipeCache() error {
+	// Close pooled handles before unlinking their files so disk blocks and
+	// database/sql goroutines are released immediately.
+	if err := h.format.Close(); err != nil {
+		return err
+	}
 	entries, err := osReadDir(h.cacheDir)
 	if err != nil {
 		return err
@@ -329,9 +336,6 @@ func (h *Harness) WipeCache() error {
 			return err
 		}
 	}
-	// Close any pooled shard connections so the in-DuckDB cache is also
-	// dropped. otherwise the next query can hit a stale file handle.
-	h.format.Close()
 	return nil
 }
 

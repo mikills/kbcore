@@ -6,15 +6,78 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/mcpserver"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAppStopClosesStatefulMCPSessions(t *testing.T) {
+	loader := kb.NewKB(&kb.LocalBlobStore{Root: t.TempDir()}, t.TempDir())
+	app := NewApp(loader, AppConfig{
+		Address: "127.0.0.1:0",
+		MCP: mcpserver.Config{
+			Enabled:      true,
+			HTTPEnabled:  true,
+			HTTPPath:     "/mcp",
+			HTTPStateful: true,
+		},
+	})
+	require.NoError(t, app.Start())
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v0"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint: "http://" + app.Address() + "/mcp",
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, app.mcpHandlers, 1)
+	require.Equal(t, 1, app.mcpHandlers[0].ActiveSessions())
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, app.Stop(stopCtx))
+	require.Zero(t, app.mcpHandlers[0].ActiveSessions())
+	_ = session.Close()
+}
+
+func TestRemoteClientIPIgnoresUntrustedForwardingHeaders(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "http://example.test", nil)
+	require.NoError(t, err)
+	req.RemoteAddr = "192.0.2.10:4321"
+	req.Header.Set("X-Forwarded-For", strings.Repeat("a", 10000))
+	req.Header.Set("X-Real-IP", "203.0.113.99")
+	require.Equal(t, "192.0.2.10", remoteClientIP(req))
+
+	req.RemoteAddr = "127.0.0.1:4321"
+	req.Header.Set("X-Real-IP", "203.0.113.99")
+	require.Equal(t, "203.0.113.99", remoteClientIP(req))
+}
+
+func TestIPRateLimiterKeepsCollidingIPsIndependent(t *testing.T) {
+	first, second := "198.51.100.18", "198.51.100.102"
+	require.Equal(t, rateLimitStripeFor(first), rateLimitStripeFor(second))
+	limiter := newIPRateLimiter(0.000001, 1)
+	require.True(t, limiter.Allow(first))
+	require.False(t, limiter.Allow(first))
+	require.True(t, limiter.Allow(second))
+}
+
+func TestAppFileIngestRequiresMediaStore(t *testing.T) {
+	loader := kb.NewKB(
+		&kb.LocalBlobStore{Root: t.TempDir()},
+		t.TempDir(),
+		kb.WithEventStore(kb.NewInMemoryEventStore()),
+	)
+	require.Nil(t, appFileIngestFn(loader))
+
+	loader.MediaStore = kb.NewInMemoryMediaStore()
+	require.NotNil(t, appFileIngestFn(loader))
+}
 
 func newTestApp(t *testing.T, opts ...kb.KBOption) (string, *App) {
 	t.Helper()

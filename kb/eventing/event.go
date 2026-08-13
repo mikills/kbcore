@@ -52,6 +52,8 @@ const (
 
 	// Single failure event shared across all stages.
 	EventWorkerFailed EventKind = "worker.failed"
+	// Durable cleanup work emitted after staged blobs are no longer live inputs.
+	EventStagingCleanup EventKind = "staging.cleanup"
 )
 
 // EventStatus tracks event lifecycle in the outbox.
@@ -191,7 +193,7 @@ var (
 // stores use a multi-document transaction. the in-memory store executes
 // the closure directly and is best-effort.
 //
-// Workers use this to commit the (Reserve inbox → append child events →
+// Workers use this to commit the (append child events → mark inbox →
 // Ack source) sequence atomically after their side-effects have run.
 type TransactionRunner interface {
 	InTransaction(ctx context.Context, fn func(ctx context.Context) error) error

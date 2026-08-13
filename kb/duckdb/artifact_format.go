@@ -128,14 +128,21 @@ func validateShardsShareManifestVersion(manifest *kb.SnapshotShardManifest) erro
 }
 
 // Close drains the shard connection pool.
-func (f *DuckDBArtifactFormat) Close() {
+func (f *DuckDBArtifactFormat) Close() error {
 	f.pool.CloseAll()
+	return nil
 }
 
 // ClosePooledConns closes pooled connections matching the path prefix.
 // Satisfies the PooledConnCloser interface used by cache eviction.
 func (f *DuckDBArtifactFormat) ClosePooledConns(pathPrefix string) {
 	f.pool.CloseByPrefix(pathPrefix)
+}
+
+// BeginPooledConnEviction prevents a query from reopening a shard between
+// pooled-handle closure and cache-file removal.
+func (f *DuckDBArtifactFormat) BeginPooledConnEviction(pathPrefix string) func() {
+	return f.pool.BeginEviction(pathPrefix)
 }
 
 func (f *DuckDBArtifactFormat) Kind() string {
@@ -429,11 +436,7 @@ func (f *DuckDBArtifactFormat) queryGraphSingleShard(
 	shard kb.SnapshotShardMetadata,
 	options kb.ExpansionOptions,
 ) ([]kb.ExpandedResult, error) {
-	localPath, _, err := f.ensureLocalShardFile(ctx, req.KBID, shard)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := f.pool.GetOrOpen(ctx, localPath, f.openConfiguredDB)
+	conn, err := f.openCachedShardConn(ctx, req.KBID, shard)
 	if err != nil {
 		return nil, err
 	}

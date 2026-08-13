@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/mikills/minnow/kb/workerpool"
 )
@@ -57,7 +58,7 @@ func buildWorkerFailedEvent(input workerpool.FailureEventInput) (KBEvent, error)
 		CorrelationID:  input.Event.CorrelationID,
 		CausationID:    input.Event.EventID,
 		IdempotencyKey: fmt.Sprintf("%s|worker.failed|%d", input.Event.EventID, input.Event.Attempt),
-		Status:         EventStatusPending,
+		Status:         EventStatusDone,
 		CreatedAt:      input.Now,
 	}, nil
 }
@@ -161,6 +162,27 @@ func (w *DocumentChunkedWorker) handleGraphExtract(
 	}, nil
 }
 
+type StagingCleanupWorker struct {
+	KB *KB
+	ID string
+}
+
+func (w *StagingCleanupWorker) Kind() EventKind  { return EventStagingCleanup }
+func (w *StagingCleanupWorker) WorkerID() string { return w.ID }
+func (w *StagingCleanupWorker) Handle(ctx context.Context, event *KBEvent) (WorkerResult, error) {
+	var payload StagingCleanupPayload
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return WorkerResult{}, fmt.Errorf("decode staging cleanup: %w", err)
+	}
+	for _, key := range payload.Keys {
+		if err := w.KB.BlobStore.Delete(ctx, key); err != nil &&
+			!errors.Is(err, ErrBlobNotFound) && !errors.Is(err, os.ErrNotExist) {
+			return WorkerResult{}, fmt.Errorf("delete staged blob %q: %w", key, err)
+		}
+	}
+	return WorkerResult{}, nil
+}
+
 type DocumentUpsertWorker struct {
 	KB *KB
 	ID string
@@ -177,21 +199,32 @@ func (w *DocumentUpsertWorker) Handle(ctx context.Context, event *KBEvent) (Work
 	}
 	chunkedDocs := payload.Documents
 	var fileResults []FileIngestResult
-	var stagedBlobKeys []string
+	stagedBlobKeys := make([]string, 0, len(payload.FileSources))
+	for _, source := range payload.FileSources {
+		stagedBlobKeys = append(stagedBlobKeys, source.StagedBlobKey)
+	}
+	fallbackCleanup := w.stagedBlobCleanup(stagedBlobKeys)
 	if payload.PreChunked && len(payload.FileSources) != 0 {
-		return WorkerResult{}, fmt.Errorf("pre-chunked ingest does not accept file sources")
+		return WorkerResult{AfterTerminal: fallbackCleanup}, fmt.Errorf("pre-chunked ingest does not accept file sources")
 	}
 	if !payload.PreChunked {
 		var err error
-		chunkedDocs, fileResults, _, stagedBlobKeys, err = w.normalizeDocuments(
+		var normalizedKeys []string
+		chunkedDocs, fileResults, _, normalizedKeys, err = w.normalizeDocuments(
 			ctx,
 			payload.KBID,
 			payload.Documents,
 			payload.FileSources,
 			payload.ChunkSize,
 		)
+		if len(normalizedKeys) > 0 {
+			stagedBlobKeys = normalizedKeys
+			fallbackCleanup = w.stagedBlobCleanup(stagedBlobKeys)
+		}
 		if err != nil {
-			return WorkerResult{}, err
+			// Keep keys on the source payload through retries; terminal failure
+			// cleanup is handled by the failure path's bounded callback.
+			return WorkerResult{AfterTerminal: fallbackCleanup}, err
 		}
 	}
 	nextPayload, _ := json.Marshal(DocumentChunkedPayload{
@@ -209,21 +242,68 @@ func (w *DocumentUpsertWorker) Handle(ctx context.Context, event *KBEvent) (Work
 		event.EventID+"|document.chunked",
 		nextPayload,
 	)
-	return WorkerResult{FollowUps: []KBEvent{next}, Commit: func(ctx context.Context) error {
-		var firstErr error
-		for _, key := range stagedBlobKeys {
-			err := w.KB.BlobStore.Delete(ctx, key)
-			if err == nil || errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			slog.Default().Warn("ingest: staged blob delete failed",
-				"blob_key", key, logKeyError, err)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("ingest: delete staged blob %q: %w", key, err)
-			}
+	followUps := []KBEvent{next}
+	followUps = append(followUps, w.stagingCleanupEvent(event, stagedBlobKeys)...)
+	return WorkerResult{FollowUps: followUps}, nil
+}
+
+func (w *DocumentUpsertWorker) stagedBlobCleanup(keys []string) func(context.Context) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	return func(ctx context.Context) error { return w.deleteStagedBlobKeys(ctx, keys) }
+}
+
+func (w *DocumentUpsertWorker) stagingCleanupEvent(parent *KBEvent, keys []string) []KBEvent {
+	if len(keys) == 0 {
+		return nil
+	}
+	payload, _ := json.Marshal(StagingCleanupPayload{Keys: append([]string(nil), keys...)})
+	return []KBEvent{w.KB.newChildPendingEvent(
+		parent, EventStagingCleanup, "staging.cleanup/v1", parent.EventID+"|staging.cleanup", payload,
+	)}
+}
+
+func (w *DocumentUpsertWorker) deleteStagedBlobKeys(ctx context.Context, keys []string) error {
+	var firstErr error
+	for _, key := range keys {
+		err := deleteStagedBlobWithRetry(ctx, w.KB.BlobStore, key)
+		if err == nil {
+			continue
 		}
-		return firstErr
-	}}, nil
+		slog.Default().Warn("ingest: staged blob delete failed after retries",
+			"blob_key", key, logKeyError, err)
+		if firstErr == nil {
+			firstErr = fmt.Errorf("ingest: delete staged blob %q: %w", key, err)
+		}
+	}
+	return firstErr
+}
+
+func deleteStagedBlobWithRetry(ctx context.Context, store BlobStore, key string) error {
+	const attempts = 10
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		err = store.Delete(ctx, key)
+		if err == nil || errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if attempt == attempts-1 {
+			break
+		}
+		backoff := time.Duration(attempt+1) * 50 * time.Millisecond
+		if backoff > time.Second {
+			backoff = time.Second
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.Join(ctx.Err(), err)
+		case <-timer.C:
+		}
+	}
+	return err
 }
 
 func successfulFileCount(results []FileIngestResult) int {

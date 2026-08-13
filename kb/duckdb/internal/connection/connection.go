@@ -51,6 +51,10 @@ func Open(ctx context.Context, dbPath string, cfg Config) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Callers serialize each shard DB through shardConn.mu. Keep database/sql
+	// from opening additional native DuckDB connections behind that lock.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	cfg.ExtensionDir = extensionDir
 	cfg.MemoryLimit = memLimit
 	if err := Configure(ctx, db, cfg); err != nil {

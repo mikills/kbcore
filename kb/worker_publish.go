@@ -137,7 +137,7 @@ func (w *DocumentPublishWorker) publishedResult(event *KBEvent, work publishWork
 			SourceEventID: work.sourceEventID,
 		},
 	)
-	pub := w.KB.newChildPendingEvent(
+	pub := w.KB.newChildDoneEvent(
 		event,
 		EventKBPublished,
 		"kb.published/v1",

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -260,6 +261,55 @@ func (s *S3BlobStore) putObjectIfMatch(
 		version = *result.ETag
 	}
 	return &ObjectInfo{Key: key, Version: version, UpdatedAt: s.now(), Size: size}, nil
+}
+
+// UploadIfNotExists uploads a file only if the key does not already exist.
+func (s *S3BlobStore) UploadIfNotExists(ctx context.Context, key, src string) (*ObjectInfo, error) {
+	const maxConflictAttempts = 4
+	var lastErr error
+	for attempt := 0; attempt < maxConflictAttempts; attempt++ {
+		file, err := os.Open(src)
+		if err != nil {
+			return nil, fmt.Errorf("open source file: %w", err)
+		}
+		info, statErr := file.Stat()
+		if statErr != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("stat source file: %w", statErr)
+		}
+		result, putErr := s.Client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(s.Bucket), Key: aws.String(s.fullKey(key)),
+			Body: file, IfNoneMatch: aws.String("*"),
+		})
+		closeErr := file.Close()
+		if putErr == nil {
+			if closeErr != nil {
+				return nil, closeErr
+			}
+			return &ObjectInfo{Key: key, Version: aws.ToString(result.ETag), UpdatedAt: s.now(), Size: info.Size()}, nil
+		}
+		var responseErr *smithyhttp.ResponseError
+		if errors.As(putErr, &responseErr) {
+			switch responseErr.HTTPStatusCode() {
+			case http.StatusPreconditionFailed:
+				return nil, fmt.Errorf("%w: object already exists at %s", ErrVersionMismatch, key)
+			case http.StatusConflict:
+				lastErr = putErr
+				if attempt+1 < maxConflictAttempts {
+					timer := time.NewTimer(time.Duration(attempt+1) * 25 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						timer.Stop()
+						return nil, ctx.Err()
+					case <-timer.C:
+					}
+					continue
+				}
+			}
+		}
+		return nil, fmt.Errorf("put object %s: %w", key, putErr)
+	}
+	return nil, fmt.Errorf("put object %s after conditional conflicts: %w", key, lastErr)
 }
 
 // UploadBytesIfNotExists writes data only if the key does not already exist

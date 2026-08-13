@@ -42,7 +42,9 @@ func TestInMemoryEventStore(t *testing.T) {
 	t.Run("claim then ack moves event through pending -> claimed -> done", func(t *testing.T) {
 		s := NewInMemoryStore()
 		ctx := context.Background()
-		require.NoError(t, s.Append(ctx, mkEvent("e1", "kb1", EventDocumentChunked, "k1")))
+		firstEvent := mkEvent("e1", "kb1", EventDocumentChunked, "k1")
+		firstEvent.Payload = []byte("large transient payload")
+		require.NoError(t, s.Append(ctx, firstEvent))
 		require.NoError(t, s.Append(ctx, mkEvent("e2", "kb1", EventDocumentChunked, "k2")))
 
 		first, err := s.Claim(ctx, EventDocumentChunked, "worker-1", time.Minute)
@@ -55,6 +57,7 @@ func TestInMemoryEventStore(t *testing.T) {
 		got, err := s.Get(ctx, first.EventID)
 		require.NoError(t, err)
 		require.Equal(t, EventStatusDone, got.Status)
+		require.Empty(t, got.Payload, "acked payload should be released")
 
 		second, err := s.Claim(ctx, EventDocumentChunked, "worker-1", time.Minute)
 		require.NoError(t, err)
@@ -69,6 +72,7 @@ func TestInMemoryEventStore(t *testing.T) {
 		ctx := context.Background()
 		ev := mkEvent("e1", "kb1", EventDocumentEmbedded, "k")
 		ev.MaxAttempts = 3
+		ev.Payload = []byte("large failed payload")
 		require.NoError(t, s.Append(ctx, ev))
 
 		for attempt := 1; attempt <= 3; attempt++ {
@@ -82,6 +86,7 @@ func TestInMemoryEventStore(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, EventStatusDead, got.Status)
 		require.Equal(t, "bang", got.LastError)
+		require.Empty(t, got.Payload, "dead event payload should be released")
 	})
 
 	t.Run("reaper returns expired claims to pending", func(t *testing.T) {

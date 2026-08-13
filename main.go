@@ -21,7 +21,7 @@ import (
 
 var backgroundContext = context.Background()
 
-const version = "v0.2.1"
+const version = "v0.2.2"
 
 func main() {
 	logger := newLogger(os.Getenv("MINNOW_LOG_FORMAT"))
@@ -180,16 +180,25 @@ func runServer(baseCtx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("start runtime: %w", err)
 	}
 
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.HTTPShutdownTimeout())
-		defer cancel()
-		if err := rt.Stop(shutdownCtx); err != nil {
-			logger.Warn("runtime stop failed", "error", err)
-		}
-	}()
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- rt.Wait() }()
 
-	return rt.Wait()
+	var serveErr error
+	select {
+	case serveErr = <-waitCh:
+	case <-ctx.Done():
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.HTTPShutdownTimeout())
+	defer cancel()
+	stopErr := rt.Stop(shutdownCtx)
+	if serveErr == nil {
+		select {
+		case serveErr = <-waitCh:
+		case <-shutdownCtx.Done():
+			serveErr = shutdownCtx.Err()
+		}
+	}
+	return errors.Join(serveErr, stopErr)
 }
 
 // runConfigSubcommand implements the `minnow config ...` CLI. Today the only

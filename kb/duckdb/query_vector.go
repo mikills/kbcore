@@ -2,9 +2,12 @@ package duckdb
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
+	"time"
 
 	kb "github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/kb/duckdb/internal/shardcache"
@@ -430,16 +433,41 @@ func (f *DuckDBArtifactFormat) openCachedShardConn(
 	kbID string,
 	shard kb.SnapshotShardMetadata,
 ) (*shardConn, error) {
-	localPath, hit, err := f.ensureLocalShardFile(ctx, kbID, shard)
-	if err != nil {
-		return nil, fmt.Errorf("ensure shard file %s: %w", shard.ShardID, err)
+	for ensureAttempts := 0; ; ensureAttempts++ {
+		localPath, hit, err := f.ensureLocalShardFile(ctx, kbID, shard)
+		if err != nil {
+			// Cache eviction can remove the directory while a cold shard is being
+			// materialized. Retry filesystem races; permanent blob/checksum errors
+			// are returned immediately.
+			if errors.Is(err, os.ErrNotExist) && ensureAttempts < 3 {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(10 * time.Millisecond):
+					continue
+				}
+			}
+			return nil, fmt.Errorf("ensure shard file %s: %w", shard.ShardID, err)
+		}
+		f.deps.Metrics.RecordShardCacheAccess(kbID, hit)
+		conn, err := f.pool.GetOrOpen(ctx, localPath, func(ctx context.Context, path string) (*sql.DB, error) {
+			if _, statErr := os.Stat(path); statErr != nil {
+				return nil, statErr
+			}
+			return f.openConfiguredDB(ctx, path)
+		})
+		if !errors.Is(err, errShardConnPoolEvicting) && !errors.Is(err, os.ErrNotExist) {
+			if err != nil {
+				return nil, fmt.Errorf("open shard %s: %w", shard.ShardID, err)
+			}
+			return conn, nil
+		}
+		if err := f.pool.waitForEviction(ctx, localPath); err != nil {
+			return nil, err
+		}
+		// The evictor may have removed the file after the first ensure. Loop so
+		// the shard cache can materialize it again before opening DuckDB.
 	}
-	f.deps.Metrics.RecordShardCacheAccess(kbID, hit)
-	conn, err := f.pool.GetOrOpen(ctx, localPath, f.openConfiguredDB)
-	if err != nil {
-		return nil, fmt.Errorf("open shard %s: %w", shard.ShardID, err)
-	}
-	return conn, nil
 }
 
 func (f *DuckDBArtifactFormat) ensureLocalShardFile(

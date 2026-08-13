@@ -17,6 +17,19 @@ func TestSourceText(t *testing.T) {
 	require.Equal(t, []Page{{Number: 1, Text: "hello"}}, pages)
 }
 
+func TestNormalizeReturnsEveryStagedKeyOnFailure(t *testing.T) {
+	source := Source{FileID: "f1", DocumentID: "d1", StagedBlobKey: "staging/f1"}
+	_, results, _, stagedKeys, err := (Processor{}).Normalize(
+		context.Background(),
+		"kb",
+		nil,
+		[]Source{source},
+	)
+	require.Error(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, []string{"staging/f1"}, stagedKeys)
+}
+
 func TestSourceTextEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "doc.txt")
 	require.NoError(t, os.WriteFile(path, []byte(" "), 0o644))

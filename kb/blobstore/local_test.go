@@ -15,6 +15,7 @@ import (
 func TestBlobLocal(t *testing.T) {
 	t.Run("upload_if_match", testBlobLocalUploadIfMatch)
 	t.Run("upload_if_match_concurrent", testBlobLocalUploadIfMatchConcurrent)
+	t.Run("upload_if_not_exists_cross_instance", testBlobLocalUploadIfNotExistsCrossInstance)
 	t.Run("delete", testBlobLocalDelete)
 	t.Run("list", testBlobLocalList)
 }
@@ -95,6 +96,45 @@ func testBlobLocalUploadIfMatchConcurrent(t *testing.T) {
 	}
 	require.Equal(t, 1, successCount)
 	require.Equal(t, 1, conflictCount)
+}
+
+func testBlobLocalUploadIfNotExistsCrossInstance(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	srcDir := t.TempDir()
+	first := &LocalBlobStore{Root: root}
+	second := &LocalBlobStore{Root: root}
+	srcA := filepath.Join(srcDir, "a")
+	srcB := filepath.Join(srcDir, "b")
+	require.NoError(t, os.WriteFile(srcA, []byte("a"), 0o644))
+	require.NoError(t, os.WriteFile(srcB, []byte("b"), 0o644))
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	go func() {
+		<-start
+		_, err := first.UploadIfNotExists(ctx, "staging/object", srcA)
+		errs <- err
+	}()
+	go func() {
+		<-start
+		_, err := second.UploadIfNotExists(ctx, "staging/object", srcB)
+		errs <- err
+	}()
+	close(start)
+	var successes, conflicts int
+	for range 2 {
+		err := <-errs
+		if err == nil {
+			successes++
+		} else if errors.Is(err, ErrVersionMismatch) {
+			conflicts++
+		} else {
+			require.NoError(t, err)
+		}
+	}
+	require.Equal(t, 1, successes)
+	require.Equal(t, 1, conflicts)
 }
 
 func testBlobLocalDelete(t *testing.T) {

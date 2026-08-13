@@ -15,6 +15,18 @@ func TestAppMetricsInMem(t *testing.T) {
 	t.Run("snapshot_returns_copies", testAppMetricsSnapshotCopies)
 	t.Run("concurrent_record", testAppMetricsConcurrentRecord)
 	t.Run("recent_ring_buffer_wraps", testAppMetricsRecentRingBufferWraps)
+	t.Run("cardinality_is_bounded", testAppMetricsCardinalityBounded)
+}
+
+func testAppMetricsCardinalityBounded(t *testing.T) {
+	m := NewInMemApp()
+	for i := 0; i < MetricsCardinalityLimit+100; i++ {
+		m.RecordQuery(fmt.Sprintf("kb-%d", i), 1, 1, 0, nil)
+	}
+
+	snapshot := m.Snapshot()
+	require.Len(t, snapshot.QueryStats, MetricsCardinalityLimit)
+	require.Equal(t, int64(101), snapshot.QueryStats[metricsOverflowKey].Count)
 }
 
 func testAppMetricsRecordRequest(t *testing.T) {
