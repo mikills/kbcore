@@ -4,6 +4,9 @@ This deploys one always-running x86-64 Minnow Machine with a persistent Fly
 Volume. Fly Proxy terminates HTTPS, and an in-Machine Caddy process requires a
 static bearer token on every route except `/healthz`.
 
+The default Ashburn deployment is estimated at approximately **$12.89/month**
+before embeddings and variable usage. See [deployment pricing](../pricing.md).
+
 ## Deploy
 
 From the repository root:
