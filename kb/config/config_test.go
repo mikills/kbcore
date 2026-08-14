@@ -11,6 +11,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPathsOverlapCanonicalFilesystemIdentity(t *testing.T) {
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.True(t, pathsOverlap("state", filepath.Join(cwd, "state")))
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "state"), 0o700))
+	require.NoError(t, os.Symlink(filepath.Join(dir, "state"), filepath.Join(dir, "alias")))
+	require.True(t, pathsOverlap(filepath.Join(dir, "state"), filepath.Join(dir, "alias")))
+}
+
 func TestLoad(t *testing.T) {
 	t.Run("minimal file uses schema defaults", func(t *testing.T) {
 		cfg, err := Load("testdata/minimal.yaml")
@@ -64,6 +74,116 @@ func TestLoad(t *testing.T) {
 		require.EqualValues(t, 67108864, *cfg.Sharding.ShardTriggerBytes)
 		require.NotNil(t, cfg.Sharding.CompactionEnabled)
 		require.True(t, *cfg.Sharding.CompactionEnabled)
+	})
+
+	t.Run("tiered storage applies safe defaults and resolves journal path", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "minnow.yaml")
+		body := `
+storage:
+  blob:
+    kind: tiered
+    s3:
+      bucket: minnow-test
+    tiered:
+      durability: local_journal
+      journal:
+        dir: state/journal
+  cache:
+    dir: state/cache
+embedder:
+  provider: local
+  local:
+    dim: 16
+`
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		cfg, err := Load(path)
+		require.NoError(t, err)
+		require.Equal(t, "tiered", cfg.Storage.Blob.Kind)
+		require.Equal(t, "us-east-1", cfg.Storage.Blob.S3.Region)
+		require.Equal(t, "local_journal", cfg.Storage.Blob.Tiered.Durability)
+		require.Equal(t, "local", cfg.Storage.Blob.Tiered.Journal.Kind)
+		require.Equal(t, filepath.Join(dir, "state/journal"), cfg.Storage.Blob.Tiered.Journal.Dir)
+		require.Equal(t, 10000, cfg.Storage.Blob.Tiered.Journal.MaxPendingEntries)
+		require.EqualValues(t, 1073741824, cfg.Storage.Blob.Tiered.Journal.MaxPendingBytes)
+		require.EqualValues(t, 268435456, cfg.Storage.Blob.Tiered.Journal.MinFreeBytes)
+		require.Equal(t, 20, cfg.Storage.Blob.Tiered.Replication.MaxAttempts)
+	})
+
+	t.Run("cache watermarks default low threshold and validate hysteresis", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "minnow.yaml")
+		body := `
+storage:
+  cache:
+    high_watermark_percent: 80
+    min_free_bytes: 1073741824
+embedder:
+  provider: local
+  local:
+    dim: 16
+`
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		cfg, err := Load(path)
+		require.NoError(t, err)
+		require.Equal(t, 80, cfg.Storage.Cache.HighWatermarkPercent)
+		require.Equal(t, 70, cfg.Storage.Cache.LowWatermarkPercent)
+
+		invalid := strings.Replace(body, "high_watermark_percent: 80", "high_watermark_percent: 80\n    low_watermark_percent: 90", 1)
+		require.NoError(t, os.WriteFile(path, []byte(invalid), 0o600))
+		_, err = Load(path)
+		require.ErrorContains(t, err, "low_watermark_percent must be less")
+	})
+
+	t.Run("tiered storage rejects cache-journal symlink aliases", func(t *testing.T) {
+		dir := t.TempDir()
+		realState := filepath.Join(dir, "state")
+		require.NoError(t, os.MkdirAll(realState, 0o700))
+		cacheAlias := filepath.Join(dir, "cache-alias")
+		require.NoError(t, os.Symlink(realState, cacheAlias))
+		path := filepath.Join(dir, "minnow.yaml")
+		body := `
+storage:
+  blob:
+    kind: tiered
+    s3:
+      bucket: minnow-test
+    tiered:
+      journal:
+        dir: state
+  cache:
+    dir: cache-alias
+embedder:
+  provider: local
+  local:
+    dim: 16
+`
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		_, err := Load(path)
+		require.ErrorContains(t, err, "journal.dir must not equal")
+	})
+
+	t.Run("tiered storage rejects unsafe or incomplete configuration", func(t *testing.T) {
+		base := `
+storage:
+  blob:
+    kind: tiered
+    s3:
+      bucket: minnow-test
+    tiered:
+      durability: remote
+      journal:
+        dir: state
+  cache:
+    dir: state
+embedder:
+  provider: local
+  local:
+    dim: 16
+`
+		path := filepath.Join(t.TempDir(), "minnow.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(base), 0o600))
+		_, err := Load(path)
+		require.ErrorContains(t, err, "journal.dir must not equal")
 	})
 
 	t.Run("rejects misspelled nested lifecycle keys", func(t *testing.T) {

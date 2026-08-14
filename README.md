@@ -65,7 +65,7 @@ The default config at `./minnow.yaml` is sufficient for local development (embed
 - Vector and graph RAG over your corpus, exposed at `/rag/query` and `/rag/ingest`.
 - Code indexing for coding agents: the separate `codeindex` CLI indexes the current repo (30+ file types; symbol-aware chunking for Go, JS/TS, Python, and Rust) through Minnow, with optional git hooks to keep it fresh.
 - Per-tenant isolation through knowledge bases. Each one has its own manifest, shards, and HNSW indexes.
-- Two storage modes: local disk for always-hot workloads, S3-backed for SaaS with a long-tail distribution of cold tenants.
+- Local, S3-backed, and [tiered storage](examples/minnow.tiered.yaml): tiered mode combines a per-shard SSD warm cache, a replaceable persistent local replication journal, and an S3 cold store.
 - Event-driven ingest pipeline with at-least-once delivery, durable operation lineage, and retry semantics.
 
 ## Deployment

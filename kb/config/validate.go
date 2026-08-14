@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -145,8 +147,10 @@ func (c *Config) validateStorage() error {
 		blobErr = requireNonEmptyString("storage.blob.root", c.Storage.Blob.Root)
 	case "s3":
 		blobErr = c.validateS3BlobConfig()
+	case "tiered":
+		blobErr = c.validateTieredBlobConfig()
 	default:
-		return fmt.Errorf("storage.blob.kind %q is not supported (want \"local\" or \"s3\")", c.Storage.Blob.Kind)
+		return fmt.Errorf("storage.blob.kind %q is not supported (want \"local\", \"s3\", or \"tiered\")", c.Storage.Blob.Kind)
 	}
 	return firstErr(
 		blobErr,
@@ -154,13 +158,30 @@ func (c *Config) validateStorage() error {
 		requireNonNegativeInt64("storage.cache.max_bytes", c.Storage.Cache.MaxBytes, 0),
 		requireNonNegativeDurationValue("storage.cache.entry_ttl", c.Storage.Cache.EntryTTL, "0 disables the TTL"),
 		requirePositiveDuration("storage.cache.evict_interval", c.Storage.Cache.EvictInterval),
+		validateCacheWatermarks(c.Storage.Cache),
 	)
+}
+
+func validateCacheWatermarks(cache CacheConfig) error {
+	if cache.HighWatermarkPercent == 1 || cache.HighWatermarkPercent < 0 || cache.HighWatermarkPercent >= 100 {
+		return errors.New("storage.cache.high_watermark_percent must be between 2 and 99, or 0 to disable")
+	}
+	if cache.LowWatermarkPercent < 0 || cache.LowWatermarkPercent >= 100 {
+		return errors.New("storage.cache.low_watermark_percent must be between 1 and 99, or 0 when high watermark is disabled")
+	}
+	if cache.HighWatermarkPercent == 0 && cache.LowWatermarkPercent != 0 {
+		return errors.New("storage.cache.low_watermark_percent requires high_watermark_percent")
+	}
+	if cache.HighWatermarkPercent > 0 && cache.LowWatermarkPercent >= cache.HighWatermarkPercent {
+		return errors.New("storage.cache.low_watermark_percent must be less than high_watermark_percent")
+	}
+	return requireNonNegativeInt64("storage.cache.min_free_bytes", cache.MinFreeBytes, 0)
 }
 
 func (c *Config) validateS3BlobConfig() error {
 	s3 := c.Storage.Blob.S3
 	if s3 == nil {
-		return fmt.Errorf("storage.blob.s3 is required when kind is \"s3\"")
+		return fmt.Errorf("storage.blob.s3 is required when kind is \"s3\" or \"tiered\"")
 	}
 	if (s3.AccessKeyID == "") != (s3.SecretAccessKey == "") {
 		return fmt.Errorf("storage.blob.s3: access_key_id and secret_access_key must both be set or both be empty")
@@ -173,6 +194,105 @@ func (c *Config) validateS3BlobConfig() error {
 		requireNonEmptyString("storage.blob.s3.bucket", s3.Bucket),
 		endpointErr,
 	)
+}
+
+func (c *Config) validateTieredBlobConfig() error {
+	if err := c.validateS3BlobConfig(); err != nil {
+		return err
+	}
+	tiered := c.Storage.Blob.Tiered
+	if tiered == nil {
+		return errors.New("storage.blob.tiered is required when kind is \"tiered\"")
+	}
+	if tiered.Durability != "remote" && tiered.Durability != "local_journal" {
+		return fmt.Errorf("storage.blob.tiered.durability %q is not supported (want \"remote\" or \"local_journal\")", tiered.Durability)
+	}
+	if tiered.Journal.Kind != "local" {
+		return fmt.Errorf("storage.blob.tiered.journal.kind %q is not supported by the standalone runtime (want \"local\")", tiered.Journal.Kind)
+	}
+	if pathsOverlap(tiered.Journal.Dir, c.Storage.Cache.Dir) {
+		return errors.New("storage.blob.tiered.journal.dir must not equal, contain, or be contained by storage.cache.dir because cache data is evictable")
+	}
+	return firstErr(
+		requireNonEmptyString("storage.blob.tiered.journal.dir", tiered.Journal.Dir),
+		requirePositiveInt("storage.blob.tiered.journal.max_pending_entries", tiered.Journal.MaxPendingEntries),
+		requirePositiveInt64("storage.blob.tiered.journal.max_pending_bytes", tiered.Journal.MaxPendingBytes),
+		requirePositiveInt64("storage.blob.tiered.journal.min_free_bytes", tiered.Journal.MinFreeBytes),
+		requirePositiveDurationValue("storage.blob.tiered.replication.poll_interval", tiered.Replication.PollInterval),
+		requirePositiveDurationValue("storage.blob.tiered.replication.retry_base", tiered.Replication.RetryBase),
+		requirePositiveDurationValue("storage.blob.tiered.replication.retry_max", tiered.Replication.RetryMax),
+		requirePositiveInt("storage.blob.tiered.replication.max_attempts", tiered.Replication.MaxAttempts),
+		validateRetryRange(tiered.Replication),
+	)
+}
+
+func pathsOverlap(first, second string) bool {
+	if first == "" || second == "" {
+		return false
+	}
+	first = canonicalPath(first)
+	second = canonicalPath(second)
+	if sameFileOrAncestor(first, second) || sameFileOrAncestor(second, first) {
+		return true
+	}
+	for _, pair := range [][2]string{{first, second}, {second, first}} {
+		rel, err := filepath.Rel(pair[0], pair[1])
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameFileOrAncestor(ancestor, path string) bool {
+	ancestorInfo, err := os.Stat(ancestor)
+	if err != nil {
+		return false
+	}
+	for current := path; ; current = filepath.Dir(current) {
+		if info, statErr := os.Stat(current); statErr == nil && os.SameFile(ancestorInfo, info) {
+			return true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+	}
+}
+
+func canonicalPath(path string) string {
+	if absolute, err := filepath.Abs(path); err == nil {
+		path = absolute
+	}
+	path = filepath.Clean(path)
+	current := path
+	var suffix []string
+	for {
+		if _, err := os.Lstat(current); err == nil {
+			resolved, resolveErr := filepath.EvalSymlinks(current)
+			if resolveErr == nil {
+				for index := len(suffix) - 1; index >= 0; index-- {
+					resolved = filepath.Join(resolved, suffix[index])
+				}
+				return filepath.Clean(resolved)
+			}
+			break
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
+	return path
+}
+
+func validateRetryRange(cfg TieredReplicationConfig) error {
+	if cfg.RetryMax.AsDuration() < cfg.RetryBase.AsDuration() {
+		return errors.New("storage.blob.tiered.replication.retry_max must be >= retry_base")
+	}
+	return nil
 }
 
 func (c *Config) validateGraph() error {

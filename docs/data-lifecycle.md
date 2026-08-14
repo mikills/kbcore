@@ -86,7 +86,20 @@ Shard selection:
 
 Selected shards run in parallel (bounded by `query_shard_parallelism`). Results merge globally by ascending distance; ties broken deterministically by ID, content, shard index, local index.
 
-Cache-miss path for a shard: stat the file → SHA-256 → atomic rename into cache.
+Cache-miss path for a shard: stat the file → download from the configured blob
+store → verify size and SHA-256 → atomic rename into cache.
+
+With `storage.blob.kind: tiered`, each mutation first commits its namespace
+change and replication operation to the persistent local journal. The journal
+owns an immutable payload copy before the caller's temporary source can be
+removed. A single worker replays operations to S3 in global sequence, preserving
+shard-before-manifest and manifest-before-delete ordering. In `remote`
+durability mode the caller waits for that replay; in `local_journal` mode the
+operation may be acknowledged while it exists only on the persistent volume.
+Completed journal payloads are removed, and future shard queries use the normal
+SSD query cache backed by a cold S3 GET. The journal holds a non-expiring remote
+prefix claim while work is pending, and sealed query-shard files are evicted
+individually by last access after active DuckDB handles drain.
 
 ## Ingest API Contract
 
