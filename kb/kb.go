@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -53,12 +54,15 @@ type KB struct {
 	Embedder      Embedder
 	GraphBuilder  *GraphBuilder
 
-	WriteLeaseManager WriteLeaseManager
-	WriteLeaseTTL     time.Duration
-	RetryObserver     MutationRetryObserver
-	ShardingPolicy    ShardingPolicy
-	MaxCacheBytes     int64
-	CacheEntryTTL     time.Duration
+	WriteLeaseManager         WriteLeaseManager
+	WriteLeaseTTL             time.Duration
+	RetryObserver             MutationRetryObserver
+	ShardingPolicy            ShardingPolicy
+	MaxCacheBytes             int64
+	CacheEntryTTL             time.Duration
+	CacheHighWatermarkPercent int
+	CacheLowWatermarkPercent  int
+	CacheMinFreeBytes         int64
 
 	Clock Clock
 
@@ -76,6 +80,8 @@ type KB struct {
 	cacheEvictionsSizeTotal  uint64
 	cacheEvictionErrorsTotal uint64
 	cacheBudgetExceededTotal uint64
+	cacheReserveMu           sync.Mutex
+	cacheReservedBytes       int64
 	shardMetrics             *metrics.ShardRegistry
 
 	formatMu          sync.RWMutex
@@ -170,6 +176,14 @@ func WithMaxCacheBytes(max int64) KBOption {
 func WithCacheEntryTTL(ttl time.Duration) KBOption {
 	return func(kb *KB) {
 		kb.CacheEntryTTL = ttl
+	}
+}
+
+func WithCacheWatermarks(highPercent, lowPercent int, minFreeBytes int64) KBOption {
+	return func(kb *KB) {
+		kb.CacheHighWatermarkPercent = highPercent
+		kb.CacheLowWatermarkPercent = lowPercent
+		kb.CacheMinFreeBytes = minFreeBytes
 	}
 }
 
@@ -312,8 +326,35 @@ func (l *KB) LockFor(kbID string) *sync.Mutex {
 	return &l.lockStripes[hash%uint32(len(l.lockStripes))]
 }
 
-func (l *KB) EvictCacheIfNeeded(ctx context.Context, protectKBID string) error {
-	return l.evictCacheIfNeeded(ctx, protectKBID)
+func (l *KB) EvictCacheIfNeeded(ctx context.Context, protectedEntry string) error {
+	return l.evictCacheIfNeeded(ctx, protectedEntry)
+}
+
+func (l *KB) ReserveCache(ctx context.Context, incomingBytes int64) (func(), error) {
+	if incomingBytes <= 0 {
+		return func() {}, nil
+	}
+	l.cacheReserveMu.Lock()
+	if l.cacheReservedBytes > math.MaxInt64-incomingBytes {
+		l.cacheReserveMu.Unlock()
+		return nil, ErrCacheBudgetExceeded
+	}
+	l.cacheReservedBytes += incomingBytes
+	projected := l.cacheReservedBytes
+	l.cacheReserveMu.Unlock()
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			l.cacheReserveMu.Lock()
+			l.cacheReservedBytes -= incomingBytes
+			l.cacheReserveMu.Unlock()
+		})
+	}
+	if err := l.evictCacheProjected(ctx, "", projected); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
 }
 
 func (l *KB) Close() {

@@ -140,6 +140,12 @@ func (c *Config) resolvePaths(baseDir string) error {
 		{"storage.cache.dir", &c.Storage.Cache.Dir},
 		{"format.duckdb.extension_dir", &c.Format.DuckDB.ExtensionDir},
 	}
+	if c.Storage.Blob.Tiered != nil {
+		fields = append(fields, struct {
+			name string
+			p    *string
+		}{"storage.blob.tiered.journal.dir", &c.Storage.Blob.Tiered.Journal.Dir})
+	}
 	for _, f := range fields {
 		if *f.p == "" {
 			continue

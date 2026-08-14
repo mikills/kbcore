@@ -22,6 +22,9 @@ import (
 	appcmd "github.com/mikills/minnow/cmd"
 	"github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/kb/blobstore"
+	"github.com/mikills/minnow/kb/blobstore/journal"
+	"github.com/mikills/minnow/kb/blobstore/localjournal"
+	"github.com/mikills/minnow/kb/blobstore/tiered"
 	"github.com/mikills/minnow/kb/config"
 	kbduckdb "github.com/mikills/minnow/kb/duckdb"
 	"github.com/mikills/minnow/kb/lease"
@@ -37,6 +40,10 @@ type BuildOptions struct {
 	DryRun bool
 	// Logger is used for informational startup logs. If nil, slog.Default().
 	Logger *slog.Logger
+	// ReplicationJournal replaces the built-in persistent local journal for
+	// tiered blob storage. Implementations must satisfy journal.Store's durable
+	// payload-ownership contract. It is opened and closed by Runtime.
+	ReplicationJournal journal.Store
 }
 
 // Runtime is a fully wired but not-yet-started deployment. Call Start to
@@ -53,6 +60,8 @@ type Runtime struct {
 	cleanups          []func(context.Context) error
 	warmCancel        context.CancelFunc
 	warmDone          chan struct{}
+	tieredStore       *tiered.Store
+	customJournal     journal.Store
 	backgroundStarted bool
 	lifecycleMu       sync.Mutex
 	started           bool
@@ -86,7 +95,7 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 		logger = slog.Default()
 	}
 
-	rt := &Runtime{cfg: cfg, logger: logger, dryRun: opts.DryRun}
+	rt := &Runtime{cfg: cfg, logger: logger, dryRun: opts.DryRun, customJournal: opts.ReplicationJournal}
 
 	k, err := rt.buildKB(ctx, cfg)
 	if err != nil {
@@ -134,7 +143,7 @@ func (r *Runtime) cleanupBuildFailure(ctx context.Context) {
 }
 
 func (r *Runtime) buildKB(ctx context.Context, cfg *config.Config) (*kb.KB, error) {
-	blobStore, s3Store, err := buildBlobStore(ctx, cfg)
+	blobStore, s3Store, err := r.buildBlobStore(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -162,6 +171,9 @@ func (r *Runtime) buildKBOptions(ctx context.Context, cfg *config.Config, s3Stor
 	leasePrefix := ""
 	if cfg.Storage.Blob.S3 != nil {
 		leasePrefix = cfg.Storage.Blob.S3.LeasePrefix
+		if cfg.Storage.Blob.Kind == "tiered" {
+			leasePrefix = normalizeLeasePrefix(leasePrefix) + "kb/"
+		}
 	}
 	if leaseOpt := buildLeaseOption(s3Store, leasePrefix, r.logger); leaseOpt != nil {
 		kbOpts = append(kbOpts, leaseOpt)
@@ -181,6 +193,11 @@ func baseKBOptions(cfg *config.Config, embedder kb.Embedder) []kb.KBOption {
 		kb.WithShardingPolicy(cfg.ShardingPolicy()),
 		kb.WithMediaGCConfig(cfg.MediaGCConfig()),
 		kb.WithMediaContentTypeAllowlist(cfg.Media.ContentTypeAllowlist),
+		kb.WithCacheWatermarks(
+			cfg.Storage.Cache.HighWatermarkPercent,
+			cfg.Storage.Cache.LowWatermarkPercent,
+			cfg.Storage.Cache.MinFreeBytes,
+		),
 	}
 }
 
@@ -274,6 +291,7 @@ func (r *Runtime) start(ctx context.Context, withHTTP bool) (err error) {
 		return kb.ErrAlreadyStarted
 	}
 	r.started = true
+	tieredStarted := false
 	if r.cfg.Storage.Blob.Kind == "local" {
 		if err = os.MkdirAll(r.cfg.Storage.Blob.Root, 0o755); err != nil {
 			err = fmt.Errorf("create blob root %q: %w", r.cfg.Storage.Blob.Root, err)
@@ -283,6 +301,18 @@ func (r *Runtime) start(ctx context.Context, withHTTP bool) (err error) {
 		err = os.MkdirAll(r.cfg.Storage.Cache.Dir, 0o755)
 		if err != nil {
 			err = fmt.Errorf("create cache dir %q: %w", r.cfg.Storage.Cache.Dir, err)
+		}
+	}
+	if err == nil && r.tieredStore != nil {
+		err = r.tieredStore.Start(ctx)
+		if err == nil {
+			tieredStarted = true
+			// Revalidate after both directories exist so symlink aliases cannot
+			// place the durable journal under the evictable cache root.
+			err = r.cfg.Validate()
+		}
+		if err != nil {
+			err = fmt.Errorf("start tiered blob store: %w", err)
 		}
 	}
 	if err == nil && r.scheduler != nil {
@@ -316,9 +346,16 @@ func (r *Runtime) start(ctx context.Context, withHTTP bool) (err error) {
 			r.logger.Info("minnow listening", "address", r.app.Address())
 		}
 	}
+	retryableEarlyFailure := err != nil && !tieredStarted && !r.backgroundStarted
+	if retryableEarlyFailure {
+		r.started = false
+	}
 	r.lifecycleMu.Unlock()
 	if err == nil {
 		return nil
+	}
+	if retryableEarlyFailure {
+		return err
 	}
 	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
@@ -429,6 +466,12 @@ func (r *Runtime) Stop(ctx context.Context) error {
 			stopErr = errors.Join(stopErr, ctx.Err())
 		}
 	}
+	if r.tieredStore != nil {
+		r.tieredStore.BeginStop()
+		if err := r.tieredStore.Stop(ctx); err != nil {
+			stopErr = errors.Join(stopErr, fmt.Errorf("stop tiered blob store: %w", err))
+		}
+	}
 	if stopErr == nil && r.kb != nil {
 		r.kb.Close()
 	}
@@ -441,13 +484,43 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	return stopErr
 }
 
-func buildBlobStore(ctx context.Context, cfg *config.Config) (kb.BlobStore, *blobstore.S3BlobStore, error) {
+func (r *Runtime) buildBlobStore(ctx context.Context, cfg *config.Config) (kb.BlobStore, *blobstore.S3BlobStore, error) {
 	switch cfg.Storage.Blob.Kind {
 	case "local":
 		return &kb.LocalBlobStore{Root: cfg.Storage.Blob.Root}, nil, nil
 	case "s3":
 		store, err := newS3BlobStore(ctx, cfg.Storage.Blob.S3)
 		return store, store, err
+	case "tiered":
+		remote, err := newS3BlobStore(ctx, cfg.Storage.Blob.S3)
+		if err != nil {
+			return nil, nil, err
+		}
+		journalStore := r.customJournal
+		if journalStore == nil {
+			jcfg := cfg.Storage.Blob.Tiered.Journal
+			journalStore = localjournal.New(jcfg.Dir, journal.Config{
+				MaxPendingEntries: jcfg.MaxPendingEntries,
+				MaxPendingBytes:   jcfg.MaxPendingBytes,
+				MinFreeBytes:      jcfg.MinFreeBytes,
+			})
+		}
+		tcfg := cfg.Storage.Blob.Tiered
+		ownerPrefix := normalizeLeasePrefix(cfg.Storage.Blob.S3.LeasePrefix)
+		store, err := tiered.New(remote, journalStore, tiered.Config{
+			Durability:    tiered.Durability(tcfg.Durability),
+			PollInterval:  tcfg.Replication.PollInterval.AsDuration(),
+			RetryBase:     tcfg.Replication.RetryBase.AsDuration(),
+			RetryMax:      tcfg.Replication.RetryMax.AsDuration(),
+			MaxAttempts:   tcfg.Replication.MaxAttempts,
+			ControlPrefix: ownerPrefix,
+			OwnerKey:      ownerPrefix + "journal/owner.lock",
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		r.tieredStore = store
+		return store, remote, nil
 	default:
 		return nil, nil, fmt.Errorf("configruntime: blob kind %q not supported", cfg.Storage.Blob.Kind)
 	}
@@ -473,6 +546,17 @@ func newS3BlobStore(ctx context.Context, s3cfg *config.S3BlobConfig) (*blobstore
 		}
 	})
 	return blobstore.NewS3BlobStore(client, s3cfg.Bucket, s3cfg.Prefix), nil
+}
+
+func normalizeLeasePrefix(prefix string) string {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return "leases/"
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	return prefix
 }
 
 func buildLeaseOption(s3Store *blobstore.S3BlobStore, prefix string, logger *slog.Logger) kb.KBOption {

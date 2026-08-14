@@ -42,6 +42,7 @@ type DuckDBArtifactDeps struct {
 	GraphBuilder func() *kb.GraphBuilder
 
 	EvictCacheIfNeeded         func(context.Context, string) error
+	ReserveCache               func(context.Context, int64) (func(), error)
 	LockFor                    func(string) *sync.Mutex
 	AcquireWriteLease          func(ctx context.Context, kbID string) (kb.WriteLeaseManager, *kb.WriteLease, error)
 	EnqueueReplacedShardsForGC func(kbID string, shards []kb.SnapshotShardMetadata, now time.Time)

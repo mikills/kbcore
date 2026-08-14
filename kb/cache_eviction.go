@@ -14,7 +14,14 @@ const defaultCacheEvictionRetryWindow = 150 * time.Millisecond
 
 const defaultCacheEvictionRetryTick = 25 * time.Millisecond
 
-func (l *KB) evictCacheIfNeeded(ctx context.Context, protectKBID string) error {
+func (l *KB) evictCacheIfNeeded(ctx context.Context, protectedEntry string) error {
+	l.cacheReserveMu.Lock()
+	reserved := l.cacheReservedBytes
+	l.cacheReserveMu.Unlock()
+	return l.evictCacheProjected(ctx, protectedEntry, reserved)
+}
+
+func (l *KB) evictCacheProjected(ctx context.Context, protectedEntry string, incomingBytes int64) error {
 	result, budgetExceeded, err := cacheevict.RetryUntilWithinBudget(cacheevict.RetryConfig{
 		Window: defaultCacheEvictionRetryWindow,
 		Tick:   defaultCacheEvictionRetryTick,
@@ -23,7 +30,7 @@ func (l *KB) evictCacheIfNeeded(ctx context.Context, protectKBID string) error {
 			return sleepWithContext(ctx, d)
 		},
 		Sweep: func() cacheevict.SweepResult {
-			result := l.evictCacheSweepOnce(protectKBID)
+			result := l.evictCacheSweepOnce(protectedEntry, incomingBytes)
 			l.recordCacheBytesCurrent(result.CurrentBytes)
 			return result
 		},
@@ -36,25 +43,32 @@ func (l *KB) evictCacheIfNeeded(ctx context.Context, protectKBID string) error {
 	}
 	l.recordCacheBudgetExceeded()
 	return fmt.Errorf(
-		"%w: current_bytes=%d max_bytes=%d protected_kb_count=%d",
+		"%w: current_bytes=%d max_bytes=%d protected_entries=%d",
 		ErrCacheBudgetExceeded,
 		result.CurrentBytes,
 		result.MaxBytes,
-		result.ProtectedKBCount,
+		result.ProtectedEntries,
 	)
 }
 
-func (l *KB) evictCacheSweepOnce(protectKBID string) cacheevict.SweepResult {
+func (l *KB) evictCacheSweepOnce(protectedEntry string, incomingBytes int64) cacheevict.SweepResult {
 	l.mu.Lock()
 	maxBytes := l.MaxCacheBytes
 	entryTTL := l.CacheEntryTTL
+	highWatermark := l.CacheHighWatermarkPercent
+	lowWatermark := l.CacheLowWatermarkPercent
+	minFreeBytes := l.CacheMinFreeBytes
 	l.mu.Unlock()
 	result := cacheevict.Sweep(cacheevict.Config{
-		Root:      l.CacheDir,
-		MaxBytes:  maxBytes,
-		TTL:       entryTTL,
-		Protected: protectedCacheKBIDs(protectKBID),
-		Now:       l.Clock.Now(),
+		Root:                 l.CacheDir,
+		MaxBytes:             maxBytes,
+		TTL:                  entryTTL,
+		HighWatermarkPercent: highWatermark,
+		LowWatermarkPercent:  lowWatermark,
+		MinFreeBytes:         minFreeBytes,
+		IncomingBytes:        incomingBytes,
+		Protected:            protectedCacheEntries(protectedEntry),
+		Now:                  l.Clock.Now(),
 		Remove: func(entry cacheevict.Entry, reason cacheevict.Reason) bool {
 			return l.removeCacheEntry(entry)
 		},
@@ -113,7 +127,7 @@ func removeCacheDir(path string) bool {
 	return os.RemoveAll(path) == nil
 }
 
-func protectedCacheKBIDs(explicitProtect string) map[string]bool {
+func protectedCacheEntries(explicitProtect string) map[string]bool {
 	protected := map[string]bool{}
 	if explicitProtect != "" {
 		protected[explicitProtect] = true
@@ -159,14 +173,20 @@ type CacheEvictionMetricsSnapshot = cacheevict.MetricsSnapshot
 
 func (l *KB) CacheEvictionMetricsSnapshot() CacheEvictionMetricsSnapshot {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	return CacheEvictionMetricsSnapshot{
+	snapshot := CacheEvictionMetricsSnapshot{
 		CacheBytesCurrent:        l.cacheBytesCurrent,
 		CacheEvictionsTTLTotal:   l.cacheEvictionsTTLTotal,
 		CacheEvictionsSizeTotal:  l.cacheEvictionsSizeTotal,
 		CacheEvictionErrorsTotal: l.cacheEvictionErrorsTotal,
 		CacheBudgetExceededTotal: l.cacheBudgetExceededTotal,
 	}
+	cacheDir := l.CacheDir
+	l.mu.Unlock()
+	if usage, err := cacheevict.MeasureDiskUsage(cacheDir); err == nil {
+		snapshot.DiskCapacityBytes = usage.CapacityBytes
+		snapshot.DiskAvailableBytes = usage.AvailableBytes
+	}
+	return snapshot
 }
 
 func (l *KB) CacheEvictionOpenMetricsText() string {
@@ -183,8 +203,19 @@ func NewCacheOpenMetricsHandler(kb *KB) http.Handler {
 			http.Error(w, "kb is nil", http.StatusServiceUnavailable)
 			return
 		}
+		metrics := kb.CacheEvictionOpenMetricsText()
+		if reporter, ok := kb.BlobStore.(interface {
+			ReplicationOpenMetrics(context.Context) (string, error)
+		}); ok {
+			replicationMetrics, err := reporter.ReplicationOpenMetrics(r.Context())
+			if err != nil {
+				http.Error(w, "replication metrics unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			metrics += replicationMetrics
+		}
 		w.Header().Set("Content-Type", "application/openmetrics-text; version=1.0.0; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(kb.CacheEvictionOpenMetricsText()))
+		_, _ = w.Write([]byte(metrics))
 	})
 }

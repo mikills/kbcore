@@ -479,5 +479,6 @@ func (f *DuckDBArtifactFormat) ensureLocalShardFile(
 		CacheDir:           f.deps.CacheDir,
 		BlobStore:          f.deps.BlobStore,
 		EvictCacheIfNeeded: f.deps.EvictCacheIfNeeded,
+		ReserveCache:       f.deps.ReserveCache,
 	}.EnsureLocalFile(ctx, kbID, shard)
 }

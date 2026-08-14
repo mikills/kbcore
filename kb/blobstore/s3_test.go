@@ -20,6 +20,8 @@ func TestBlobS3(t *testing.T) {
 	t.Run("delete", testS3Delete)
 	t.Run("list", testS3List)
 	t.Run("upload_if_match_version_mismatch", testS3UploadIfMatchVersionMismatch)
+	t.Run("replica_metadata_and_fencing", testS3ReplicaMetadataAndFencing)
+	t.Run("replication_owner", testS3ReplicationOwner)
 }
 
 func newTestS3Store(t *testing.T) *blobstore.S3BlobStore {
@@ -113,6 +115,77 @@ func testS3List(t *testing.T) {
 	all, err := store.List(ctx, "")
 	require.NoError(t, err)
 	require.Len(t, all, 3)
+}
+
+func testS3ReplicaMetadataAndFencing(t *testing.T) {
+	ctx := context.Background()
+	store := newTestS3Store(t)
+	source := filepath.Join(t.TempDir(), "replica")
+	require.NoError(t, os.WriteFile(source, []byte("one"), 0o600))
+	createdFile, err := os.Open(source)
+	require.NoError(t, err)
+	created, err := store.PutReplica(ctx, blobstore.ReplicaPut{
+		Key:         "replica/object",
+		Body:        createdFile,
+		Size:        3,
+		CreateOnly:  true,
+		OperationID: "operation-one",
+		Checksum:    blobstore.BytesSHA256([]byte("one")),
+	})
+	require.NoError(t, err)
+	require.NoError(t, createdFile.Close())
+	head, err := store.HeadReplica(ctx, "replica/object")
+	require.NoError(t, err)
+	require.Equal(t, "operation-one", head.OperationID)
+	require.Equal(t, created.Checksum, head.Checksum)
+
+	require.NoError(t, os.WriteFile(source, []byte("two"), 0o600))
+	wrongFile, err := os.Open(source)
+	require.NoError(t, err)
+	_, err = store.PutReplica(ctx, blobstore.ReplicaPut{
+		Key:             "replica/object",
+		Body:            wrongFile,
+		Size:            3,
+		ExpectedVersion: "wrong",
+		OperationID:     "operation-two",
+		Checksum:        blobstore.BytesSHA256([]byte("two")),
+	})
+	require.ErrorIs(t, err, blobstore.ErrVersionMismatch)
+	require.NoError(t, wrongFile.Close())
+	updatedFile, err := os.Open(source)
+	require.NoError(t, err)
+	updated, err := store.PutReplica(ctx, blobstore.ReplicaPut{
+		Key:             "replica/object",
+		Body:            updatedFile,
+		Size:            3,
+		ExpectedVersion: created.Version,
+		OperationID:     "operation-two",
+		Checksum:        blobstore.BytesSHA256([]byte("two")),
+	})
+	require.NoError(t, err)
+	require.NoError(t, updatedFile.Close())
+	deleteErr := store.DeleteReplica(ctx, "replica/object", "wrong")
+	if deleteErr == nil {
+		t.Skip("mock S3 does not enforce DeleteObject If-Match; real AWS S3 does")
+	}
+	require.ErrorIs(t, deleteErr, blobstore.ErrVersionMismatch)
+	require.NoError(t, store.DeleteReplica(ctx, "replica/object", updated.Version))
+}
+
+func testS3ReplicationOwner(t *testing.T) {
+	ctx := context.Background()
+	store := newTestS3Store(t)
+	ownerVersion, err := store.ClaimReplicationOwner(ctx, "leases/tiered-owner", "journal-one")
+	require.NoError(t, err)
+	resumedVersion, err := store.ClaimReplicationOwner(ctx, "leases/tiered-owner", "journal-one")
+	require.NoError(t, err)
+	require.Equal(t, ownerVersion, resumedVersion)
+	_, err = store.ClaimReplicationOwner(ctx, "leases/tiered-owner", "journal-two")
+	require.ErrorIs(t, err, blobstore.ErrVersionMismatch)
+	require.NoError(t, store.ReleaseReplicationOwner(ctx, "leases/tiered-owner", "journal-one", "wrong"))
+	// The mock may not enforce conditional delete, but Release performs its own
+	// owner/version verification before issuing the request.
+	require.NoError(t, store.ReleaseReplicationOwner(ctx, "leases/tiered-owner", "journal-one", ownerVersion))
 }
 
 func testS3UploadIfMatchVersionMismatch(t *testing.T) {

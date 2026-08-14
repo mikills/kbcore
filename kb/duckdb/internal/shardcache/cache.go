@@ -23,6 +23,7 @@ type Manager struct {
 	CacheDir           string
 	BlobStore          BlobStore
 	EvictCacheIfNeeded func(context.Context, string) error
+	ReserveCache       func(context.Context, int64) (func(), error)
 }
 
 func (m Manager) EnsureLocalFile(
@@ -39,6 +40,11 @@ func (m Manager) EnsureLocalFile(
 	if err != nil || cached {
 		return localPathOrEmpty(localPath, cached), cached, err
 	}
+	releaseReservation, err := m.reserve(ctx, shard.SizeBytes)
+	if err != nil {
+		return "", false, err
+	}
+	defer releaseReservation()
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", false, err
 	}
@@ -50,7 +56,11 @@ func (m Manager) EnsureLocalFile(
 	if err := os.Rename(tmpPath, localPath); err != nil {
 		return "", false, err
 	}
-	if err := m.evict(ctx, kbID); err != nil {
+	releaseReservation()
+	if err := m.evict(ctx, localPath); err != nil {
+		if removeErr := os.Remove(localPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return "", false, fmt.Errorf("%w; remove rejected cache shard: %v", err, removeErr)
+		}
 		return "", false, err
 	}
 	return localPath, false, nil
@@ -90,11 +100,18 @@ func (m Manager) downloadToTemp(ctx context.Context, shard kb.SnapshotShardMetad
 	return tmpPath, nil
 }
 
-func (m Manager) evict(ctx context.Context, kbID string) error {
+func (m Manager) reserve(ctx context.Context, incomingBytes int64) (func(), error) {
+	if m.ReserveCache == nil || incomingBytes <= 0 {
+		return func() {}, nil
+	}
+	return m.ReserveCache(ctx, incomingBytes)
+}
+
+func (m Manager) evict(ctx context.Context, protectedPath string) error {
 	if m.EvictCacheIfNeeded == nil {
 		return nil
 	}
-	return m.EvictCacheIfNeeded(ctx, kbID)
+	return m.EvictCacheIfNeeded(ctx, protectedPath)
 }
 
 func localPathOrEmpty(localPath string, ok bool) string {

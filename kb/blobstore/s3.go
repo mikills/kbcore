@@ -340,6 +340,157 @@ func (s *S3BlobStore) UploadBytesIfNotExists(ctx context.Context, key string, da
 	return &ObjectInfo{Key: key, Version: version, UpdatedAt: s.now(), Size: int64(len(data))}, nil
 }
 
+const (
+	replicaOperationMetadata = "minnow-operation-id"
+	replicaChecksumMetadata  = "minnow-sha256"
+)
+
+func (s *S3BlobStore) PutReplica(ctx context.Context, request ReplicaPut) (*ReplicaInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if request.Body == nil || request.Size < 0 {
+		return nil, errors.New("replica body and non-negative size are required")
+	}
+	input := &s3.PutObjectInput{
+		Bucket:        aws.String(s.Bucket),
+		Key:           aws.String(s.fullKey(request.Key)),
+		Body:          request.Body,
+		ContentLength: aws.Int64(request.Size),
+		Metadata: map[string]string{
+			replicaOperationMetadata: request.OperationID,
+			replicaChecksumMetadata:  request.Checksum,
+		},
+	}
+	if request.CreateOnly {
+		input.IfNoneMatch = aws.String("*")
+	} else if request.ExpectedVersion != "" {
+		input.IfMatch = aws.String(request.ExpectedVersion)
+	} else {
+		return nil, errors.New("replica put requires create-only or an expected remote version")
+	}
+	result, err := s.Client.PutObject(ctx, input)
+	if err != nil {
+		var responseErr *smithyhttp.ResponseError
+		if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == http.StatusPreconditionFailed {
+			return nil, fmt.Errorf("%w: replica precondition failed for %s", ErrVersionMismatch, request.Key)
+		}
+		return nil, fmt.Errorf("put replica %s: %w", request.Key, err)
+	}
+	version := aws.ToString(result.ETag)
+	if version == "" {
+		return nil, errors.New("replica put response is missing ETag")
+	}
+	return &ReplicaInfo{
+		ObjectInfo: ObjectInfo{
+			Key:       request.Key,
+			Version:   version,
+			UpdatedAt: s.now(),
+			Size:      request.Size,
+		},
+		OperationID: request.OperationID,
+		Checksum:    request.Checksum,
+	}, nil
+}
+
+func (s *S3BlobStore) HeadReplica(ctx context.Context, key string) (*ReplicaInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	result, err := s.Client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.Bucket),
+		Key:    aws.String(s.fullKey(key)),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("head replica %s: %w", key, err)
+	}
+	version := aws.ToString(result.ETag)
+	if version == "" {
+		return nil, errors.New("replica head response is missing ETag")
+	}
+	return &ReplicaInfo{
+		ObjectInfo: ObjectInfo{
+			Key:       key,
+			Version:   version,
+			UpdatedAt: aws.ToTime(result.LastModified),
+			Size:      aws.ToInt64(result.ContentLength),
+		},
+		OperationID: result.Metadata[replicaOperationMetadata],
+		Checksum:    result.Metadata[replicaChecksumMetadata],
+	}, nil
+}
+
+func (s *S3BlobStore) ClaimReplicationOwner(ctx context.Context, key, ownerID string) (string, error) {
+	if strings.TrimSpace(ownerID) == "" {
+		return "", errors.New("replication owner ID is required")
+	}
+	info, err := s.UploadBytesIfNotExists(ctx, key, []byte(ownerID))
+	if err == nil {
+		if info.Version == "" {
+			return "", errors.New("replication owner response is missing ETag")
+		}
+		return info.Version, nil
+	}
+	if !errors.Is(err, ErrVersionMismatch) {
+		return "", err
+	}
+	data, current, readErr := s.DownloadBytesWithInfo(ctx, key)
+	if readErr != nil {
+		return "", readErr
+	}
+	if string(data) != ownerID {
+		return "", fmt.Errorf("%w: replication prefix is owned by another journal", ErrVersionMismatch)
+	}
+	if current.Version == "" {
+		return "", errors.New("replication owner object is missing ETag")
+	}
+	return current.Version, nil
+}
+
+func (s *S3BlobStore) ReleaseReplicationOwner(ctx context.Context, key, ownerID, expectedVersion string) error {
+	data, current, err := s.DownloadBytesWithInfo(ctx, key)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if string(data) != ownerID || current.Version != expectedVersion {
+		// The original claim is already gone or changed. Never delete the
+		// replacement; release is idempotently complete for this owner version.
+		return nil
+	}
+	return s.DeleteReplica(ctx, key, expectedVersion)
+}
+
+func (s *S3BlobStore) DeleteReplica(ctx context.Context, key, expectedVersion string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if expectedVersion == "" {
+		return errors.New("replica delete requires an expected remote version")
+	}
+	_, err := s.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket:  aws.String(s.Bucket),
+		Key:     aws.String(s.fullKey(key)),
+		IfMatch: aws.String(expectedVersion),
+	})
+	if err != nil {
+		var responseErr *smithyhttp.ResponseError
+		if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == http.StatusPreconditionFailed {
+			return fmt.Errorf("%w: replica delete precondition failed for %s", ErrVersionMismatch, key)
+		}
+		if isS3NotFound(err) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("delete replica %s: %w", key, err)
+	}
+	return nil
+}
+
 func (s *S3BlobStore) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -30,6 +30,44 @@ type Store interface {
 	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
 }
 
+// ReplicaPut carries an idempotency identity and an explicit remote
+// precondition. Exactly one of CreateOnly and ExpectedVersion should be set for
+// tiered-store mutations; this ensures stale journal owners cannot issue
+// unfenced overwrites.
+type ReplicaPut struct {
+	Key             string
+	Body            io.Reader
+	Size            int64
+	ExpectedVersion string
+	CreateOnly      bool
+	OperationID     string
+	Checksum        string
+}
+
+type ReplicaInfo struct {
+	ObjectInfo
+	OperationID string
+	Checksum    string
+}
+
+// ReplicationStore is the stronger remote contract required by tiered storage.
+// OperationID must be persisted atomically with the object and returned by
+// HeadReplica so an uncertain response can be reconciled without confusing an
+// identical write from another actor. DeleteReplica must condition deletion on
+// expectedVersion when it is non-empty.
+type ReplicationStore interface {
+	Store
+	PutReplica(ctx context.Context, request ReplicaPut) (*ReplicaInfo, error)
+	HeadReplica(ctx context.Context, key string) (*ReplicaInfo, error)
+	DeleteReplica(ctx context.Context, key, expectedVersion string) error
+	// ClaimReplicationOwner creates a non-expiring prefix owner record or
+	// resumes it when the stored ownerID matches. A different owner must fail.
+	ClaimReplicationOwner(ctx context.Context, key, ownerID string) (version string, err error)
+	// ReleaseReplicationOwner conditionally removes only the exact claim and is
+	// idempotent if that owner version is already absent or replaced.
+	ReleaseReplicationOwner(ctx context.Context, key, ownerID, expectedVersion string) error
+}
+
 type Clock interface{ Now() time.Time }
 
 var (

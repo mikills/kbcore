@@ -2,6 +2,7 @@ package configruntime
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -11,9 +12,22 @@ import (
 	"time"
 
 	"github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/blobstore/journal"
 	"github.com/mikills/minnow/kb/config"
 	"github.com/stretchr/testify/require"
 )
+
+type openFailJournal struct {
+	journal.Store
+	openCalls int
+}
+
+func (j *openFailJournal) Open(context.Context) error {
+	j.openCalls++
+	return errors.New("custom journal open failed")
+}
+
+func (j *openFailJournal) Close() error { return nil }
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -28,6 +42,12 @@ func writeTempConfig(t *testing.T, body string) string {
 	path := filepath.Join(dir, "minnow.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
 	return path
+}
+
+func TestNormalizeLeasePrefix(t *testing.T) {
+	require.Equal(t, "leases/", normalizeLeasePrefix(""))
+	require.Equal(t, "locks/", normalizeLeasePrefix(" locks "))
+	require.Equal(t, "locks/", normalizeLeasePrefix("locks/"))
 }
 
 func TestBuild(t *testing.T) {
@@ -47,6 +67,46 @@ func TestBuild(t *testing.T) {
 		require.NoError(t, rt.Start(context.Background()))
 		require.NoError(t, rt.Wait())
 		require.NoError(t, rt.Stop(context.Background()))
+	})
+
+	t.Run("uses_substituted_replication_journal", func(t *testing.T) {
+		path := writeTempConfig(t, `
+http:
+  address: 127.0.0.1:0
+storage:
+  blob:
+    kind: tiered
+    s3:
+      bucket: test
+      endpoint: http://127.0.0.1:1
+      access_key_id: test
+      secret_access_key: test
+    tiered:
+      durability: local_journal
+      journal:
+        dir: state/journal
+embedder:
+  provider: local
+  local:
+    dim: 16
+scheduler:
+  enabled: false
+media:
+  enabled: false
+`)
+		cfg, err := config.Load(path)
+		require.NoError(t, err)
+		custom := &openFailJournal{Store: nil}
+		rt, err := Build(context.Background(), cfg, BuildOptions{
+			Logger:             quietLogger(),
+			ReplicationJournal: custom,
+		})
+		require.NoError(t, err)
+		err = rt.Start(context.Background())
+		require.ErrorContains(t, err, "custom journal open")
+		err = rt.Start(context.Background())
+		require.ErrorContains(t, err, "custom journal open")
+		require.Equal(t, 2, custom.openCalls, "transient early startup failures must be retryable")
 	})
 
 	t.Run("respects_sharding_policy", func(t *testing.T) {

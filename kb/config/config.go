@@ -48,9 +48,34 @@ type StorageConfig struct {
 
 // BlobConfig selects a blob backend: "local" or "s3".
 type BlobConfig struct {
-	Kind string        `yaml:"kind"        json:"kind"`
-	Root string        `yaml:"root"        json:"root"`
-	S3   *S3BlobConfig `yaml:"s3,omitempty" json:"s3,omitempty"`
+	Kind   string            `yaml:"kind"                   json:"kind"`
+	Root   string            `yaml:"root"                   json:"root"`
+	S3     *S3BlobConfig     `yaml:"s3,omitempty"           json:"s3,omitempty"`
+	Tiered *TieredBlobConfig `yaml:"tiered,omitempty"       json:"tiered,omitempty"`
+}
+
+// TieredBlobConfig configures an S3 cold store with a persistent local
+// catalog/outbox. The built-in journal is replaceable through
+// configruntime.BuildOptions for embedded users.
+type TieredBlobConfig struct {
+	Durability  string                  `yaml:"durability"             json:"durability"`
+	Journal     TieredJournalConfig     `yaml:"journal"                json:"journal"`
+	Replication TieredReplicationConfig `yaml:"replication"            json:"replication"`
+}
+
+type TieredJournalConfig struct {
+	Kind              string `yaml:"kind"                json:"kind"`
+	Dir               string `yaml:"dir"                 json:"dir"`
+	MaxPendingEntries int    `yaml:"max_pending_entries" json:"max_pending_entries"`
+	MaxPendingBytes   int64  `yaml:"max_pending_bytes"   json:"max_pending_bytes"`
+	MinFreeBytes      int64  `yaml:"min_free_bytes"      json:"min_free_bytes"`
+}
+
+type TieredReplicationConfig struct {
+	PollInterval Duration `yaml:"poll_interval" json:"poll_interval"`
+	RetryBase    Duration `yaml:"retry_base"    json:"retry_base"`
+	RetryMax     Duration `yaml:"retry_max"     json:"retry_max"`
+	MaxAttempts  int      `yaml:"max_attempts"  json:"max_attempts"`
 }
 
 // S3BlobConfig configures S3 or any S3-compatible blob backend.
@@ -69,11 +94,14 @@ type S3BlobConfig struct {
 // 0 has a meaning (no TTL). EvictInterval is a pointer so explicit-zero is
 // rejected by the validator.
 type CacheConfig struct {
-	Dir           string    `yaml:"dir"                      json:"dir"`
-	MaxBytes      int64     `yaml:"max_bytes"                json:"max_bytes"`
-	EntryTTL      Duration  `yaml:"entry_ttl"                json:"entry_ttl"`
-	WarmShards    int       `yaml:"warm_shards,omitempty"    json:"warm_shards,omitempty"`
-	EvictInterval *Duration `yaml:"evict_interval,omitempty" json:"evict_interval,omitempty"`
+	Dir                  string    `yaml:"dir"                              json:"dir"`
+	MaxBytes             int64     `yaml:"max_bytes"                        json:"max_bytes"`
+	EntryTTL             Duration  `yaml:"entry_ttl"                        json:"entry_ttl"`
+	WarmShards           int       `yaml:"warm_shards,omitempty"            json:"warm_shards,omitempty"`
+	EvictInterval        *Duration `yaml:"evict_interval,omitempty"         json:"evict_interval,omitempty"`
+	HighWatermarkPercent int       `yaml:"high_watermark_percent,omitempty" json:"high_watermark_percent,omitempty"`
+	LowWatermarkPercent  int       `yaml:"low_watermark_percent,omitempty"  json:"low_watermark_percent,omitempty"`
+	MinFreeBytes         int64     `yaml:"min_free_bytes,omitempty"         json:"min_free_bytes,omitempty"`
 }
 
 // FormatConfig selects the artifact format backend.
@@ -361,8 +389,47 @@ func (c *Config) applyStorageDefaults() {
 	if c.Storage.Cache.Dir == "" {
 		c.Storage.Cache.Dir = "./.temp/cache"
 	}
-	if c.Storage.Blob.Kind == "s3" && c.Storage.Blob.S3 != nil && c.Storage.Blob.S3.Region == "" {
+	if c.Storage.Cache.HighWatermarkPercent > 0 && c.Storage.Cache.LowWatermarkPercent == 0 {
+		c.Storage.Cache.LowWatermarkPercent = c.Storage.Cache.HighWatermarkPercent - 10
+		if c.Storage.Cache.LowWatermarkPercent < 1 {
+			c.Storage.Cache.LowWatermarkPercent = 1
+		}
+	}
+	if (c.Storage.Blob.Kind == "s3" || c.Storage.Blob.Kind == "tiered") && c.Storage.Blob.S3 != nil && c.Storage.Blob.S3.Region == "" {
 		c.Storage.Blob.S3.Region = "us-east-1"
+	}
+	if c.Storage.Blob.Kind == "tiered" && c.Storage.Blob.Tiered != nil {
+		tiered := c.Storage.Blob.Tiered
+		if tiered.Durability == "" {
+			tiered.Durability = "remote"
+		}
+		if tiered.Journal.Kind == "" {
+			tiered.Journal.Kind = "local"
+		}
+		if tiered.Journal.Dir == "" {
+			tiered.Journal.Dir = "./.temp/journal"
+		}
+		if tiered.Journal.MaxPendingEntries == 0 {
+			tiered.Journal.MaxPendingEntries = 10000
+		}
+		if tiered.Journal.MaxPendingBytes == 0 {
+			tiered.Journal.MaxPendingBytes = 1073741824
+		}
+		if tiered.Journal.MinFreeBytes == 0 {
+			tiered.Journal.MinFreeBytes = 268435456
+		}
+		if tiered.Replication.PollInterval == 0 {
+			tiered.Replication.PollInterval = Duration(100 * time.Millisecond)
+		}
+		if tiered.Replication.RetryBase == 0 {
+			tiered.Replication.RetryBase = Duration(250 * time.Millisecond)
+		}
+		if tiered.Replication.RetryMax == 0 {
+			tiered.Replication.RetryMax = Duration(30 * time.Second)
+		}
+		if tiered.Replication.MaxAttempts == 0 {
+			tiered.Replication.MaxAttempts = 20
+		}
 	}
 }
 

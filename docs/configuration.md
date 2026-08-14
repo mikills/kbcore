@@ -61,7 +61,7 @@ All other deployment knobs are YAML fields.
 
 | Field  | Type   | Default             | Notes                                          |
 | ------ | ------ | ------------------- | ---------------------------------------------- |
-| `kind` | enum   | `local`             | `local` \| `s3`.                               |
+| `kind` | enum   | `local`             | `local` \| `s3` \| `tiered`.                  |
 | `root` | path   | `./.temp/fixtures`  | Relative to YAML file. Used when `kind: local`.|
 
 When `kind: s3`, provide an `s3` block. Works with AWS S3, MinIO, Cloudflare R2,
@@ -72,10 +72,75 @@ and any S3-compatible store via `endpoint`.
 | `s3.bucket`              | string | —           | Required.                                                          |
 | `s3.region`              | string | `us-east-1` |                                                                    |
 | `s3.prefix`              | string | empty       | Key prefix for all objects.                                        |
-| `s3.lease_prefix`        | string | empty       | Namespaces the S3 write lease across deployments sharing a bucket. |
+| `s3.lease_prefix`        | string | empty       | Prefix-relative namespace for per-KB write leases and the tiered journal owner record. |
 | `s3.endpoint`            | string | empty       | HTTP(S) URL for MinIO / R2 / other S3-compatible stores.           |
 | `s3.access_key_id`       | string | empty       | Use `${VAR}`. Both keys must be set together, or both empty.       |
 | `s3.secret_access_key`   | string | empty       | Use `${VAR}`. When both are empty, the AWS credential chain is used.|
+
+When `kind: tiered`, the same `s3` block is the cold store and a persistent
+local journal owns writes until S3 replication is confirmed. The endpoint must
+preserve user metadata and ETags and correctly implement conditional
+`PutObject` and `DeleteObject` (`If-Match` / `If-None-Match`); not every S3-compatible service
+provides those semantics:
+
+```yaml
+storage:
+  blob:
+    kind: tiered
+    s3:
+      bucket: my-minnow-bucket
+      region: us-east-1
+      prefix: production/
+      lease_prefix: leases/
+    tiered:
+      durability: remote # or local_journal
+      journal:
+        kind: local
+        dir: /var/lib/minnow/journal
+        max_pending_entries: 10000
+        max_pending_bytes: 1073741824
+        min_free_bytes: 268435456
+      replication:
+        poll_interval: 100ms
+        retry_base: 250ms
+        retry_max: 30s
+        max_attempts: 20
+```
+
+`remote` acknowledges a mutation only after its ordered S3 replication has
+completed and its journal transition is committed. Remote-mode reads use the
+same visibility barrier; if an ambiguous replication result cannot yet be
+reconciled, reads fail closed rather than expose an unacknowledged object.
+`local_journal` acknowledges after the payload and catalog/outbox
+transaction are durable on the local volume; losing that volume before the
+backlog drains can therefore lose acknowledged writes. Replication always
+starts immediately. Disk watermarks control warm-cache eviction, not when S3
+receives its first copy.
+
+The built-in journal uses bbolt plus content-addressed payload files, retains
+failed entries, applies entry/byte backpressure, and recovers pending work after
+a restart. `journal.min_free_bytes` rejects a payload before staging when the
+journal filesystem would cross its emergency reserve; pending payloads are
+never evicted. A restart requeues previously exhausted entries from attempt zero.
+Startup claims a non-expiring S3 prefix-ownership record and
+inventories the remote prefix, so S3 must be reachable when the process starts
+even in `local_journal` mode. The claim is released on clean shutdown only when
+the replication backlog is empty; after a crash, only the same persistent
+journal identity can resume it. Every replicated put or delete also carries an
+object-level S3 precondition and operation identity. Keys below
+`s3.lease_prefix` are reserved for control records (`kb/` for write leases and
+`journal/` for ownership) and excluded from the tiered
+catalog. The claimed object prefix must not be mutated by other applications or
+administrative jobs while Minnow is running. If the journal volume is
+permanently lost, an operator must first prove the old process is stopped and
+then manually remove `<prefix><lease_prefix>journal/owner.lock` before a new
+journal can inventory and claim the S3 prefix. Any unreplicated tail is lost in
+that disaster scenario.
+Embedded users can supply another implementation of
+`journal.Store` through `configruntime.BuildOptions.ReplicationJournal`; custom
+implementations must provide the same atomic catalog/outbox and durable payload
+ownership guarantees. See [`examples/minnow.tiered.yaml`](../examples/minnow.tiered.yaml)
+for a complete configuration.
 
 ### `storage.cache`
 
@@ -84,12 +149,24 @@ and any S3-compatible store via `endpoint`.
 | `dir`            | path     | `./.temp/cache` | Relative to YAML file.       |
 | `max_bytes`      | int      | `0`             | `0` = unbounded.             |
 | `entry_ttl`      | duration | `0s`            | `0` = no TTL.                |
-| `warm_shards`    | int      | `0`             | Pre-download the N most-recently-sealed shards per KB into the cache at startup, in the background. `0` = off. |
-| `evict_interval` | duration | `30s`           |                              |
+| `warm_shards`                  | int      | `0`             | Pre-download the N most-recently-sealed shards per KB into the cache at startup, in the background. `0` = off. |
+| `evict_interval`               | duration | `30s`           |                              |
+| `high_watermark_percent`       | int      | `0`             | Filesystem-used percentage that triggers eviction. `0` = disabled; otherwise 2–99. |
+| `low_watermark_percent`        | int      | high minus 10   | Once triggered, evict toward this lower filesystem-used percentage. Must be below `high_watermark_percent`. |
+| `min_free_bytes`               | int      | `0`             | Also trigger eviction when filesystem-available bytes fall below this reserve. |
 
 Queries run against local shard files, so a shard not yet in `dir` is fetched
-from the blob store on first touch (a cold `GET` in S3 mode). `warm_shards` pays
-that cost up front at startup instead of on the first query per shard.
+from the blob store on first touch (a cold `GET` in S3 or tiered mode).
+`warm_shards` pays that cost up front at startup instead of on the first query
+per shard. Watermarks use filesystem capacity, include space consumed outside
+the cache, and use high/low hysteresis to avoid repeated eviction at one
+boundary. Sealed DuckDB query shards are ranked and evicted individually by
+last access. Before a cold download, Minnow reserves its declared shard size,
+evicts toward the configured disk target, and verifies actual filesystem free
+space again after removal and installation. Minnow establishes an eviction
+barrier, drains active and in-flight DuckDB opens, and prevents reopen until the
+shard file is removed. Legacy cache
+layouts without a `query-shards` directory remain whole-KB eviction entries.
 
 For a small always-on server, set finite cache limits rather than accepting the
 unbounded disk-cache defaults. A conservative 1 GB VPS profile is:

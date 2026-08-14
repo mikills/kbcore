@@ -1,0 +1,52 @@
+# Minnow with an S3 cold store, persistent local replication journal, and
+# bounded SSD warm cache.
+#
+# Run: OPENAI_API_KEY=... MINNOW_CONFIG=./examples/minnow.tiered.yaml ./minnow
+
+storage:
+  blob:
+    kind: tiered
+    s3:
+      bucket: my-minnow-bucket
+      region: us-east-1
+      prefix: minnow/
+      lease_prefix: leases/
+      # endpoint: http://localhost:9000
+      # access_key_id: ${AWS_ACCESS_KEY_ID}
+      # secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+    tiered:
+      # remote acknowledges only after S3 confirms the ordered operation.
+      # local_journal remains available during S3 outages, but volume loss can
+      # lose the unreplicated tail.
+      durability: remote
+      journal:
+        kind: local
+        dir: ./.minnow/journal
+        max_pending_entries: 10000
+        max_pending_bytes: 1073741824
+        min_free_bytes: 268435456
+      replication:
+        poll_interval: 100ms
+        retry_base: 250ms
+        retry_max: 30s
+        max_attempts: 20
+  cache:
+    dir: ./.minnow/cache
+    max_bytes: 1073741824
+    high_watermark_percent: 80
+    low_watermark_percent: 70
+    min_free_bytes: 1073741824
+    entry_ttl: 24h
+    warm_shards: 2
+
+embedder:
+  provider: openai_compatible
+  openai_compatible:
+    base_url: https://api.openai.com/v1
+    model: text-embedding-3-small
+    token: ${OPENAI_API_KEY}
+
+mcp:
+  enabled: true
+  transports: [stdio]
+  allow_indexing: true

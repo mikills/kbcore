@@ -49,8 +49,15 @@ func TestShardConnPoolEvictionBlocksReopen(t *testing.T) {
 		result <- err
 	}()
 	<-openStarted
-	release := pool.BeginEviction(filepath.Dir(path))
+	releaseReady := make(chan func(), 1)
+	go func() { releaseReady <- pool.BeginEviction(filepath.Dir(path)) }()
+	select {
+	case <-releaseReady:
+		require.Fail(t, "BeginEviction returned before in-flight open drained")
+	case <-time.After(50 * time.Millisecond):
+	}
 	close(continueOpen)
+	release := <-releaseReady
 	require.ErrorIs(t, <-result, errShardConnPoolEvicting)
 
 	opened := false
@@ -87,9 +94,16 @@ func TestShardConnPoolRejectsOpenThatSpansCompletedEviction(t *testing.T) {
 		result <- err
 	}()
 	<-openStarted
-	release := pool.BeginEviction(dir)
-	release()
+	releaseReady := make(chan func(), 1)
+	go func() { releaseReady <- pool.BeginEviction(dir) }()
+	select {
+	case <-releaseReady:
+		require.Fail(t, "BeginEviction returned before in-flight open drained")
+	case <-time.After(50 * time.Millisecond):
+	}
 	close(continueOpen)
+	release := <-releaseReady
+	release()
 	require.ErrorIs(t, <-result, errShardConnPoolEvicting)
 	pool.mu.Lock()
 	require.Empty(t, pool.entries)

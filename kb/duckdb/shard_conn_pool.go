@@ -30,6 +30,7 @@ type shardConnPool struct {
 	evicting    map[string]*shardEviction
 	generations map[string]uint64
 	inFlight    map[string]int
+	openChanged *sync.Cond
 }
 
 type shardEviction struct {
@@ -76,14 +77,17 @@ func (p *shardConnPool) GetOrOpen(ctx context.Context, localPath string,
 
 	p.mu.Lock()
 	changed := p.pathEvictingLocked(localPath) || p.generationLocked(localPath) != generation
-	p.finishOpenLocked(localPath)
 	if changed {
 		p.mu.Unlock()
 		if closeErr := db.Close(); closeErr != nil {
 			slog.Default().Warn("close shard connection opened during eviction failed", logKeyError, closeErr)
 		}
+		p.mu.Lock()
+		p.finishOpenLocked(localPath)
+		p.mu.Unlock()
 		return nil, errShardConnPoolEvicting
 	}
+	p.finishOpenLocked(localPath)
 	// Another goroutine may have raced and inserted first.
 	if existing, ok := p.entries[localPath]; ok {
 		existing.mu.Lock()
@@ -138,6 +142,9 @@ func (p *shardConnPool) takeOverflowLocked(protectedPath string) []*shardConn {
 func (p *shardConnPool) BeginEviction(prefix string) func() {
 	prefix = strings.TrimSuffix(prefix, string(os.PathSeparator))
 	p.mu.Lock()
+	if p.openChanged == nil {
+		p.openChanged = sync.NewCond(&p.mu)
+	}
 	if p.evicting == nil {
 		p.evicting = make(map[string]*shardEviction)
 	}
@@ -167,6 +174,11 @@ func (p *shardConnPool) BeginEviction(prefix string) func() {
 		}
 		sc.mu.Unlock()
 	}
+	p.mu.Lock()
+	for p.hasOpenWithinPrefixLocked(prefix) {
+		p.openChanged.Wait()
+	}
+	p.mu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -219,6 +231,9 @@ func (p *shardConnPool) finishOpenLocked(path string) {
 		delete(p.inFlight, path)
 	} else {
 		p.inFlight[path]--
+	}
+	if p.openChanged != nil {
+		p.openChanged.Broadcast()
 	}
 	for prefix := range p.generations {
 		if pathWithinPrefix(path, prefix) && p.evicting[prefix] == nil &&

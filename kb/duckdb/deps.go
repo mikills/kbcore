@@ -34,6 +34,7 @@ func NewDepsFromKB(k *kb.KB, opts ...DepOption) DuckDBArtifactDeps {
 		Embed:                      k.Embed,
 		GraphBuilder:               graphBuilderFromKB(k),
 		EvictCacheIfNeeded:         k.EvictCacheIfNeeded,
+		ReserveCache:               k.ReserveCache,
 		LockFor:                    k.LockFor,
 		AcquireWriteLease:          k.AcquireWriteLease,
 		EnqueueReplacedShardsForGC: k.EnqueueReplacedShardsForGC,
