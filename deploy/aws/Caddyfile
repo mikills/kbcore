@@ -1,0 +1,10 @@
+{$MINNOW_DOMAIN} {
+	encode zstd gzip
+
+	# Keep health checks unauthenticated. Every data and MCP endpoint requires
+	# the exact bearer token stored in MINNOW_TOKEN.
+	@unauthorized expression `{http.request.uri.path} != "/healthz" && {http.request.header.Authorization} != "Bearer {$MINNOW_TOKEN}"`
+	respond @unauthorized 401
+
+	reverse_proxy minnow:8080
+}

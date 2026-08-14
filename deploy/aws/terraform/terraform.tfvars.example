@@ -1,0 +1,12 @@
+region        = "us-east-1"
+name          = "minnow"
+instance_type = "t3.small"
+# `edge` is published from main after this deployment feature merges. Pin a
+# released vX.Y.Z tag for production once a container-enabled release exists.
+minnow_image = "ghcr.io/mikills/minnow:edge"
+domain        = "minnow.example.com"
+
+# These existing SSM SecureString parameters are read by the EC2 instance role;
+# their secret values do not enter Terraform configuration, state, or user data.
+openai_api_key_parameter_name = "/minnow/openai-api-key"
+minnow_token_parameter_name   = "/minnow/bearer-token"

@@ -1,0 +1,52 @@
+# Copy this file, replace the app name and region, then follow README.md.
+app = "replace-with-your-minnow-app"
+primary_region = "iad"
+
+kill_signal = "SIGTERM"
+kill_timeout = 30
+
+[build]
+  # Run `fly deploy --config deploy/fly/fly.toml` from the repository root.
+  dockerfile = "Dockerfile"
+  build-target = "fly"
+
+[deploy]
+  strategy = "rolling"
+
+[env]
+  MINNOW_CONFIG = "/etc/minnow/minnow.yaml"
+  MINNOW_LOG_FORMAT = "json"
+  GOMEMLIMIT = "768MiB"
+
+[mounts]
+  source = "minnow_data"
+  destination = "/var/lib/minnow"
+  initial_size = "10gb"
+  scheduled_snapshots = true
+  snapshot_retention = 14
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 20
+    hard_limit = 25
+
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/healthz"
+
+[[vm]]
+  architecture = "x86_64"
+  cpu_kind = "shared"
+  cpus = 2
+  memory = "2gb"

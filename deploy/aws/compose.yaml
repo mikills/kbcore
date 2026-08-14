@@ -1,0 +1,35 @@
+services:
+  minnow:
+    image: ${MINNOW_IMAGE}
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
+      GOMEMLIMIT: ${GOMEMLIMIT:-768MiB}
+    volumes:
+      - /var/lib/minnow:/var/lib/minnow
+    expose: ["8080"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    mem_limit: ${MINNOW_MEMORY_LIMIT:-2g}
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      minnow:
+        condition: service_healthy
+    environment:
+      MINNOW_DOMAIN: ${MINNOW_DOMAIN:?set MINNOW_DOMAIN}
+      MINNOW_TOKEN: ${MINNOW_TOKEN:?set MINNOW_TOKEN to 64 hexadecimal characters}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /var/lib/caddy/data:/data
+      - /var/lib/caddy/config:/config
