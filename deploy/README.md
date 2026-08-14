@@ -9,6 +9,9 @@ embeddings provider.
 | Fly.io | [`fly/`](fly/) | Fast managed HTTPS deployment | Fly Volume is single-region/single-Machine; included bearer auth is one shared token |
 | AWS | [`aws/`](aws/) | Durable VM with EBS, DNS, and bearer-protected HTTPS | Terraform example is single-instance, not HA |
 
+See the [deployment pricing comparison](pricing.md) for baseline Fly.io, AWS,
+storage, network, snapshot, and embedding API estimates with source links.
+
 ## Container quick start
 
 ```bash

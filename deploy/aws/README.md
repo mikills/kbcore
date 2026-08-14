@@ -11,6 +11,10 @@ filesystem. Fargate ephemeral storage is not a durable replacement. An ECS
 variant should first use S3 for blobs, MongoDB for event durability, and accept
 that the query cache is disposable.
 
+The default `us-east-1` deployment is estimated at approximately
+**$21.23/month** before embeddings and variable usage. See
+[deployment pricing](../pricing.md).
+
 ## Prerequisites
 
 - Terraform >= 1.6 and authenticated AWS CLI credentials.
