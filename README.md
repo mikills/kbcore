@@ -68,6 +68,20 @@ The default config at `./minnow.yaml` is sufficient for local development (embed
 - Two storage modes: local disk for always-hot workloads, S3-backed for SaaS with a long-tail distribution of cold tenants.
 - Event-driven ingest pipeline with at-least-once delivery, durable operation lineage, and retry semantics.
 
+## Deployment
+
+Run the container locally with persistent storage:
+
+```bash
+export OPENAI_API_KEY=sk-...
+docker compose up --build -d
+curl http://127.0.0.1:8080/healthz
+```
+
+Ready-to-customize examples are available for [Docker Compose, Fly.io, and AWS
+Terraform](deploy/README.md). The container currently targets Linux x86-64
+because that is the platform covered by the bundled DuckDB extensions.
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md) - install, configure, first request.

@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y ca-certificates curl docker.io docker-compose-v2 unzip
+systemctl enable --now docker
+
+# Ubuntu Noble does not package awscli. Install the official AWS CLI v2
+# x86-64 bundle; the deployment itself is intentionally linux/amd64-only.
+curl --fail --silent --show-error --location \
+  https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip \
+  --output /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli
+rm -rf /tmp/aws /tmp/awscliv2.zip
+aws --version
+
+# Canonical's Ubuntu AMIs provide SSM Agent as a Snap. Do not hide failures:
+# there is deliberately no inbound SSH fallback in this deployment.
+if ! snap list amazon-ssm-agent >/dev/null 2>&1; then
+  snap install amazon-ssm-agent --classic
+fi
+systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service
+systemctl is-active --quiet snap.amazon-ssm-agent.amazon-ssm-agent.service
+
+install -d -m 0755 /opt/minnow /var/lib/caddy/data /var/lib/caddy/config
+install -d -o 10001 -g 10001 -m 0750 /var/lib/minnow
+cat >/opt/minnow/compose.yaml <<'COMPOSE'
+services:
+  minnow:
+    image: $${MINNOW_IMAGE}
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      OPENAI_API_KEY: $${OPENAI_API_KEY}
+      GOMEMLIMIT: 768MiB
+    volumes:
+      - /var/lib/minnow:/var/lib/minnow
+    expose: ["8080"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    mem_limit: 2g
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      minnow:
+        condition: service_healthy
+    environment:
+      MINNOW_DOMAIN: $${MINNOW_DOMAIN}
+      MINNOW_TOKEN: $${MINNOW_TOKEN}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /var/lib/caddy/data:/data
+      - /var/lib/caddy/config:/config
+COMPOSE
+cat >/opt/minnow/Caddyfile <<'CADDY'
+{$MINNOW_DOMAIN} {
+  encode zstd gzip
+  @unauthorized expression `{http.request.uri.path} != "/healthz" && {http.request.header.Authorization} != "Bearer {$MINNOW_TOKEN}"`
+  respond @unauthorized 401
+  reverse_proxy minnow:8080
+}
+CADDY
+cat >/usr/local/sbin/minnow-refresh-secrets <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+get_parameter() {
+  local name=$1 value delay
+  for delay in 0 2 4 8 12 16 20 24 28 32; do
+    sleep "$delay"
+    if value=$(aws ssm get-parameter --region '${region}' --with-decryption \
+      --name "$name" --query Parameter.Value --output text); then
+      printf '%s' "$value"
+      return 0
+    fi
+  done
+  echo "failed to retrieve SSM parameter $name after bounded retries" >&2
+  return 1
+}
+openai_key=$(get_parameter '${openai_parameter_name}')
+minnow_token=$(get_parameter '${token_parameter_name}')
+if [[ ! $minnow_token =~ ^[0-9A-Fa-f]{64}$ ]]; then
+  echo "Minnow bearer token must be exactly 64 hexadecimal characters" >&2
+  exit 1
+fi
+umask 077
+cat >/opt/minnow/.env <<ENV
+MINNOW_IMAGE=${minnow_image}
+MINNOW_DOMAIN=${minnow_domain}
+OPENAI_API_KEY=$openai_key
+MINNOW_TOKEN=$minnow_token
+ENV
+SCRIPT
+chmod 0700 /usr/local/sbin/minnow-refresh-secrets
+/usr/local/sbin/minnow-refresh-secrets
+cd /opt/minnow
+docker compose up -d

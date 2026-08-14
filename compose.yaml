@@ -1,0 +1,30 @@
+services:
+  minnow:
+    build:
+      context: .
+      platforms: [linux/amd64]
+    image: minnow:local
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
+      GOMEMLIMIT: ${GOMEMLIMIT:-768MiB}
+    ports:
+      # Loopback-only by default. Put an authenticating HTTPS proxy or
+      # Tailscale in front before allowing remote access.
+      - "127.0.0.1:${MINNOW_PORT:-8080}:8080"
+    volumes:
+      - minnow-data:/var/lib/minnow
+    deploy:
+      resources:
+        limits:
+          memory: ${MINNOW_MEMORY_LIMIT:-2G}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  minnow-data:
