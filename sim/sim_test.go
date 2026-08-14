@@ -13,6 +13,14 @@ import (
 //
 // To add a new scenario, drop a file under sim/scenarios/ that exports a
 // func(h *sim.Harness) and add it to the map below.
+func TestTieredStorageSim(t *testing.T) {
+	for _, seed := range []int64{1, 2, 3, 7, 42, 100} {
+		t.Run(fmt.Sprintf("recovery/seed_%d", seed), func(t *testing.T) {
+			scenarios.TieredStorageRecovery(t, seed)
+		})
+	}
+}
+
 func TestSim(t *testing.T) {
 	seeds := []int64{1, 2, 3, 7, 42, 100}
 
