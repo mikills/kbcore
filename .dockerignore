@@ -26,6 +26,10 @@ todo.md
 **/.terraform
 **/.terraform.lock.hcl
 kb/testdata
+testdata
+examples
+sim
+BENCHMARK.md
 extensions/v1.5.0/osx_arm64
 /minnow
 /codeindex/codeindex
