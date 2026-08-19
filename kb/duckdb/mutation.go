@@ -50,7 +50,7 @@ func (f *DuckDBArtifactFormat) Ingest(ctx context.Context, req kb.IngestUpsertRe
 	}
 
 	if err := f.applyUpsert(ctx, db, preparedDocs, graphBuilder); err != nil {
-		return kb.IngestResult{}, err
+		return kb.IngestResult{}, logDuckDBMemoryOnError(ctx, db, "upsert", err)
 	}
 
 	if err := f.commitUpsertMutation(ctx, db, req); err != nil {
@@ -147,7 +147,7 @@ func (f *DuckDBArtifactFormat) Delete(ctx context.Context, req kb.IngestDeleteRe
 	defer db.Close()
 
 	if err := f.applyDelete(ctx, db, cleanIDs, req.Options); err != nil {
-		return kb.IngestResult{}, err
+		return kb.IngestResult{}, logDuckDBMemoryOnError(ctx, db, "delete", err)
 	}
 
 	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
@@ -189,7 +189,7 @@ func (f *DuckDBArtifactFormat) PublishPrepared(
 	}
 
 	if err := f.applyPreparedUpsert(ctx, db, preparedDocs, req.GraphResult); err != nil {
-		return kb.IngestResult{}, err
+		return kb.IngestResult{}, logDuckDBMemoryOnError(ctx, db, "prepared_upsert", err)
 	}
 
 	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
@@ -296,7 +296,7 @@ func (f *DuckDBArtifactFormat) applyPreparedStreamBatch(ctx context.Context, bat
 	}
 	writeStarted := time.Now()
 	if err := f.applyPreparedUpsert(ctx, db, batch.prepared, nil); err != nil {
-		return err
+		return logDuckDBMemoryOnError(ctx, db, "prepared_stream_upsert", err)
 	}
 	slog.Default().
 		InfoContext(ctx, "code index write batch complete", logKeyKBID, batch.kbID, "chunks", len(batch.prepared), "total_chunks", batch.mutatedBefore+len(batch.prepared), "duration_ms", time.Since(writeStarted).Milliseconds())
@@ -597,7 +597,7 @@ func checkpointAndCloseMutationDB(ctx context.Context, db *sql.DB) error {
 		}
 	}()
 	if err := CheckpointDB(ctx, db); err != nil {
-		return err
+		return logDuckDBMemoryOnError(ctx, db, "checkpoint", err)
 	}
 	if err := db.Close(); err != nil {
 		return fmt.Errorf("close db after mutation: %w", err)

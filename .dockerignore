@@ -27,3 +27,5 @@ todo.md
 **/.terraform.lock.hcl
 kb/testdata
 extensions/v1.5.0/osx_arm64
+/minnow
+/codeindex/codeindex

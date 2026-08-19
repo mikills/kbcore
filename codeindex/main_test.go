@@ -384,6 +384,7 @@ func TestLegacyExplicitIndexKeyStateMigratesInPlace(t *testing.T) {
 	plan, err := buildIndexPlan(
 		context.Background(), target, indexer.NormalizeOptions(indexer.Options{}),
 		pipelineFingerprint(indexer.NormalizeOptions(indexer.Options{})), loaded, nil, 0,
+		func(context.Context, []indexer.Document) error { return nil },
 	)
 	if err != nil {
 		t.Fatal(err)

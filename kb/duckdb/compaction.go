@@ -214,9 +214,9 @@ func countCompactedDocs(ctx context.Context, db *sql.DB) (int64, error) {
 // where graph tables are already merged by mergeCompactionShards.
 func buildShardIndexes(ctx context.Context, db *sql.DB) error {
 	if err := createDocsVectorIndex(ctx, db); err != nil {
-		return err
+		return logDuckDBMemoryOnError(ctx, db, "build_hnsw_index", err)
 	}
-	return createDocsFTSIndex(ctx, db)
+	return logDuckDBMemoryOnError(ctx, db, "build_fts_index", createDocsFTSIndex(ctx, db))
 }
 
 func createDocsVectorIndex(ctx context.Context, db *sql.DB) error {

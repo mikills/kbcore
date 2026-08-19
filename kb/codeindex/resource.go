@@ -3,7 +3,7 @@ package codeindex
 import (
 	"context"
 	"fmt"
-	"runtime"
+	"runtime/metrics"
 	"time"
 )
 
@@ -102,12 +102,11 @@ func (p ResourcePolicy) Check(ctx context.Context) error {
 		return err
 	}
 	if p.MaxHeapBytes > 0 {
-		var mem runtime.MemStats
-		runtime.ReadMemStats(&mem)
-		if mem.Sys > p.MaxHeapBytes {
+		// Footprint, not MemStats.Sys: Sys still counts address space returned to the OS.
+		if footprint, ok := currentFootprintBytes(); ok && footprint > p.MaxHeapBytes {
 			return fmt.Errorf(
-				"code index resource guard: heap/system memory %d bytes exceeds max_heap_bytes %d",
-				mem.Sys,
+				"code index resource guard: memory footprint %d bytes exceeds max_heap_bytes %d",
+				footprint,
 				p.MaxHeapBytes,
 			)
 		}
@@ -158,4 +157,24 @@ func (p ResourcePolicy) BatchEndByTextBytes(textBytes []int) int {
 		bytes += n
 	}
 	return end
+}
+
+const (
+	totalMemoryMetric    = "/memory/classes/total:bytes"
+	releasedMemoryMetric = "/memory/classes/heap/released:bytes"
+)
+
+func currentFootprintBytes() (uint64, bool) {
+	samples := []metrics.Sample{{Name: totalMemoryMetric}, {Name: releasedMemoryMetric}}
+	metrics.Read(samples)
+	for _, sample := range samples {
+		if sample.Value.Kind() != metrics.KindUint64 {
+			return 0, false
+		}
+	}
+	total, released := samples[0].Value.Uint64(), samples[1].Value.Uint64()
+	if released > total {
+		return 0, false
+	}
+	return total - released, true
 }

@@ -27,3 +27,7 @@ diago_audit.json
 # Local product & planning docs
 product.md
 todo.md
+
+# Compiled binaries from `go build ./...` at a module root
+/minnow
+/codeindex/codeindex

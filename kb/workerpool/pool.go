@@ -63,6 +63,9 @@ const (
 	defaultWorkerConcurrency = 1 << 2
 	logKeyError              = "error"
 	logKeyEventID            = "event_id"
+	logKeyKBID               = "kb_id"
+	logKeyAttempt            = "attempt"
+	logKeyDurationMS         = "duration_ms"
 	mongoKeyKind             = "kind"
 )
 
@@ -355,6 +358,18 @@ func (p *WorkerPool) finishDuplicateDispatch(
 // visibility-timeout retry try again.
 func (p *WorkerPool) recordFailure(ctx context.Context, event *eventing.Event, handlerErr error, dur time.Duration) bool {
 	maxAttempts := event.EffectiveMaxAttempts()
+	p.logFailure(ctx, event, handlerErr, dur, maxAttempts, false)
+	terminal := p.applyFailure(ctx, event, handlerErr, dur)
+	if terminal {
+		p.logFailure(ctx, event, handlerErr, dur, maxAttempts, true)
+	}
+	return terminal
+}
+
+// Terminal state is whatever applyFailure actually returns: a failed store
+// write leaves the event pending for retry even on its last attempt.
+func (p *WorkerPool) applyFailure(ctx context.Context, event *eventing.Event, handlerErr error, dur time.Duration) bool {
+	maxAttempts := event.EffectiveMaxAttempts()
 	willRetry := event.Attempt < maxAttempts
 	if p.cfg.BuildFailureEvent == nil {
 		if err := p.store.Fail(ctx, event.EventID, event.Attempt, handlerErr.Error()); err != nil {
@@ -388,6 +403,32 @@ func (p *WorkerPool) recordFailure(ctx context.Context, event *eventing.Event, h
 	}
 	p.metrics.OnWorkerTick(p.worker.Kind(), p.worker.WorkerID(), failureOutcome(willRetry), dur, handlerErr)
 	return !willRetry
+}
+
+// The error is otherwise only reachable through the event store, so a dead job
+// leaves no trace in logs.
+func (p *WorkerPool) logFailure(
+	ctx context.Context,
+	event *eventing.Event,
+	handlerErr error,
+	dur time.Duration,
+	maxAttempts int,
+	terminal bool,
+) {
+	args := []any{
+		mongoKeyKind, string(event.Kind),
+		logKeyEventID, event.EventID,
+		logKeyKBID, event.KBID,
+		logKeyAttempt, event.Attempt,
+		"max_attempts", maxAttempts,
+		logKeyDurationMS, dur.Milliseconds(),
+		logKeyError, handlerErr,
+	}
+	if terminal {
+		slog.Default().ErrorContext(ctx, "worker event failed; giving up", args...)
+		return
+	}
+	slog.Default().WarnContext(ctx, "worker event failed", args...)
 }
 
 func (p *WorkerPool) runAfterTerminal(

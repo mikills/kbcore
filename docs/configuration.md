@@ -38,12 +38,14 @@ minnow config init dev-openai
 
 ## Bootstrap environment variables
 
-These two env vars are read before the config file:
+`MINNOW_CONFIG` and the logging vars are read before the config file; `MINNOW_DUCKDB_MEMORY_LIMIT` is applied to the parsed config:
 
 | Env var             | Purpose                                                                    |
 | ------------------- | -------------------------------------------------------------------------- |
 | `MINNOW_CONFIG`     | Path to the YAML config file. Overrides default discovery.                 |
 | `MINNOW_LOG_FORMAT` | Logger format (`text` / `json`). Read before the YAML so parse errors log.|
+| `MINNOW_LOG_LEVEL`  | Minimum log level (`debug` / `info` / `warn` / `error`). Defaults to `info`. |
+| `MINNOW_DUCKDB_MEMORY_LIMIT` | Overrides `format.duckdb.memory_limit`, for deployments whose YAML is baked into an image. |
 
 All other deployment knobs are YAML fields.
 
@@ -193,7 +195,7 @@ It does not include DuckDB native memory, so retain an OS/cgroup memory limit.
 | Field                  | Type   | Default         | Notes                              |
 | ---------------------- | ------ | --------------- | ---------------------------------- |
 | `kind`                 | string | `duckdb`        | Only `duckdb` is supported today.  |
-| `duckdb.memory_limit`  | string | `128MB`         | Passed to DuckDB verbatim.         |
+| `duckdb.memory_limit`  | string | `128MB`         | Passed to DuckDB verbatim. `MINNOW_DUCKDB_MEMORY_LIMIT` overrides it at startup, for deployments whose config is baked into an image. |
 | `duckdb.extension_dir` | path   | `./extensions`  | Relative to YAML file.             |
 | `duckdb.offline`       | bool   | `false`         | If true, disables extension fetch. |
 
@@ -232,8 +234,8 @@ below.
 | `embed_batch_size`    | int      | `32`                                                                     | Maximum chunks per embedding batch.        |
 | `max_batch_bytes`     | int      | `262144`                                                                 | Maximum text bytes per embedding batch.    |
 | `throttle`            | duration | `100ms`                                                                  | Delay between embedding batches.           |
-| `max_heap_bytes`      | int      | `1073741824`                                                             | Abort indexing if Go heap/system memory exceeds this guard. |
-| `max_rss_bytes`       | int      | `1073741824`                                                             | Abort indexing if process resident memory exceeds this guard. |
+| `max_heap_bytes`      | int      | `1073741824`                                                             | Abort indexing if the Go memory footprint (total obtained minus released to the OS) exceeds this guard. |
+| `max_rss_bytes`       | int      | `1073741824`                                                             | Abort indexing if peak process resident memory exceeds this guard. Peak is measured since process start and never falls. |
 | `large_repo_files`    | int      | `1000`                                                                   | CLI confirmation threshold for scanned files. |
 | `require_confirm`     | bool     | `false`                                                                  | Require explicit confirmation for large repositories when set by callers/config. |
 

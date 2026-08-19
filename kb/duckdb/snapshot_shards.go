@@ -225,7 +225,7 @@ func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(
 	defer shardbuild.DetachSource(ctx, shardDB)
 
 	if err := shardbuild.CopyRowRange(ctx, shardDB, source.hasTombstones, source.limit, source.lastDocID); err != nil {
-		return 0, false, "", nil, err
+		return 0, false, "", nil, logDuckDBMemoryOnError(ctx, shardDB, "shard_copy_rows", err)
 	}
 
 	if err := buildShardIndexes(ctx, shardDB); err != nil {
@@ -348,10 +348,10 @@ func (f *DuckDBArtifactFormat) downloadSnapshotFromShards(
 	defer db.Close()
 
 	if err := f.mergeManifestShards(ctx, db, tmpDir, manifest.Shards); err != nil {
-		return nil, err
+		return nil, logDuckDBMemoryOnError(ctx, db, "merge_manifest_shards", err)
 	}
 	if err := finalizeReconstructedSnapshot(ctx, db); err != nil {
-		return nil, err
+		return nil, logDuckDBMemoryOnError(ctx, db, "finalize_snapshot", err)
 	}
 	if err := os.Rename(tmpDest, dest); err != nil {
 		return nil, err
