@@ -40,8 +40,16 @@ func TieredStorageRecovery(t *testing.T, seed int64) {
 		case 2:
 			remote.SetUnavailable(false)
 		case 3:
-			require.NoErrorf(t, store.Stop(ctx), "seed=%d step=%d restart stop", seed, step)
-			remote.SetUnavailable(false)
+			// A downed remote makes Stop fail to release the ownership claim and
+			// leaves the store open on purpose, so shutdown can be retried. The
+			// journal stays locked until it succeeds, so retry before restarting.
+			if err := store.Stop(ctx); err != nil {
+				require.ErrorIsf(t, err, sim.ErrReplicaUnavailable, "seed=%d step=%d restart stop", seed, step)
+				remote.SetUnavailable(false)
+				require.NoErrorf(t, store.Stop(ctx), "seed=%d step=%d restart stop retry", seed, step)
+			} else {
+				remote.SetUnavailable(false)
+			}
 			store = startTieredStore(t, ctx, remote, journalDir)
 		case 4, 5:
 			_, existed := model[key]
