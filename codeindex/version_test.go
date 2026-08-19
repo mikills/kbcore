@@ -16,11 +16,12 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatal(err)
 	}
 	os.Stdout = writer
+	defer func() { os.Stdout = previous }()
+	defer reader.Close()
 	fn()
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	os.Stdout = previous
 	out, err := io.ReadAll(reader)
 	if err != nil {
 		t.Fatal(err)
@@ -36,12 +37,21 @@ func TestVersionCommand(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("exit code %d, want 0", code)
 			}
-			if !strings.HasPrefix(out, "codeindex ") {
-				t.Fatalf("output %q, want it to start with %q", out, "codeindex ")
-			}
-			if strings.TrimSpace(strings.TrimPrefix(out, "codeindex ")) == "" {
-				t.Fatalf("no version reported: %q", out)
+			if want := "codeindex " + versionString() + "\n"; out != want {
+				t.Fatalf("output %q, want %q", out, want)
 			}
 		})
+	}
+}
+
+func TestVersionStringIsReported(t *testing.T) {
+	got := versionString()
+	if got == "" {
+		t.Fatal("versionString returned an empty string")
+	}
+	// Under `go test` the build info reports "(devel)", so this exercises the
+	// fallback; installed binaries report a tag or pseudo-version instead.
+	if got != "unknown" && !strings.HasPrefix(got, "v") {
+		t.Fatalf("versionString = %q, want a v-prefixed version or \"unknown\"", got)
 	}
 }

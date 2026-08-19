@@ -22,8 +22,6 @@ func main() {
 	os.Exit(run(context.Background(), args))
 }
 
-const version = "v0.2.2"
-
 func run(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		printUsage()
@@ -55,15 +53,15 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       codeindex --version")
 }
 
-// The build info carries the real module version for `go install`ed binaries,
-// including pseudo-versions; the constant only covers builds without it.
+// A codeindex/vX.Y.Z tag for installed binaries, a pseudo-version for builds
+// with VCS info. A hardcoded fallback would silently go stale after a release.
 func versionString() string {
 	if info, ok := debug.ReadBuildInfo(); ok {
 		if v := info.Main.Version; v != "" && v != "(devel)" {
 			return v
 		}
 	}
-	return version
+	return "unknown"
 }
 
 type indexCLIOptions struct {
