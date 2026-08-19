@@ -17,6 +17,7 @@ kill_timeout = 30
   MINNOW_CONFIG = "/etc/minnow/minnow.yaml"
   MINNOW_LOG_FORMAT = "json"
   GOMEMLIMIT = "768MiB"
+  MINNOW_DUCKDB_MEMORY_LIMIT = "512MB"
 
 [mounts]
   source = "minnow_data"

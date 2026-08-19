@@ -6,6 +6,7 @@ services:
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
       GOMEMLIMIT: ${GOMEMLIMIT:-768MiB}
+      MINNOW_DUCKDB_MEMORY_LIMIT: ${MINNOW_DUCKDB_MEMORY_LIMIT:-512MB}
     volumes:
       - /var/lib/minnow:/var/lib/minnow
     expose: ["8080"]

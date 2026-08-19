@@ -102,31 +102,7 @@ func kbIDMatchesTarget(kbID string, target indexTarget) bool {
 
 func saveIndexState(target indexTarget, state indexState) (string, error) {
 	path := indexStatePath(target)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return path, err
-	}
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return path, err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".state-*.json")
-	if err != nil {
-		return path, err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o644); err != nil {
-		tmp.Close()
-		return path, err
-	}
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
-		return path, err
-	}
-	if err := tmp.Close(); err != nil {
-		return path, err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := writeIndexStateFile(path, state); err != nil {
 		return path, err
 	}
 	if state.SourcePath != "" && state.SourcePath != path {
@@ -135,6 +111,34 @@ func saveIndexState(target indexTarget, state indexState) (string, error) {
 		}
 	}
 	return path, nil
+}
+
+func writeIndexStateFile(path string, state indexState) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".state-*.json")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func indexStatePath(target indexTarget) string {

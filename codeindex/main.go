@@ -96,7 +96,7 @@ func parseIndexCLIOptions(args []string) (indexCLIOptions, error) {
 	fs.BoolVar(&opts.lowResource, "low-resource", false, "use conservative request batching")
 	fs.IntVar(&opts.requestBatchSize, "batch-size", 0, "chunks per Minnow request")
 	fs.IntVar(&opts.maxBatchBytes, "max-batch-bytes", 0, "text bytes per Minnow request")
-	fs.Uint64Var(&opts.maxHeapBytes, "max-heap-bytes", 0, "maximum Go heap/system bytes")
+	fs.Uint64Var(&opts.maxHeapBytes, "max-heap-bytes", 0, "maximum Go memory footprint in bytes")
 	fs.Uint64Var(&opts.maxRSSBytes, "max-rss-bytes", 0, "maximum resident set bytes")
 	fs.IntVar(&opts.largeRepoFiles, "large-repo-files", 0, "large repository confirmation threshold")
 	fs.DurationVar(&opts.throttle, "throttle", 0, "delay between Minnow requests")

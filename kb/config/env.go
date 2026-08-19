@@ -59,3 +59,23 @@ func (r EnvResolver) ResolveBytes(data []byte) ([]byte, error) {
 func interpolateEnv(data []byte) ([]byte, error) {
 	return OSResolver().ResolveBytes(data)
 }
+
+// EnvDuckDBMemoryLimit overrides format.duckdb.memory_limit. The config file is
+// baked into the container image, so this is the only way to retune a
+// deployment without rebuilding it.
+const EnvDuckDBMemoryLimit = "MINNOW_DUCKDB_MEMORY_LIMIT"
+
+func (r EnvResolver) ApplyOverrides(cfg *Config) error {
+	lookup := r.Lookup
+	if lookup == nil {
+		lookup = os.LookupEnv
+	}
+	if value, ok := lookup(EnvDuckDBMemoryLimit); ok {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return fmt.Errorf("%s must not be empty when set", EnvDuckDBMemoryLimit)
+		}
+		cfg.Format.DuckDB.MemoryLimit = trimmed
+	}
+	return nil
+}

@@ -9,6 +9,7 @@ services:
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
       GOMEMLIMIT: ${GOMEMLIMIT:-768MiB}
+      MINNOW_DUCKDB_MEMORY_LIMIT: ${MINNOW_DUCKDB_MEMORY_LIMIT:-512MB}
     ports:
       # Loopback-only by default. Put an authenticating HTTPS proxy or
       # Tailscale in front before allowing remote access.

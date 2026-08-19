@@ -47,26 +47,39 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 	if err := policy.Check(ctx); err != nil {
 		return indexResult{}, err
 	}
+	progress := newProgressReporter(cli.quiet)
 	files, skipped, err := minnowcode.Scan(ctx, target.Root, opts, minnowcode.DefaultExcludePatterns)
 	if err != nil {
 		return indexResult{}, err
 	}
+	progress.scanned(len(files), skipped)
 	if err := minnowcode.ValidateConfirmation(opts, len(files)); err != nil {
 		return indexResult{}, err
 	}
+	client, journal, err := startUpload(ctx, cfg, target, progress)
+	if err != nil {
+		return indexResult{}, err
+	}
+	defer journal.close()
+	sink := &documentSink{
+		client: client, kbID: target.KBID, policy: policy, journal: journal, progress: progress,
+	}
+	emit := func(ctx context.Context, docs []minnowcode.Document) error {
+		progress.fileChunked(len(docs))
+		return sink.emit(ctx, docs)
+	}
 	pipeline := pipelineFingerprint(opts)
-	plan, err := buildIndexPlan(ctx, target, opts, pipeline, previous, files, skipped)
+	plan, err := buildIndexPlan(ctx, target, opts, pipeline, previous, files, skipped, emit)
 	if err != nil {
 		return indexResult{}, err
 	}
-	client, err := newMinnowClient(cfg)
-	if err != nil {
+	if err := sink.close(ctx); err != nil {
 		return indexResult{}, err
 	}
-	if err := client.check(ctx); err != nil {
-		return indexResult{}, fmt.Errorf("connect to Minnow at %s: %w", cfg.Minnow.URL, err)
+	if err := journal.recordStale(plan.stalePaths); err != nil {
+		return indexResult{}, err
 	}
-	if err := sendIndexPlan(ctx, client, target.KBID, plan.documents, plan.deleteIDs, policy); err != nil {
+	if err := sendDeletes(ctx, client, target.KBID, plan.deleteIDs); err != nil {
 		return indexResult{}, err
 	}
 	plan.state.UpdatedAt = time.Now().UTC()
@@ -77,8 +90,31 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 	if err := saveRegistrySelection(target, opts); err != nil {
 		return indexResult{}, err
 	}
+	// State now records every emitted chunk, so a leftover journal is orphan-free.
+	_ = journal.remove()
 	plan.result.StatePath = statePath
+	progress.done(plan.result)
 	return plan.result, nil
+}
+
+func startUpload(
+	ctx context.Context,
+	cfg Config,
+	target indexTarget,
+	progress *progressReporter,
+) (*minnowClient, *uploadJournal, error) {
+	client, err := newMinnowClient(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := client.check(ctx); err != nil {
+		return nil, nil, fmt.Errorf("connect to Minnow at %s: %w", cfg.Minnow.URL, err)
+	}
+	journal, err := startUploadJournal(ctx, client, target, progress)
+	if err != nil {
+		return nil, nil, err
+	}
+	return client, journal, nil
 }
 
 func prepareRefreshTarget(target indexTarget, staleAfter time.Duration) (indexTarget, indexState, func(), error) {
@@ -134,10 +170,10 @@ func acquireRefreshLocks(target indexTarget, staleAfter time.Duration) (func(), 
 }
 
 type indexPlan struct {
-	state     indexState
-	documents []minnowcode.Document
-	deleteIDs []string
-	result    indexResult
+	state      indexState
+	deleteIDs  []string
+	stalePaths []string
+	result     indexResult
 }
 
 func buildIndexPlan(
@@ -148,6 +184,7 @@ func buildIndexPlan(
 	previous indexState,
 	files []minnowcode.ScannedFile,
 	skipped int,
+	emit emitFunc,
 ) (indexPlan, error) {
 	plan := indexPlan{
 		state: indexState{
@@ -168,6 +205,7 @@ func buildIndexPlan(
 		file, exists := current[path]
 		if !exists {
 			plan.deleteIDs = append(plan.deleteIDs, old.ChunkIDs...)
+			plan.stalePaths = append(plan.stalePaths, path)
 			plan.result.DeletedFiles++
 			continue
 		}
@@ -178,12 +216,14 @@ func buildIndexPlan(
 			continue
 		}
 		plan.deleteIDs = append(plan.deleteIDs, old.ChunkIDs...)
+		plan.stalePaths = append(plan.stalePaths, path)
 	}
 	paths := make([]string, 0, len(current))
 	for path := range current {
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
+	newChunkIDs := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
 		file := current[path]
 		docs, _, err := minnowcode.BuildDocuments(ctx, target.Root, target.RepoID, file, opts)
@@ -193,17 +233,16 @@ func buildIndexPlan(
 		chunkIDs := make([]string, 0, len(docs))
 		for _, doc := range docs {
 			chunkIDs = append(chunkIDs, doc.ID)
-			plan.documents = append(plan.documents, doc)
+			newChunkIDs[doc.ID] = struct{}{}
+		}
+		if err := emit(ctx, docs); err != nil {
+			return indexPlan{}, err
 		}
 		plan.state.Files[path] = stateFile{
 			Hash: file.Hash, SizeBytes: file.SizeBytes, Language: file.Language, ChunkIDs: chunkIDs,
 		}
 		plan.result.IndexedFiles++
 		plan.result.ChunksIndexed += len(docs)
-	}
-	newChunkIDs := make(map[string]struct{}, len(plan.documents))
-	for _, doc := range plan.documents {
-		newChunkIDs[doc.ID] = struct{}{}
 	}
 	filteredDeletes := plan.deleteIDs[:0]
 	for _, id := range plan.deleteIDs {
@@ -292,33 +331,80 @@ func applyLowResourceDefaults(opts *minnowcode.Options, cli indexCLIOptions) {
 	}
 }
 
-func sendIndexPlan(
-	ctx context.Context,
-	client *minnowClient,
-	kbID string,
-	docs []minnowcode.Document,
-	deleteIDs []string,
-	policy minnowcode.ResourcePolicy,
-) error {
-	for len(docs) > 0 {
-		lengths := make([]int, len(docs))
-		for i, doc := range docs {
-			lengths[i] = len(doc.Text)
+type emitFunc func(context.Context, []minnowcode.Document) error
+
+type documentIngester interface {
+	ingest(ctx context.Context, kbID string, docs []minnowcode.Document) error
+}
+
+type documentSink struct {
+	client   documentIngester
+	kbID     string
+	policy   minnowcode.ResourcePolicy
+	journal  uploadRecorder
+	progress *progressReporter
+	pending  []minnowcode.Document
+	lengths  []int
+	sent     bool
+}
+
+func (s *documentSink) emit(ctx context.Context, docs []minnowcode.Document) error {
+	s.pending = append(s.pending, docs...)
+	return s.drain(ctx, false)
+}
+
+func (s *documentSink) close(ctx context.Context) error {
+	return s.drain(ctx, true)
+}
+
+func (s *documentSink) drain(ctx context.Context, final bool) error {
+	for len(s.pending) > 0 {
+		s.lengths = s.lengths[:0]
+		for _, doc := range s.pending {
+			s.lengths = append(s.lengths, len(doc.Text))
 		}
-		end := policy.BatchEndByTextBytes(lengths)
+		end := s.policy.BatchEndByTextBytes(s.lengths)
 		if end <= 0 {
 			end = 1
 		}
-		if err := client.ingest(ctx, kbID, docs[:end]); err != nil {
+		// More documents may still arrive to fill this batch.
+		if !final && end == len(s.pending) {
+			return nil
+		}
+		if err := s.policy.Check(ctx); err != nil {
 			return err
 		}
-		docs = docs[end:]
-		if len(docs) != 0 {
-			if err := policy.ThrottleBatch(ctx); err != nil {
+		if s.sent {
+			if err := s.policy.ThrottleBatch(ctx); err != nil {
 				return err
 			}
 		}
+		if s.journal != nil {
+			ids := make([]string, 0, end)
+			for _, doc := range s.pending[:end] {
+				ids = append(ids, doc.ID)
+			}
+			if err := s.journal.record(ids); err != nil {
+				return err
+			}
+		}
+		if err := s.client.ingest(ctx, s.kbID, s.pending[:end]); err != nil {
+			return err
+		}
+		s.progress.chunksSent(end)
+		s.sent = true
+		kept := copy(s.pending, s.pending[end:])
+		clear(s.pending[kept:]) // drop sent chunk text so it can be collected
+		s.pending = s.pending[:kept]
 	}
+	return nil
+}
+
+type documentDeleter interface {
+	delete(ctx context.Context, kbID string, ids []string) error
+}
+
+func sendDeletes(ctx context.Context, client documentDeleter, kbID string, deleteIDs []string) error {
 	for len(deleteIDs) > 0 {
 		end := min(len(deleteIDs), 200)
 		if err := client.delete(ctx, kbID, deleteIDs[:end]); err != nil {

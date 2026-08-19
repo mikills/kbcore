@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -25,6 +26,9 @@ const version = "v0.2.2"
 
 func main() {
 	logger := newLogger(os.Getenv("MINNOW_LOG_FORMAT"))
+	// Library packages log through slog.Default(); without this they bypass
+	// MINNOW_LOG_FORMAT and MINNOW_LOG_LEVEL entirely.
+	slog.SetDefault(logger)
 	ctx := backgroundContext
 	if code, handled := runTopLevelCommand(ctx, os.Args[1:], logger); handled {
 		os.Exit(code)
@@ -122,7 +126,8 @@ func runMCPSubcommand(baseCtx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: minnow mcp stdio")
 		return 2
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	logger := newLoggerTo(os.Stderr, os.Getenv("MINNOW_LOG_FORMAT"))
+	slog.SetDefault(logger)
 	cfg, err := config.Load(os.Getenv("MINNOW_CONFIG"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "load config: %v\n", err)
@@ -365,8 +370,26 @@ mcp:
 }
 
 func newLogger(format string) *slog.Logger {
+	return newLoggerTo(os.Stdout, format)
+}
+
+func newLoggerTo(w io.Writer, format string) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: parseLogLevel(os.Getenv("MINNOW_LOG_LEVEL"))}
 	if format == "json" {
-		return slog.New(slog.NewJSONHandler(os.Stdout, nil))
+		return slog.New(slog.NewJSONHandler(w, opts))
 	}
-	return slog.New(slog.NewTextHandler(os.Stdout, nil))
+	return slog.New(slog.NewTextHandler(w, opts))
+}
+
+func parseLogLevel(value string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }

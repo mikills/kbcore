@@ -47,6 +47,10 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 
+	if err := OSResolver().ApplyOverrides(cfg); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+
 	cfg.applyDefaults()
 
 	baseDir, err := filepath.Abs(filepath.Dir(path))
