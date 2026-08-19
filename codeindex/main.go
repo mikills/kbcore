@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -20,6 +21,8 @@ func main() {
 	}
 	os.Exit(run(context.Background(), args))
 }
+
+const version = "v0.2.2"
 
 func run(ctx context.Context, args []string) int {
 	if len(args) == 0 {
@@ -35,6 +38,9 @@ func run(ctx context.Context, args []string) int {
 		return runStatus(args[1:])
 	case "hooks":
 		return runHooks(ctx, args[1:])
+	case "--version", "version":
+		fmt.Println("codeindex " + versionString())
+		return 0
 	case "-h", "--help":
 		printUsage()
 		return 0
@@ -46,6 +52,18 @@ func run(ctx context.Context, args []string) int {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: codeindex <setup|codebase|refresh|status|hooks>")
+	fmt.Fprintln(os.Stderr, "       codeindex --version")
+}
+
+// The build info carries the real module version for `go install`ed binaries,
+// including pseudo-versions; the constant only covers builds without it.
+func versionString() string {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v := info.Main.Version; v != "" && v != "(devel)" {
+			return v
+		}
+	}
+	return version
 }
 
 type indexCLIOptions struct {
