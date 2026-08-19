@@ -116,7 +116,19 @@ func BuildDocumentsFromBytes(
 	return docs, metas, nil
 }
 
+// ChunkText is exported, so sizes the caller never normalized reach it here.
+func normalizeChunkSizes(chunkSize, overlap int) (int, int) {
+	if chunkSize <= 0 {
+		chunkSize = DefaultChunkSize
+	}
+	if overlap < 0 || overlap >= chunkSize {
+		overlap = 0
+	}
+	return chunkSize, overlap
+}
+
 func ChunkText(text, language string, chunkSize, overlap int) []Chunk {
+	chunkSize, overlap = normalizeChunkSizes(chunkSize, overlap)
 	lines := splitLineViews(text)
 	markers := symbolMarkers(lines, language)
 	if len(markers) == 0 || len(lines) > 2000 {
@@ -519,7 +531,12 @@ func joinTrimmedLineViews(source string, lines []lineView) string {
 }
 
 func nextChunkStart(window []lineView, end int, overlap int) int {
-	start := end - overlapLines(window, overlap)
+	// Overlapping the whole window repeats the chunk instead of advancing it.
+	lines := overlapLines(window, overlap)
+	if lines >= len(window) {
+		return end
+	}
+	start := end - lines
 	if start < 0 || start >= end {
 		return end
 	}
