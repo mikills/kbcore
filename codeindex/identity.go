@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,9 @@ type indexTarget struct {
 	LegacyKBID     string
 	Description    string
 	Git            bool
+	// MintedKBID marks a run that chose this id itself, the only case worth
+	// reserving. A reservation from saved state would outlive that state.
+	MintedKBID bool
 }
 
 func resolveTarget(opts indexCLIOptions) (indexTarget, error) {
@@ -131,12 +135,79 @@ func assignIndexGeneration(target indexTarget, state indexState, stateExists boo
 		target.KBID = state.KBID
 		return target, nil
 	}
+	// State is written only after the commit, so an interrupted first index
+	// would otherwise abandon everything it uploaded.
+	target.MintedKBID = true
+	if reserved := loadReservedKBID(target); validReservedKBID(reserved, target) {
+		target.KBID = reserved
+		return target, nil
+	}
 	var generation [8]byte
 	if _, err := rand.Read(generation[:]); err != nil {
 		return indexTarget{}, fmt.Errorf("create index generation: %w", err)
 	}
 	target.KBID = minnowcode.SanitizeKey(target.KBID + "-" + hex.EncodeToString(generation[:]))
 	return target, nil
+}
+
+// generationSuffixLen is the hex width of the random generation appended to a
+// knowledge base id.
+const generationSuffixLen = 16
+
+// validReservedKBID accepts only an id this target could have generated, so a
+// reservation from another repository or a crash mid-write cannot capture it.
+func validReservedKBID(reserved string, target indexTarget) bool {
+	suffix, ok := strings.CutPrefix(reserved, target.KBID+"-")
+	if !ok || len(suffix) != generationSuffixLen {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
+}
+
+func reservedKBIDPath(target indexTarget) string {
+	name := minnowcode.SanitizeKey(target.IndexKey) + "-" + shortHash(target.Root) + ".kbid"
+	return filepath.Join(target.StateRoot, ".minnow", "codeindex", name)
+}
+
+func loadReservedKBID(target indexTarget) string {
+	data, err := os.ReadFile(reservedKBIDPath(target))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// saveReservedKBID is best effort, and renames so a crash cannot leave a
+// truncated id the next run would trust.
+func saveReservedKBID(target indexTarget) {
+	path := reservedKBIDPath(target)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".kbid-*")
+	if err != nil {
+		return
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(target.KBID); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	_ = os.Rename(tmp.Name(), path)
+}
+
+// clearReservedKBID runs once state records the knowledge base, so deleting
+// that file still forces a fresh index.
+func clearReservedKBID(target indexTarget) {
+	_ = os.Remove(reservedKBIDPath(target))
 }
 
 func gitRepositoryIdentity(root string) (string, string) {

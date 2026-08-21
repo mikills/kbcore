@@ -157,3 +157,19 @@ func response(req *http.Request, status int, body io.Reader) *http.Response {
 		Request:    req,
 	}
 }
+
+func TestIdempotencyKeysAreScopedToTheRun(t *testing.T) {
+	docs := []indexer.Document{{ID: "code-a-1", Text: "package main"}}
+	first := newTestMinnowClient(t, "http://example.invalid")
+	second := newTestMinnowClient(t, "http://example.invalid")
+
+	if first.idempotencyKey("kb", docs) != first.idempotencyKey("kb", docs) {
+		t.Fatal("a retry inside one run changed its key, so the server would queue the batch twice")
+	}
+	// A rerun after a failure replays the same batches. Sharing keys with the
+	// failed run makes the server answer with its finished operation and queue
+	// nothing, while the client records every file as indexed.
+	if first.idempotencyKey("kb", docs) == second.idempotencyKey("kb", docs) {
+		t.Fatal("a rerun replayed the previous run's idempotency key")
+	}
+}

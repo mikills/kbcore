@@ -2,6 +2,7 @@ package sim
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -44,6 +45,8 @@ type Harness struct {
 	mu               sync.Mutex
 	ingestedDocs     map[string]map[string]kb.Document // kbID → docID → doc
 	lastManifestVers map[string]string                 // kbID → last observed version
+	sessions         map[string]string                 // kbID → open session handle
+	commitSeq        int
 
 	invariants []Invariant
 }
@@ -144,6 +147,7 @@ func New(t *testing.T, opts ...Option) *Harness {
 		format:           format,
 		ingestedDocs:     make(map[string]map[string]kb.Document),
 		lastManifestVers: make(map[string]string),
+		sessions:         make(map[string]string),
 		invariants:       cfg.invariants,
 	}
 	t.Cleanup(h.close)
@@ -218,7 +222,14 @@ func (h *Harness) Ingest(kbID string, docs []kb.Document) error {
 	if err := h.kb.UpsertDocsAndUpload(h.ctx, kbID, docs); err != nil {
 		return err
 	}
+	h.recordDocs(kbID, docs)
+	h.RecordManifestVersion(kbID)
+	return nil
+}
+
+func (h *Harness) recordDocs(kbID string, docs []kb.Document) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	m, ok := h.ingestedDocs[kbID]
 	if !ok {
 		m = make(map[string]kb.Document)
@@ -227,9 +238,111 @@ func (h *Harness) Ingest(kbID string, docs []kb.Document) error {
 	for _, d := range docs {
 		m[d.ID] = d
 	}
-	h.mu.Unlock()
+}
+
+// DeferIngest writes a batch that stays out of the manifest until Commit,
+// holding the session the way the ingest handler does.
+func (h *Harness) DeferIngest(kbID string, docs []kb.Document) error {
+	handle, err := h.kb.IngestSessionsFor().Hold(h.ctx, kbID, h.session(kbID))
+	if err != nil {
+		return err
+	}
+	h.setSession(kbID, handle)
+	embedded := make([]kb.EmbeddedDocument, 0, len(docs))
+	for _, d := range docs {
+		vector, err := h.Embed(h.ctx, d.Text)
+		if err != nil {
+			return err
+		}
+		embedded = append(embedded, kb.EmbeddedDocument{
+			ID: d.ID, Text: d.Text, Metadata: d.Metadata, Embedding: vector,
+		})
+	}
+	if err := h.kb.PublishPreparedDocs(
+		h.ctx, kbID, embedded, nil, kb.UpsertDocsOptions{DeferPublish: true},
+	); err != nil {
+		return err
+	}
+	h.recordDocs(kbID, docs)
+	return nil
+}
+
+// Commit publishes what a session accumulated, through the same worker the
+// queued commit event runs.
+func (h *Harness) Commit(kbID string) error {
+	sessions := h.kb.IngestSessionsFor()
+	handle, err := sessions.Renew(h.ctx, kbID, h.session(kbID))
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(kb.SessionCommitPayload{KBID: kbID, SessionID: handle})
+	if err != nil {
+		return err
+	}
+	worker := &kb.SessionCommitWorker{
+		KB: h.kb, ID: "sim-session-commit", ReleaseSession: sessions.Release,
+	}
+	event := &kb.KBEvent{
+		EventID: h.nextCommitID(kbID), Kind: kb.EventSessionCommit,
+		KBID: kbID, Payload: payload, Attempt: 1,
+	}
+	if _, err := worker.Handle(h.ctx, event); err != nil {
+		return err
+	}
+	h.setSession(kbID, "")
 	h.RecordManifestVersion(kbID)
 	return nil
+}
+
+// nextCommitID gives every commit its own id, or the worker mistakes a retry
+// for a redelivery of a finished commit.
+func (h *Harness) nextCommitID(kbID string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.commitSeq++
+	return fmt.Sprintf("sim-commit-%s-%d", kbID, h.commitSeq)
+}
+
+func (h *Harness) session(kbID string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.sessions[kbID]
+}
+
+func (h *Harness) setSession(kbID, handle string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if handle == "" {
+		delete(h.sessions, kbID)
+		return
+	}
+	h.sessions[kbID] = handle
+}
+
+// ReapSessions publishes deferred writes no client still holds. It re-records
+// every version, since the reaper does not say which ones it published.
+func (h *Harness) ReapSessions() (int, error) {
+	reaped, err := h.kb.ReapAbandonedSessions(h.ctx)
+	for _, kbID := range h.KBIDs() {
+		h.RecordManifestVersion(kbID)
+	}
+	return reaped, err
+}
+
+// HasPendingSession reports whether kbID holds rows that are not in the
+// published manifest.
+func (h *Harness) HasPendingSession(kbID string) bool {
+	return kb.HasPendingSession(filepath.Join(h.cacheDir, kbID))
+}
+
+// HoldSession opens a session as a client would, modelling a run in flight.
+func (h *Harness) HoldSession(kbID string) (string, error) {
+	handle, err := h.kb.IngestSessionsFor().Hold(h.ctx, kbID, h.session(kbID))
+	if err != nil {
+		return "", err
+	}
+	h.setSession(kbID, handle)
+	return handle, nil
 }
 
 // Query runs a top-k vector query against kbID.

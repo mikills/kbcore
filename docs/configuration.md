@@ -415,6 +415,39 @@ Presence of a key means "explicit"; omit a key to accept the default.
 | `compaction_min_shard_count`        | int     | `8`        | > 0 when set.                                          |
 | `compaction_tombstone_ratio`        | float   | `0.20`     | `(0, 1]`.                                              |
 
+### `ingest`
+
+| Field              | Type | Default                | Notes                                                                |
+| ------------------ | ---- | ---------------------- | -------------------------------------------------------------------- |
+| `deferred_publish` | bool | decided by blob store  | Lets one client upload many batches and publish them with one commit. |
+
+Publishing per batch rewrites the whole knowledge base every time, which makes a
+large ingest quadratic. A deferred session uploads every batch first and
+publishes once at the end.
+
+Until the commit, the rows sit in one instance's local shard, so every request in
+the session has to reach that instance. Omit the key and Minnow decides from
+`storage.blob.kind`. Local storage is a single instance by construction, so it is
+enabled. Shared storage may be serving several instances, so it stays off until
+an operator declares one writer.
+
+Set it to `true` only where a single Minnow process owns the data directory. In a
+load-balanced deployment it splits a session across instances, and every batch
+that misses the holder is refused with `409`.
+
+A commit only publishes for the client that still holds the session, so a client
+has to renew it by carrying its handle on every batch. It also has to wait for
+each batch's operation to finish before committing. A commit that overtakes a
+batch still in the pipeline publishes everything before it and leaves that batch
+for the reaper.
+
+When it is on, `/healthz` advertises the `ingest_sessions` capability, `POST
+/rag/commit` publishes a session, and the scheduler's `session-reap` job picks up
+sessions whose client never came back. When it is off, both a write asking to
+defer and `/rag/commit` are rejected with `400`, and clients such as `codeindex`
+fall back to publishing per batch. The reaper stays registered either way, so
+turning the key off does not strand a session that was already open.
+
 ### `mcp`
 
 MCP exposes Minnow for LLM agents. The schema default is disabled, 

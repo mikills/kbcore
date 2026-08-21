@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/mikills/minnow/kb/blobstore/journal"
 	"github.com/mikills/minnow/kb/blobstore/localjournal"
 	"github.com/mikills/minnow/kb/blobstore/tiered"
+	"github.com/mikills/minnow/kb/cacheevict"
 	"github.com/mikills/minnow/kb/config"
 	kbduckdb "github.com/mikills/minnow/kb/duckdb"
 	"github.com/mikills/minnow/kb/lease"
@@ -166,7 +168,7 @@ func (r *Runtime) buildKBOptions(ctx context.Context, cfg *config.Config, s3Stor
 	if err != nil {
 		return nil, err
 	}
-	kbOpts := baseKBOptions(cfg, embedder)
+	kbOpts := append(baseKBOptions(cfg, embedder), kb.WithDeferredPublish(cfg.DeferredPublishEnabled()))
 	kbOpts = append(kbOpts, graphKBOptions(cfg, r.logger)...)
 	leasePrefix := ""
 	if cfg.Storage.Blob.S3 != nil {
@@ -175,7 +177,7 @@ func (r *Runtime) buildKBOptions(ctx context.Context, cfg *config.Config, s3Stor
 			leasePrefix = normalizeLeasePrefix(leasePrefix) + "kb/"
 		}
 	}
-	if leaseOpt := buildLeaseOption(s3Store, leasePrefix, r.logger); leaseOpt != nil {
+	if leaseOpt := buildLeaseOption(s3Store, leasePrefix, cfg.Storage.Cache.Dir, r.logger); leaseOpt != nil {
 		kbOpts = append(kbOpts, leaseOpt)
 	}
 	mongoOpts, err := r.wireMongo(ctx, cfg)
@@ -245,6 +247,7 @@ func appConfigFromConfig(cfg *config.Config, logger *slog.Logger) appcmd.AppConf
 		CacheEvictionInterval: cfg.CacheEvictInterval(),
 		MaxMediaBytes:         cfg.Media.MaxBytes,
 		MCP:                   mcpConfigFromConfig(cfg),
+		DeferredPublish:       cfg.DeferredPublishEnabled(),
 		Logger:                logger,
 	}
 }
@@ -548,6 +551,10 @@ func newS3BlobStore(ctx context.Context, s3cfg *config.S3BlobConfig) (*blobstore
 	return blobstore.NewS3BlobStore(client, s3cfg.Bucket, s3cfg.Prefix), nil
 }
 
+// leaseDirName comes from the package that decides what a cache sweep may
+// delete, so the exclusion and the location cannot drift apart.
+const leaseDirName = cacheevict.LeaseDirName
+
 func normalizeLeasePrefix(prefix string) string {
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {
@@ -559,16 +566,31 @@ func normalizeLeasePrefix(prefix string) string {
 	return prefix
 }
 
-func buildLeaseOption(s3Store *blobstore.S3BlobStore, prefix string, logger *slog.Logger) kb.KBOption {
-	if s3Store == nil {
+// buildLeaseOption prefers S3 so several instances coordinate on one store,
+// and otherwise disk, which keeps a lease across a restart.
+func buildLeaseOption(
+	s3Store *blobstore.S3BlobStore,
+	prefix, cacheDir string,
+	logger *slog.Logger,
+) kb.KBOption {
+	if s3Store != nil {
+		mgr, err := lease.NewS3Manager(s3Store, prefix)
+		if err == nil {
+			logger.Info("using S3-native distributed write lease")
+			return kb.WithWriteLeaseManager(mgr)
+		}
+		logger.Warn("failed to build s3 lease manager", logKeyError, err)
+	}
+	if strings.TrimSpace(cacheDir) == "" {
 		return nil
 	}
-	mgr, err := lease.NewS3Manager(s3Store, prefix)
+	dir := filepath.Join(cacheDir, leaseDirName)
+	mgr, err := lease.NewFileManager(dir)
 	if err != nil {
-		logger.Warn("failed to build s3 lease manager, falling back to in-memory", logKeyError, err)
+		logger.Warn("failed to build file lease manager, falling back to in-memory", logKeyError, err)
 		return nil
 	}
-	logger.Info("using S3-native distributed write lease")
+	logger.Info("using file-backed write lease", "dir", dir)
 	return kb.WithWriteLeaseManager(mgr)
 }
 
@@ -772,6 +794,14 @@ func buildWorkerPools(k *kb.KB, cfg *config.Config, app *appcmd.App) ([]*kb.Work
 				KB:        k,
 				ID:        "document-publish-graph-worker",
 				KindValue: kb.EventDocumentGraphExtracted,
+			},
+			cfg.Workers.DocumentPublish,
+		},
+		{
+			&kb.SessionCommitWorker{
+				KB:             k,
+				ID:             "session-commit-worker",
+				ReleaseSession: k.IngestSessionsFor().Release,
 			},
 			cfg.Workers.DocumentPublish,
 		},

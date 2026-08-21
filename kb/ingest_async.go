@@ -72,6 +72,9 @@ type KBPublishedPayload struct {
 	MediaIDs      []string           `json:"media_ids,omitempty"`
 	FileResults   []FileIngestResult `json:"file_results,omitempty"`
 	SourceEventID string             `json:"source_event_id,omitempty"`
+	// Deferred marks rows durable locally but not yet in the manifest. The
+	// stage is done; the knowledge base is not updated until the commit.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 // WorkerFailedPayload is the payload carried by worker.failed events.
@@ -264,22 +267,25 @@ func (l *KB) appendDocumentUpsertEvent(
 	idempotencyKey string,
 ) (string, string, bool, error) {
 	if err := l.EventStore.Append(ctx, event); err != nil {
-		existingID, effectiveKey, handleErr := l.handleDocumentUpsertAppendError(ctx, err, kbID, idempotencyKey)
+		existingID, effectiveKey, handleErr := l.handleAppendDuplicate(ctx, err, EventDocumentUpsert, kbID, idempotencyKey)
 		return existingID, effectiveKey, false, handleErr
 	}
 	return event.EventID, idempotencyKey, true, nil
 }
 
-func (l *KB) handleDocumentUpsertAppendError(
+// handleAppendDuplicate resolves a losing idempotent append to the event that
+// won, so a retry reports the first attempt's operation instead of failing.
+func (l *KB) handleAppendDuplicate(
 	ctx context.Context,
 	err error,
+	kind EventKind,
 	kbID string,
 	idempotencyKey string,
 ) (string, string, error) {
 	if !errors.Is(err, ErrEventDuplicateKey) {
 		return "", "", err
 	}
-	existing, findErr := l.EventStore.FindByIdempotency(ctx, EventDocumentUpsert, kbID, idempotencyKey)
+	existing, findErr := l.EventStore.FindByIdempotency(ctx, kind, kbID, idempotencyKey)
 	if findErr != nil {
 		return "", "", findErr
 	}

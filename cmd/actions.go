@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -37,9 +38,16 @@ type Dependencies struct {
 	DeleteMedia       func(context.Context, string) error
 	MaxMediaBytes     int64
 
-	DeleteDocuments func(context.Context, string, []string) error
-	FetchVectors    func(context.Context, string, []string) ([]kb.VectorRecord, error)
-	QueryVectors    func(context.Context, string, []float32, int, *search.FilterExpr) ([]kb.QueryResult, error)
+	CacheDir string
+	Sessions *kb.IngestSessions
+	// DeferredPublish gates the ingest_sessions capability. A session pins a
+	// client to the instance holding its rows, so it is only offered where one
+	// writer owns the data directory.
+	DeferredPublish     bool
+	AppendSessionCommit func(context.Context, kb.SessionCommitPayload, string, string) (string, string, bool, error)
+	DeleteDocuments     func(context.Context, string, []string, kb.DeleteDocsOptions) error
+	FetchVectors        func(context.Context, string, []string) ([]kb.VectorRecord, error)
+	QueryVectors        func(context.Context, string, []float32, int, *search.FilterExpr) ([]kb.QueryResult, error)
 
 	// Event-driven ingest.
 	AppendDocumentUpsert  func(context.Context, kb.DocumentUpsertPayload, string, string) (string, string, error)
@@ -58,11 +66,15 @@ func Register(e *echo.Echo, deps Dependencies) {
 	if deps.AppMetrics == nil {
 		deps.AppMetrics = kb.NoopAppMetrics{}
 	}
+	sessions := deps.Sessions
+	if sessions == nil {
+		sessions = kb.NewIngestSessions(nil, deps.CacheDir)
+	}
 	registerOpsRoutes(e, deps)
 	registerCacheRoutes(e, deps)
-	registerRagRoutes(e, deps)
+	registerRagRoutes(e, deps, sessions)
 	registerMediaRoutes(e, deps)
-	registerVectorRoutes(e, deps)
+	registerVectorRoutes(e, deps, sessions)
 }
 
 func requestIDs(c echo.Context) (string, string) {
@@ -89,6 +101,10 @@ func WriteError(c echo.Context, err error, isBudgetExceeded func(error) bool) er
 	if isBudgetExceeded != nil && isBudgetExceeded(err) {
 		c.Response().Header().Set("Retry-After", "1")
 		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: err.Error()})
+	}
+	// Another client holding the knowledge base, not this server failing.
+	if errors.Is(err, kb.ErrUnpublishedWrites) {
+		return c.JSON(http.StatusConflict, map[string]any{errorResponseKey: err.Error()})
 	}
 	return c.JSON(http.StatusInternalServerError, map[string]any{errorResponseKey: err.Error()})
 }

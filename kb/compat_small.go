@@ -361,6 +361,7 @@ const (
 	EventKBPublished            = eventing.EventKBPublished
 	EventWorkerFailed           = eventing.EventWorkerFailed
 	EventStagingCleanup         = eventing.EventStagingCleanup
+	EventSessionCommit          = eventing.EventSessionCommit
 	EventStatusPending          = eventing.EventStatusPending
 	EventStatusClaimed          = eventing.EventStatusClaimed
 	EventStatusDone             = eventing.EventStatusDone
@@ -560,6 +561,8 @@ const (
 	MediaGCSweepJobExpr     = "*/15 * * * *"
 	MediaUploadAbortJobID   = "media-upload-abort"
 	MediaUploadAbortJobExpr = "*/5 * * * *"
+	SessionReapJobID        = "session-reap"
+	SessionReapJobExpr      = "*/5 * * * *"
 	EventCleanupJobID       = "event-cleanup"
 	EventCleanupJobExpr     = "0 */6 * * *"
 )
@@ -578,6 +581,7 @@ func (l *KB) RegisterDefaultJobs(s *Scheduler) error {
 			MediaGCMark:      MediaGCMarkJobID,
 			MediaGCSweep:     MediaGCSweepJobID,
 			MediaUploadAbort: MediaUploadAbortJobID,
+			SessionReap:      SessionReapJobID,
 		},
 		schedulerpkg.JobExpressions{
 			ShardGC:          ShardGCJobExpr,
@@ -587,6 +591,7 @@ func (l *KB) RegisterDefaultJobs(s *Scheduler) error {
 			MediaGCMark:      MediaGCMarkJobExpr,
 			MediaGCSweep:     MediaGCSweepJobExpr,
 			MediaUploadAbort: MediaUploadAbortJobExpr,
+			SessionReap:      SessionReapJobExpr,
 		},
 		schedulerpkg.EnabledJobs{
 			ShardGC:          true,
@@ -594,6 +599,9 @@ func (l *KB) RegisterDefaultJobs(s *Scheduler) error {
 			InboxCleanup:     l.EventInbox != nil,
 			MediaJobs:        l.MediaStore != nil,
 			MediaUploadAbort: l.EventStore != nil && l.BlobStore != nil,
+			// Registered either way, or turning the key off with a session
+			// open leaves a marker nothing can clear.
+			SessionReap: l.CacheDir != "",
 		},
 		l.runScheduledJob,
 	)
@@ -621,6 +629,9 @@ func (l *KB) runScheduledJob(ctx context.Context, jobID string) error {
 		return err
 	case MediaUploadAbortJobID:
 		_, err := l.SweepAbortedMediaUploads(ctx, time.Time{})
+		return err
+	case SessionReapJobID:
+		_, err := l.ReapAbandonedSessions(ctx)
 		return err
 	default:
 		return fmt.Errorf("scheduler: unknown default job %q", jobID)

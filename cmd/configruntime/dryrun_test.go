@@ -43,13 +43,13 @@ media:
 		rt, err := Build(context.Background(), cfg, BuildOptions{DryRun: true, Logger: quietLogger()})
 		require.NoError(t, err)
 
-		require.NoFileExists(t, blobRoot, "DryRun must not mkdir blob root")
-		require.NoFileExists(t, cacheDir, "DryRun must not mkdir cache dir")
+		require.NoDirExists(t, blobRoot, "DryRun must not mkdir blob root")
+		require.NoDirExists(t, cacheDir, "DryRun must not mkdir cache dir")
 
 		// Start in DryRun is also a no-op: still no mkdirs, still no listener.
 		require.NoError(t, rt.Start(context.Background()))
-		require.NoFileExists(t, blobRoot, "DryRun Start must remain side-effect free")
-		require.NoFileExists(t, cacheDir, "DryRun Start must remain side-effect free")
+		require.NoDirExists(t, blobRoot, "DryRun Start must remain side-effect free")
+		require.NoDirExists(t, cacheDir, "DryRun Start must remain side-effect free")
 		require.Empty(t, rt.App().Address(), "DryRun must not bind a port")
 		require.NoError(t, rt.Wait())
 		require.NoError(t, rt.Stop(context.Background()))
@@ -118,10 +118,7 @@ media:
 		require.NotNil(t, rt.Scheduler(), "scheduler is constructed in DryRun")
 		require.NotEmpty(t, rt.WorkerPools(), "worker pools are constructed (in-memory event store wiring)")
 
-		// Without Start being called, no goroutines should be running. The
-		// scheduler exposes JobIDs after construction (that proves it was
-		// built) but tick goroutines are not running because Start was never
-		// called. We also verify no listener was bound.
+		// Without Start being called, no goroutines should be running.
 		require.Empty(t, rt.App().Address(), "DryRun must not bind a listener even when Start is omitted")
 	})
 

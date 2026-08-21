@@ -42,6 +42,7 @@ const (
 	// may be rejected).
 	EventMediaUpload    EventKind = "media.upload"
 	EventDocumentUpsert EventKind = "document.upsert"
+	EventSessionCommit  EventKind = "session.commit"
 
 	// Domain events (facts, past tense. trigger downstream stages).
 	EventMediaUploaded          EventKind = "media.uploaded"

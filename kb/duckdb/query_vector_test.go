@@ -26,6 +26,11 @@ import (
 // harness KB instance. Call this after harness.Setup().
 func registerFormatOnHarness(t *testing.T, h *kb.TestHarness) {
 	t.Helper()
+	registerFormatReturning(t, h)
+}
+
+func registerFormatReturning(t *testing.T, h *kb.TestHarness) *DuckDBArtifactFormat {
+	t.Helper()
 	loader := h.KB()
 	af, err := NewArtifactFormat(DuckDBArtifactDeps{
 		BlobStore:      loader.BlobStore,
@@ -47,6 +52,7 @@ func registerFormatOnHarness(t *testing.T, h *kb.TestHarness) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, loader.RegisterFormat(af))
+	return af
 }
 
 // fixtureEmbedder produces deterministic, normalized embeddings derived from
@@ -764,9 +770,7 @@ func BenchmarkShardRankScore(b *testing.B) {
 	}
 }
 
-// BenchmarkMergeShardTopKResults measures result merging from multiple
-// shards. The current implementation allocates the flattened slice with
-// no capacity hint, causing incremental growth.
+// BenchmarkMergeShardTopKResults measures result merging from multiple shards.
 func BenchmarkMergeShardTopKResults(b *testing.B) {
 	for _, shardCount := range []int{2, 4, 8} {
 		for _, resultsPerShard := range []int{10, 100} {

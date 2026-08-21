@@ -70,6 +70,24 @@ func (m *S3Manager) Acquire(ctx context.Context, kbID string, ttl time.Duration)
 	return &Lease{KBID: kbID, Token: token, ExpiresAt: expiresAt}, nil
 }
 
+func (m *S3Manager) Peek(ctx context.Context, kbID string) (*Lease, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	data, _, err := m.store.DownloadBytesWithInfo(ctx, m.key(kbID))
+	if err != nil {
+		if errors.Is(err, blobstore.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("peek s3 lease: %w", err)
+	}
+	token, expiresAt, decErr := decodeLockPayload(data)
+	if decErr != nil || !m.now().Before(expiresAt) {
+		return nil, nil
+	}
+	return &Lease{KBID: kbID, Token: token, ExpiresAt: expiresAt}, nil
+}
+
 func (m *S3Manager) Renew(ctx context.Context, lease *Lease, ttl time.Duration) (*Lease, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

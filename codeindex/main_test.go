@@ -216,7 +216,9 @@ func TestRefreshUsesBranchSpecificIndexAndSkipsUnchangedFiles(t *testing.T) {
 	if changed.IndexedFiles != 1 || changed.UnchangedFiles != 1 || changed.ChunksDeleted == 0 {
 		t.Fatalf("changed-file refresh was not incremental: %+v", changed)
 	}
-	server.assertLastMutationOrder(t, "ingest", "publish", "delete")
+	// The commit is queued and then awaited, so the run ends on the publish the
+	// server reports for it rather than on the request that asked for it.
+	server.assertLastMutationOrder(t, "ingest", "publish", "delete", "commit", "publish")
 
 	if err := os.WriteFile(filepath.Join(root, "new.go"), []byte("package main\nfunc New() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -229,7 +231,7 @@ func TestRefreshUsesBranchSpecificIndexAndSkipsUnchangedFiles(t *testing.T) {
 	if withNewFile.IndexedFiles != 1 || withNewFile.UnchangedFiles != 2 || withNewFile.ChunksDeleted != 0 {
 		t.Fatalf("new-file refresh was not incremental: %+v", withNewFile)
 	}
-	server.assertLastMutationOrder(t, "ingest", "publish")
+	server.assertLastMutationOrder(t, "ingest", "publish", "commit", "publish")
 
 	if err := os.Remove(filepath.Join(root, "helper.go")); err != nil {
 		t.Fatal(err)
@@ -241,7 +243,7 @@ func TestRefreshUsesBranchSpecificIndexAndSkipsUnchangedFiles(t *testing.T) {
 	if withDeletedFile.DeletedFiles != 1 || withDeletedFile.UnchangedFiles != 2 || withDeletedFile.ChunksDeleted == 0 {
 		t.Fatalf("deleted-file refresh did not remove stale chunks: %+v", withDeletedFile)
 	}
-	server.assertLastMutationOrder(t, "delete")
+	server.assertLastMutationOrder(t, "delete", "commit", "publish")
 }
 
 func TestPipelineVersionForcesReindex(t *testing.T) {
@@ -496,7 +498,29 @@ type testMinnowServer struct {
 	ingests   []ingestRequest
 	deletes   [][]string
 	mutations []string
+	commits   []string
 	polls     int
+	session   string
+	// commitStatus, when set, is the status /rag/commit answers with instead of
+	// accepting the publish.
+	commitStatus int
+}
+
+// refuses mirrors the server: once a session is open, a request that does not
+// carry its handle belongs to another client and is refused.
+func (s *testMinnowServer) refuses(presented string) bool {
+	return s.session != "" && presented != s.session
+}
+
+// issueSession mirrors the server: the caller's handle is renewed when it sends
+// one, otherwise a new session opens.
+func (s *testMinnowServer) issueSession(presented string) string {
+	if presented != "" {
+		s.session = presented
+	} else if s.session == "" {
+		s.session = "instance-1:token-1"
+	}
+	return s.session
 }
 
 func newTestMinnowServer(t *testing.T) *testMinnowServer {
@@ -504,7 +528,9 @@ func newTestMinnowServer(t *testing.T) *testMinnowServer {
 	server := &testMinnowServer{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok", "capabilities": []string{"ingest_sessions"},
+		})
 	})
 	mux.HandleFunc("/rag/ingest", func(w http.ResponseWriter, r *http.Request) {
 		var request ingestRequest
@@ -517,11 +543,52 @@ func newTestMinnowServer(t *testing.T) *testMinnowServer {
 			t.Error("expected pre_chunked request")
 		}
 		server.mu.Lock()
+		if refused := server.refuses(request.SessionID); refused {
+			server.mu.Unlock()
+			http.Error(w, "another client holds the session", http.StatusConflict)
+			return
+		}
 		server.ingests = append(server.ingests, request)
 		server.mutations = append(server.mutations, "ingest")
+		issued := server.issueSession(request.SessionID)
 		server.mu.Unlock()
 		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(map[string]any{"event_id": "evt-1"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"event_id": "evt-1", "session_id": issued})
+	})
+	mux.HandleFunc("/rag/commit", func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			KBID      string `json:"kb_id"`
+			SessionID string `json:"session_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		server.mu.Lock()
+		if status := server.commitStatus; status != 0 {
+			server.mu.Unlock()
+			http.Error(w, "commit failed", status)
+			return
+		}
+		server.commits = append(server.commits, request.SessionID)
+		server.mutations = append(server.mutations, "commit")
+		// The publish releases the session, so the next run opens its own.
+		server.session = ""
+		server.mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"kb_id": request.KBID, "event_id": "evt-commit",
+			"status_url": "/rag/operations/evt-commit", "session_id": request.SessionID,
+		})
+	})
+	mux.HandleFunc("/rag/operations/evt-commit", func(w http.ResponseWriter, _ *http.Request) {
+		server.mu.Lock()
+		server.mutations = append(server.mutations, "publish")
+		server.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"terminal": map[string]any{"kind": "kb.published", "status": "done"},
+		})
 	})
 	mux.HandleFunc("/rag/operations/evt-1", func(w http.ResponseWriter, _ *http.Request) {
 		server.mu.Lock()
@@ -543,7 +610,8 @@ func newTestMinnowServer(t *testing.T) *testMinnowServer {
 	})
 	mux.HandleFunc("/v1/vectors", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
-			IDs []string `json:"ids"`
+			IDs       []string `json:"ids"`
+			SessionID string   `json:"session_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Error(err)
@@ -551,10 +619,16 @@ func newTestMinnowServer(t *testing.T) *testMinnowServer {
 			return
 		}
 		server.mu.Lock()
+		if refused := server.refuses(request.SessionID); refused {
+			server.mu.Unlock()
+			http.Error(w, "another client holds the session", http.StatusConflict)
+			return
+		}
 		server.deletes = append(server.deletes, append([]string(nil), request.IDs...))
 		server.mutations = append(server.mutations, "delete")
+		issued := server.issueSession(request.SessionID)
 		server.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(map[string]any{"ids": request.IDs})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ids": request.IDs, "session_id": issued})
 	})
 	server.Server = httptest.NewServer(mux)
 	return server

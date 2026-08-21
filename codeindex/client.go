@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,24 +22,45 @@ import (
 )
 
 type minnowClient struct {
-	baseURL      *url.URL
-	token        string
-	http         *http.Client
-	pollEvery    time.Duration
-	operationTTL time.Duration
-	now          func() time.Time
-	wait         func(context.Context, time.Duration) error
+	baseURL         *url.URL
+	token           string
+	http            *http.Client
+	pollEvery       time.Duration
+	operationTTL    time.Duration
+	now             func() time.Time
+	wait            func(context.Context, time.Duration) error
+	sessionID       string
+	sessionKB       string
+	runID           string
+	canDeferPublish bool
+	onSession       func(string)
+	onWait          func(time.Duration)
+	conflictBudget  time.Duration
+}
+
+type jsonCall struct {
+	client  *http.Client
+	method  string
+	path    string
+	body    any
+	idemKey string
+	out     any
 }
 
 type retryDecision struct {
 	retry bool
 	after time.Duration
+	// conflict clears on its own once the holding session lapses, so it is
+	// waited out against a time budget rather than the attempt budget.
+	conflict bool
 }
 
 type ingestRequest struct {
 	KBID         string           `json:"kb_id"`
 	GraphEnabled bool             `json:"graph_enabled"`
 	PreChunked   bool             `json:"pre_chunked"`
+	DeferPublish bool             `json:"defer_publish,omitempty"`
+	SessionID    string           `json:"session_id,omitempty"`
 	Documents    []ingestDocument `json:"documents"`
 }
 
@@ -48,7 +71,12 @@ type ingestDocument struct {
 }
 
 type acceptedOperation struct {
-	EventID string `json:"event_id"`
+	EventID   string `json:"event_id"`
+	SessionID string `json:"session_id"`
+}
+
+type deferredAck struct {
+	SessionID string `json:"session_id"`
 }
 
 type operationStatus struct {
@@ -82,12 +110,19 @@ func newMinnowClient(cfg Config) (*minnowClient, error) {
 	return &minnowClient{
 		baseURL: base, token: cfg.Minnow.Token, http: &http.Client{Timeout: 30 * time.Second},
 		pollEvery: pollEvery, operationTTL: operationTTL, now: time.Now, wait: waitDuration,
+		conflictBudget: sessionConflictBudget, runID: newRunID(),
 	}, nil
 }
 
 func (c *minnowClient) check(ctx context.Context) error {
-	var out map[string]any
-	return c.doJSONWithRetry(ctx, http.MethodGet, "/healthz", nil, "", &out)
+	var out struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := c.doJSONWithRetry(ctx, http.MethodGet, "/healthz", nil, "", &out); err != nil {
+		return err
+	}
+	c.canDeferPublish = slices.Contains(out.Capabilities, capabilityIngestSessions)
+	return nil
 }
 
 func (c *minnowClient) ingest(ctx context.Context, kbID string, docs []minnowcode.Document) error {
@@ -95,26 +130,83 @@ func (c *minnowClient) ingest(ctx context.Context, kbID string, docs []minnowcod
 	for _, doc := range docs {
 		wireDocs = append(wireDocs, ingestDocument{ID: doc.ID, Text: doc.Text, Metadata: flattenCodeMetadata(doc.Metadata)})
 	}
-	request := ingestRequest{KBID: kbID, GraphEnabled: false, PreChunked: true, Documents: wireDocs}
+	request := ingestRequest{
+		KBID: kbID, GraphEnabled: false, PreChunked: true,
+		DeferPublish: c.defers(kbID), SessionID: c.sessionID, Documents: wireDocs,
+	}
 	var accepted acceptedOperation
-	if err := c.doJSONWithRetry(ctx, http.MethodPost, "/rag/ingest", request, idempotencyKey(kbID, docs), &accepted); err != nil {
+	if err := c.doJSONWithRetry(ctx, http.MethodPost, "/rag/ingest", request, c.idempotencyKey(kbID, docs), &accepted); err != nil {
 		return err
 	}
 	if accepted.EventID == "" {
 		return fmt.Errorf("Minnow ingest response did not include event_id")
 	}
+	c.adoptSession(kbID, accepted.SessionID)
 	return c.waitForOperation(ctx, accepted.EventID)
+}
+
+// commit publishes everything the session deferred, as an operation to follow
+// so no proxy read timeout sits between the run and its writes.
+func (c *minnowClient) commit(ctx context.Context, kbID string) error {
+	if c.sessionID == "" {
+		return nil
+	}
+	body := map[string]any{"kb_id": kbID, "session_id": c.sessionID}
+	// Keyed so a lost response retries onto the same operation.
+	var accepted acceptedOperation
+	if err := c.doJSON(ctx, jsonCall{
+		client: c.http, method: http.MethodPost, path: "/rag/commit",
+		body: body, idemKey: c.sessionID, out: &accepted,
+	}); err != nil {
+		return err
+	}
+	if accepted.EventID == "" {
+		return fmt.Errorf("Minnow commit response did not include event_id")
+	}
+	// A publish rebuilds every shard, which outlasts the per-batch budget.
+	return c.awaitOperation(ctx, accepted.EventID, commitTimeout)
 }
 
 func (c *minnowClient) delete(ctx context.Context, kbID string, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return c.doJSONWithRetry(ctx, http.MethodDelete, "/v1/vectors", map[string]any{"kb_id": kbID, "ids": ids}, "", nil)
+	body := map[string]any{
+		"kb_id": kbID, "ids": ids,
+		"defer_publish": c.defers(kbID), "session_id": c.sessionID,
+	}
+	var ack deferredAck
+	if err := c.doJSONWithRetry(ctx, http.MethodDelete, "/v1/vectors", body, "", &ack); err != nil {
+		return err
+	}
+	c.adoptSession(kbID, ack.SessionID)
+	return nil
+}
+
+// defers excludes knowledge bases from earlier runs, whose rows would strand
+// under a session nothing commits.
+func (c *minnowClient) defers(kbID string) bool {
+	return c.canDeferPublish && kbID == c.sessionKB
+}
+
+// adoptSession records the handle the server issued, so a run that loses its
+// own resumes under that one rather than opening a second.
+func (c *minnowClient) adoptSession(kbID, id string) {
+	if id == "" || id == c.sessionID || kbID != c.sessionKB {
+		return
+	}
+	c.sessionID = id
+	if c.onSession != nil {
+		c.onSession(id)
+	}
 }
 
 func (c *minnowClient) waitForOperation(ctx context.Context, eventID string) error {
-	waitCtx, cancel := context.WithTimeout(ctx, c.operationTTL)
+	return c.awaitOperation(ctx, eventID, c.operationTTL)
+}
+
+func (c *minnowClient) awaitOperation(ctx context.Context, eventID string, budget time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	ticker := time.NewTicker(c.pollEvery)
 	defer ticker.Stop()
@@ -155,12 +247,30 @@ func (c *minnowClient) waitForOperation(ctx context.Context, eventID string) err
 }
 
 func (c *minnowClient) doJSONWithRetry(ctx context.Context, method, path string, body any, idemKey string, out any) error {
-	for attempt := 0; ; attempt++ {
-		decision, err := c.doJSONAttempt(ctx, method, path, body, idemKey, out)
+	return c.doJSON(ctx, jsonCall{client: c.http, method: method, path: path, body: body, idemKey: idemKey, out: out})
+}
+
+func (c *minnowClient) doJSON(ctx context.Context, call jsonCall) error {
+	attempt, waited := 0, time.Duration(0)
+	for {
+		decision, err := c.doJSONAttempt(ctx, call)
 		if err == nil {
 			return nil
 		}
-		if attempt >= 4 || !decision.retry {
+		switch {
+		case decision.conflict:
+			// A run refused by the orphan its own lost response left behind
+			// has to outlast it. Failing costs the whole index.
+			if waited+decision.after > c.conflictBudget {
+				return err
+			}
+			waited += decision.after
+			if c.onWait != nil {
+				c.onWait(decision.after)
+			}
+		case decision.retry && attempt < 4:
+			attempt++
+		default:
 			return err
 		}
 		if err := c.wait(ctx, decision.after); err != nil {
@@ -216,13 +326,8 @@ func waitDuration(ctx context.Context, duration time.Duration) error {
 	}
 }
 
-func (c *minnowClient) doJSONAttempt(
-	ctx context.Context,
-	method, path string,
-	body any,
-	idemKey string,
-	out any,
-) (retryDecision, error) {
+func (c *minnowClient) doJSONAttempt(ctx context.Context, call jsonCall) (retryDecision, error) {
+	method, path, body, idemKey, out := call.method, call.path, call.body, call.idemKey, call.out
 	canReplay := requestCanBeReplayed(method, idemKey)
 	var reader io.Reader
 	if body != nil {
@@ -246,7 +351,7 @@ func (c *minnowClient) doJSONAttempt(
 	if idemKey != "" {
 		req.Header.Set("Idempotency-Key", idemKey)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := call.client.Do(req)
 	if err != nil {
 		return retryDecision{retry: canReplay, after: c.pollEvery}, fmt.Errorf("%s %s: %w", method, endpoint, err)
 	}
@@ -268,14 +373,27 @@ func (c *minnowClient) doJSONAttempt(
 }
 
 func (c *minnowClient) responseRetryDecision(status int, retryAfter string, canReplay bool) retryDecision {
-	if !canReplay || (status != http.StatusTooManyRequests && (status < 500 || status > 599)) {
+	if !canReplay {
+		return retryDecision{}
+	}
+	conflict := status == http.StatusConflict
+	if !conflict && status != http.StatusTooManyRequests && (status < 500 || status > 599) {
 		return retryDecision{}
 	}
 	after, ok := parseRetryAfter(retryAfter, c.now())
 	if !ok {
+		// Nothing to wait for, so the conflict is reported.
+		if conflict {
+			return retryDecision{}
+		}
 		after = c.pollEvery
 	}
-	return retryDecision{retry: true, after: after}
+	if conflict {
+		// Floored, or a lapsed deadline is polled flat out for the budget.
+		return retryDecision{conflict: true, after: max(after, minConflictWait)}
+	}
+	// Capped, since Retry-After is whatever the far end says.
+	return retryDecision{retry: true, after: min(after, maxRetryWait)}
 }
 
 func requestCanBeReplayed(method, idemKey string) bool {
@@ -328,8 +446,20 @@ func flattenCodeMetadata(metadata map[string]any) map[string]any {
 	return out
 }
 
-func idempotencyKey(kbID string, docs []minnowcode.Document) string {
+// newRunID scopes this run's idempotency keys. Keyed on content alone, a rerun
+// replays keys the server already consumed and it queues nothing.
+func newRunID() string {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(buf[:])
+}
+
+func (c *minnowClient) idempotencyKey(kbID string, docs []minnowcode.Document) string {
 	hash := sha256.New()
+	_, _ = hash.Write([]byte(c.runID))
+	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write([]byte(kbID))
 	for _, doc := range docs {
 		_, _ = hash.Write([]byte{0})
@@ -339,3 +469,13 @@ func idempotencyKey(kbID string, docs []minnowcode.Document) string {
 	}
 	return "codeindex-" + hex.EncodeToString(hash.Sum(nil))
 }
+
+const (
+	capabilityIngestSessions = "ingest_sessions"
+	commitTimeout            = 30 * time.Minute
+
+	// Outlasts a server side session lease.
+	sessionConflictBudget = 11 * time.Minute
+	minConflictWait       = time.Second
+	maxRetryWait          = time.Minute
+)

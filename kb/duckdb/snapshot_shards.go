@@ -47,7 +47,9 @@ func (f *DuckDBArtifactFormat) uploadQueryableSnapshotShards(
 		return nil, 0, err
 	}
 	if activeRows <= 0 {
-		return nil, 0, fmt.Errorf("cannot shard snapshot with zero active docs")
+		// Every row was deleted. Refusing here means the delete that removes
+		// the last document can never succeed.
+		return nil, 0, nil
 	}
 
 	rowsPerShard, err := planShardRowCount(localDBPath, activeRows, partSize)

@@ -31,6 +31,8 @@ type Manager interface {
 	Acquire(ctx context.Context, kbID string, ttl time.Duration) (*Lease, error)
 	Renew(ctx context.Context, lease *Lease, ttl time.Duration) (*Lease, error)
 	Release(ctx context.Context, lease *Lease) error
+	// Peek reports the current holder, or nil, taking and extending nothing.
+	Peek(ctx context.Context, kbID string) (*Lease, error)
 }
 
 type memoryRecord struct {
@@ -83,6 +85,20 @@ func (m *InMemoryManager) Acquire(ctx context.Context, kbID string, ttl time.Dur
 	return &Lease{KBID: kbID, Token: token, ExpiresAt: expiresAt}, nil
 }
 
+func (m *InMemoryManager) Peek(ctx context.Context, kbID string) (*Lease, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.leases[kbID]
+	if !ok || !now.Before(rec.expiresAt) {
+		return nil, nil
+	}
+	return &Lease{KBID: kbID, Token: rec.token, ExpiresAt: rec.expiresAt}, nil
+}
+
 func (m *InMemoryManager) Renew(ctx context.Context, lease *Lease, ttl time.Duration) (*Lease, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -105,10 +121,9 @@ func (m *InMemoryManager) Renew(ctx context.Context, lease *Lease, ttl time.Dura
 	return &Lease{KBID: lease.KBID, Token: lease.Token, ExpiresAt: expiresAt}, nil
 }
 
-func (m *InMemoryManager) Release(ctx context.Context, lease *Lease) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+// Release ignores the context. It does no I/O, and refusing because the caller
+// has gone would strand the lease for its whole TTL.
+func (m *InMemoryManager) Release(_ context.Context, lease *Lease) error {
 	if lease == nil || lease.KBID == "" || lease.Token == "" {
 		return nil
 	}

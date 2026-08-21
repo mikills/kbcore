@@ -54,7 +54,12 @@ type KB struct {
 	Embedder      Embedder
 	GraphBuilder  *GraphBuilder
 
-	WriteLeaseManager         WriteLeaseManager
+	WriteLeaseManager WriteLeaseManager
+	// DeferredPublish mirrors the server gate. The reaper only has work when
+	// clients are allowed to hold writes for a later commit.
+	DeferredPublish           bool
+	ingestSessionsOnce        sync.Once
+	ingestSessions            *IngestSessions
 	WriteLeaseTTL             time.Duration
 	RetryObserver             MutationRetryObserver
 	ShardingPolicy            ShardingPolicy
@@ -185,6 +190,10 @@ func WithCacheWatermarks(highPercent, lowPercent int, minFreeBytes int64) KBOpti
 		kb.CacheLowWatermarkPercent = lowPercent
 		kb.CacheMinFreeBytes = minFreeBytes
 	}
+}
+
+func WithDeferredPublish(enabled bool) KBOption {
+	return func(kb *KB) { kb.DeferredPublish = enabled }
 }
 
 func WithEventStore(store EventStore) KBOption {

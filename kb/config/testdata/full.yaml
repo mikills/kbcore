@@ -77,6 +77,9 @@ media:
   tombstone_grace: 1h
   upload_completion_ttl: 15m
 
+ingest:
+  deferred_publish: true
+
 sharding:
   shard_trigger_bytes: 67108864
   shard_trigger_vector_rows: 150000
