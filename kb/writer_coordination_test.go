@@ -34,6 +34,10 @@ func (alwaysConflictLeaseManager) Release(ctx context.Context, lease *kb.WriteLe
 	return nil
 }
 
+func (alwaysConflictLeaseManager) Peek(context.Context, string) (*kb.WriteLease, error) {
+	return nil, nil
+}
+
 func TestWriteLease(t *testing.T) {
 	t.Run("redis renew before expiry", func(t *testing.T) {
 		ctx := context.Background()

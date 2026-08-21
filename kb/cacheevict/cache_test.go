@@ -203,6 +203,23 @@ func TestCache(t *testing.T) {
 		require.Equal(t, "kb-a", entries[0].KBID)
 		require.Equal(t, int64(3), total)
 	})
+
+	t.Run("lease state is not a cache entry", func(t *testing.T) {
+		root := t.TempDir()
+		kbPath := filepath.Join(root, "kb-a")
+		require.NoError(t, os.MkdirAll(kbPath, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(kbPath, "blob"), []byte("abc"), 0o644))
+		leasePath := filepath.Join(root, ".leases")
+		require.NoError(t, os.MkdirAll(leasePath, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(leasePath, "kb-a.lock"), []byte("held"), 0o600))
+
+		// Charging leases to the cache would let a sweep delete the record of
+		// who is mid-write.
+		entries, total := ScanEntries(root)
+		require.Len(t, entries, 1)
+		require.Equal(t, "kb-a", entries[0].KBID)
+		require.Equal(t, int64(3), total)
+	})
 }
 
 func sweepEntries(entries []Entry, cfg Config) SweepResult {

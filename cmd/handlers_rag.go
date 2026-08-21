@@ -1,15 +1,18 @@
 package cmd
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,14 +22,23 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-const maxQueryK = 200
+const (
+	maxQueryK = 200
+)
 
 type ragIngestRequest struct {
 	KBID         string           `json:"kb_id"`
 	ChunkSize    int              `json:"chunk_size"`
 	GraphEnabled *bool            `json:"graph_enabled"`
 	PreChunked   bool             `json:"pre_chunked,omitempty"`
+	DeferPublish bool             `json:"defer_publish,omitempty"`
+	SessionID    string           `json:"session_id,omitempty"`
 	Documents    []ragIngestDocIn `json:"documents"`
+}
+
+type ragCommitRequest struct {
+	KBID      string `json:"kb_id"`
+	SessionID string `json:"session_id"`
 }
 
 type ragIngestDocIn struct {
@@ -68,16 +80,110 @@ type multipartIngestRequest struct {
 	FileMetadata map[string]multipartFileMetadata
 }
 
-func registerRagRoutes(e *echo.Echo, deps Dependencies) {
-	e.POST("/rag/ingest", func(c echo.Context) error {
-		return handleRagIngest(c, deps)
-	})
-	e.POST("/rag/query", func(c echo.Context) error {
-		return handleRagQuery(c, deps)
+func registerRagRoutes(e *echo.Echo, deps Dependencies, sessions *kb.IngestSessions) {
+	e.POST("/rag/ingest", ragIngestHandler(deps, sessions))
+	e.POST("/rag/query", ragQueryHandler(deps))
+	e.POST("/rag/commit", ragCommitHandler(deps, sessions))
+}
+
+func ragIngestHandler(deps Dependencies, sessions *kb.IngestSessions) echo.HandlerFunc {
+	return func(c echo.Context) error { return handleRagIngest(c, deps, sessions) }
+}
+
+func ragQueryHandler(deps Dependencies) echo.HandlerFunc {
+	return func(c echo.Context) error { return handleRagQuery(c, deps) }
+}
+
+func ragCommitHandler(deps Dependencies, sessions *kb.IngestSessions) echo.HandlerFunc {
+	return func(c echo.Context) error { return handleRagCommit(c, deps, sessions) }
+}
+
+// errDeferredPublishDisabled answers a caller that skipped the /healthz probe.
+const errDeferredPublishDisabled = "deferred publishing is not enabled on this server"
+
+// holdIngestSession claims the knowledge base once the request is known good,
+// so a rejected batch cannot hold it against the client's own retry.
+func holdIngestSession(
+	ctx context.Context,
+	sessions *kb.IngestSessions,
+	deps Dependencies,
+	req ragIngestRequest,
+) (string, error) {
+	if !req.DeferPublish {
+		return "", nil
+	}
+	if !deferredPublishReady(deps) {
+		return "", errDeferredPublishUnavailable{}
+	}
+	return sessions.Hold(ctx, req.KBID, req.SessionID)
+}
+
+// deferredPublishReady matches what /healthz advertises, so a client cannot
+// open a session this deployment has no way to finish.
+func deferredPublishReady(deps Dependencies) bool {
+	return deps.DeferredPublish && deps.AppendSessionCommit != nil
+}
+
+type errDeferredPublishUnavailable struct{}
+
+func (errDeferredPublishUnavailable) Error() string { return errDeferredPublishDisabled }
+
+// releaseIngestSession undoes a claim only when this request opened the
+// session. Dropping a renewed handle would hand the knowledge base to another
+// writer while this client's rows are still pending.
+func releaseIngestSession(ctx context.Context, sessions *kb.IngestSessions, kbID, priorID, sessionID string) {
+	if sessionID == "" || sessionID == strings.TrimSpace(priorID) {
+		return
+	}
+	_ = sessions.Release(ctx, kbID, sessionID)
+}
+
+func handleRagCommit(c echo.Context, deps Dependencies, sessions *kb.IngestSessions) error {
+	var req ragCommitRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: errInvalidRequestBody})
+	}
+	req.KBID = strings.TrimSpace(req.KBID)
+	if req.KBID == "" {
+		req.KBID = defaultKBIDValue
+	}
+	if !deferredPublishReady(deps) {
+		return c.JSON(
+			http.StatusBadRequest,
+			map[string]any{errorResponseKey: errDeferredPublishDisabled},
+		)
+	}
+	if strings.TrimSpace(req.SessionID) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "session_id is required"})
+	}
+	// Renew rather than Hold, so a lapsed or invented handle cannot publish
+	// whatever the knowledge base happens to be holding.
+	sessionID, err := sessions.Renew(c.Request().Context(), req.KBID, req.SessionID)
+	if err != nil {
+		return writeIngestSessionError(c, deps, sessions, req.KBID, err)
+	}
+	// Queued, because a full publish outlives any proxy's read timeout.
+	idemKey, correlationID := requestIDs(c)
+	evtID, effectiveIdem, _, err := deps.AppendSessionCommit(
+		c.Request().Context(),
+		kb.SessionCommitPayload{KBID: req.KBID, SessionID: sessionID},
+		idemKey,
+		correlationID,
+	)
+	if err != nil {
+		return WriteError(c, err, deps.IsBudgetExceeded)
+	}
+	deps.Logger.InfoContext(c.Request().Context(), "rag commit accepted",
+		kbIDContextKey, req.KBID, eventIDResponseKey, evtID)
+	return writeAcceptedOperation(c, evtID, effectiveIdem, map[string]any{
+		eventIDResponseKey: evtID,
+		"status_url":       "/rag/operations/" + evtID,
+		kbIDContextKey:     req.KBID,
+		"session_id":       sessionID,
 	})
 }
 
-func handleRagIngest(c echo.Context, deps Dependencies) error {
+func handleRagIngest(c echo.Context, deps Dependencies, sessions *kb.IngestSessions) error {
 	start := time.Now()
 	logger := deps.Logger
 	metrics := deps.AppMetrics
@@ -100,8 +206,13 @@ func handleRagIngest(c echo.Context, deps Dependencies) error {
 		metrics.RecordIngest(req.KBID, time.Since(start).Milliseconds(), len(req.Documents), 0, err)
 		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: err.Error()})
 	}
+	sessionID, err := holdIngestSession(c.Request().Context(), sessions, deps, req)
+	if err != nil {
+		return writeIngestSessionError(c, deps, sessions, req.KBID, err)
+	}
 	evtID, effectiveIdem, err := appendRagIngestEvent(c, deps, req, docs, opts)
 	if err != nil {
+		releaseIngestSession(c.Request().Context(), sessions, req.KBID, req.SessionID, sessionID)
 		metrics.RecordIngest(req.KBID, time.Since(start).Milliseconds(), len(req.Documents), 0, err)
 		if errors.Is(err, kb.ErrGraphUnavailable) {
 			return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: err.Error()})
@@ -129,8 +240,51 @@ func handleRagIngest(c echo.Context, deps Dependencies) error {
 			kbIDContextKey:     req.KBID,
 			"document_count":   len(req.Documents),
 			"doc_ids":          docIDs,
+			"session_id":       sessionID,
 		},
 	)
+}
+
+// writeIngestSessionError separates a session another writer holds from a
+// lease backend that is down.
+func writeIngestSessionError(
+	c echo.Context,
+	deps Dependencies,
+	sessions *kb.IngestSessions,
+	kbID string,
+	err error,
+) error {
+	var conflict kb.ErrIngestSessionConflict
+	var elsewhere kb.ErrIngestSessionElsewhere
+	if errors.As(err, &elsewhere) {
+		// No deadline, because only routing to that instance helps.
+		return c.JSON(http.StatusConflict, map[string]any{errorResponseKey: err.Error()})
+	}
+	if errors.As(err, &conflict) {
+		if after := sessionRetryAfter(c.Request().Context(), sessions, kbID); after > 0 {
+			c.Response().Header().Set("Retry-After", strconv.Itoa(after))
+		}
+		return c.JSON(http.StatusConflict, map[string]any{errorResponseKey: err.Error()})
+	}
+	var disabled errDeferredPublishUnavailable
+	if errors.As(err, &disabled) {
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: err.Error()})
+	}
+	return WriteError(c, err, deps.IsBudgetExceeded)
+}
+
+// sessionRetryAfter reports the seconds left on the holder's lease, rounded up
+// so a client that waits exactly that long does not race the expiry.
+func sessionRetryAfter(ctx context.Context, sessions *kb.IngestSessions, kbID string) int {
+	held, err := sessions.Peek(ctx, kbID)
+	if err != nil || held == nil {
+		return 0
+	}
+	remaining := time.Until(held.ExpiresAt)
+	if remaining <= 0 {
+		return 0
+	}
+	return int(math.Ceil(remaining.Seconds()))
 }
 
 func bindRagIngestRequest(c echo.Context) (ragIngestRequest, error) {
@@ -382,7 +536,7 @@ func buildIngestDocuments(req ragIngestRequest) ([]kb.Document, []string, kb.Ups
 			kb.Document{ID: id, Text: text, MediaIDs: doc.MediaIDs, MediaRefs: doc.MediaRefs, Metadata: doc.Metadata},
 		)
 	}
-	return docs, docIDs, kb.UpsertDocsOptions{GraphEnabled: req.GraphEnabled}, nil
+	return docs, docIDs, kb.UpsertDocsOptions{GraphEnabled: req.GraphEnabled, DeferPublish: req.DeferPublish}, nil
 }
 
 func handleMultipartIngest(

@@ -309,9 +309,8 @@ func TestDocumentPipelineWorkers(t *testing.T) {
 	})
 }
 
-// failingDeleteBlobStore wraps a BlobStore and fails every Delete() with
-// the configured error. Used to verify Commit surfaces cleanup errors
-// rather than silently swallowing them.
+// failingDeleteBlobStore wraps a BlobStore and fails every Delete() with the
+// configured error.
 type failingDeleteBlobStore struct {
 	inner     BlobStore
 	deleteErr error
@@ -647,7 +646,10 @@ type errEmbedder struct{ err error }
 
 func (e errEmbedder) Embed(context.Context, string) ([]float32, error) { return nil, e.err }
 
-type preparedOnlyFormat struct{ lastDocs []EmbeddedDocument }
+type preparedOnlyFormat struct {
+	lastDocs []EmbeddedDocument
+	uploads  []bool
+}
 
 func (f *preparedOnlyFormat) Kind() string    { return "prepared-only" }
 func (f *preparedOnlyFormat) Version() int    { return 1 }
@@ -675,5 +677,6 @@ func (f *preparedOnlyFormat) Delete(context.Context, IngestDeleteRequest) (Inges
 }
 func (f *preparedOnlyFormat) PublishPrepared(_ context.Context, req PreparedPublishRequest) (IngestResult, error) {
 	f.lastDocs = append([]EmbeddedDocument(nil), req.Docs...)
+	f.uploads = append(f.uploads, req.Upload)
 	return IngestResult{MutatedCount: len(req.Docs)}, nil
 }

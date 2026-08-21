@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/mikills/minnow/kb/cacheevict"
@@ -70,7 +71,7 @@ func (l *KB) evictCacheSweepOnce(protectedEntry string, incomingBytes int64) cac
 		Protected:            protectedCacheEntries(protectedEntry),
 		Now:                  l.Clock.Now(),
 		Remove: func(entry cacheevict.Entry, reason cacheevict.Reason) bool {
-			return l.removeCacheEntry(entry)
+			return l.removeCacheEntry(entry, false)
 		},
 	})
 	for i := 0; i < result.TTLEvictions; i++ {
@@ -93,7 +94,13 @@ type PooledConnEvictionBarrier interface {
 	BeginPooledConnEviction(pathPrefix string) func()
 }
 
-func (l *KB) removeCacheEntry(entry cacheevict.Entry) bool {
+// removeCacheEntry skips unpublished rows unless the caller is deleting the
+// knowledge base on purpose. entry.Path is a shard file, so the marker lives
+// one level up.
+func (l *KB) removeCacheEntry(entry cacheevict.Entry, force bool) bool {
+	if !force && HasPendingSession(filepath.Join(l.CacheDir, entry.KBID)) {
+		return false
+	}
 	lock := l.LockFor(entry.KBID)
 	// Never wait while a mutation may itself be requesting cache eviction;
 	// fixed lock stripes can otherwise self-deadlock or cross-deadlock. A busy

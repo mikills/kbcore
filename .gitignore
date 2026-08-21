@@ -31,3 +31,5 @@ todo.md
 # Compiled binaries from `go build ./...` at a module root
 /minnow
 /codeindex/codeindex
+
+.claude/

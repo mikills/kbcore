@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	minnowcode "github.com/mikills/minnow/codeindex/indexer"
@@ -19,7 +21,31 @@ func main() {
 	if len(args) > 0 && args[0] == "index" {
 		args = args[1:]
 	}
-	os.Exit(run(context.Background(), args))
+	ctx, stop := interruptContext()
+	code := run(ctx, args)
+	stop()
+	os.Exit(code)
+}
+
+// interruptContext cancels on the first interrupt so a run releases its index
+// lock instead of leaving the next one to wait out the stale-lock window. A
+// second interrupt gets the default action.
+func interruptContext() (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-signals:
+			signal.Stop(signals)
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() {
+		signal.Stop(signals)
+		cancel()
+	}
 }
 
 func run(ctx context.Context, args []string) int {

@@ -40,6 +40,9 @@ type tokenBucket struct {
 	updatedNS int64
 }
 
+// capabilityIngestSessions tells a client this server can commit a session.
+const capabilityIngestSessions = "ingest_sessions"
+
 func newIPRateLimiter(rate, burst float64) *ipRateLimiter {
 	return &ipRateLimiter{rate: rate, burst: burst, stripes: make([]rateLimitStripe, operationsLimiterStripes)}
 }
@@ -103,7 +106,11 @@ func registerOpsRoutes(e *echo.Echo, deps Dependencies) {
 	metrics := deps.AppMetrics
 
 	e.GET("/healthz", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, map[string]any{"status": "ok"})
+		capabilities := []string{}
+		if deferredPublishReady(deps) {
+			capabilities = append(capabilities, capabilityIngestSessions)
+		}
+		return c.JSON(http.StatusOK, map[string]any{"status": "ok", "capabilities": capabilities})
 	})
 	if deps.CacheMetricsHandler != nil {
 		e.GET("/metrics/cache", echo.WrapHandler(deps.CacheMetricsHandler))

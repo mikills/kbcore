@@ -135,6 +135,7 @@ func (w *DocumentPublishWorker) publishedResult(event *KBEvent, work publishWork
 			MediaIDs:      mediaIDs,
 			FileResults:   work.fileResults,
 			SourceEventID: work.sourceEventID,
+			Deferred:      work.opts.DeferPublish,
 		},
 	)
 	pub := w.KB.newChildDoneEvent(

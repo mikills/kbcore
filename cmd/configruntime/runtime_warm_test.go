@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,8 +16,7 @@ import (
 )
 
 // TestWarmCacheLifecycle checks Stop cancels and drains the pre-warm goroutine
-// without deadlocking. Ingest one doc, then point a warm-enabled runtime at the
-// same blob store so warming has a real shard to fetch.
+// without deadlocking.
 func TestWarmCacheLifecycle(t *testing.T) {
 	blobRoot := filepath.Join(t.TempDir(), "blobs")
 
@@ -129,12 +129,23 @@ func requirePublishedShard(t *testing.T, baseURL, kbID string) {
 	t.Fatal("ingest did not reach kb.published within deadline")
 }
 
+// dirHasFile ignores the server's own control files, which exist before any
+// warming happens and would make every caller trivially true.
 func dirHasFile(dir string) bool {
 	var found bool
-	_ = filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
-		if err == nil && info != nil && !info.IsDir() && info.Size() > 0 {
-			found = true
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() || info.Size() == 0 {
+			return nil
 		}
+		if strings.HasPrefix(filepath.Base(path), ".") {
+			return nil
+		}
+		for _, part := range strings.Split(filepath.Dir(path), string(filepath.Separator)) {
+			if strings.HasPrefix(part, ".") {
+				return nil
+			}
+		}
+		found = true
 		return nil
 	})
 	return found

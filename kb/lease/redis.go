@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -71,6 +72,24 @@ func (m *RedisManager) Acquire(ctx context.Context, kbID string, ttl time.Durati
 		return nil, ErrConflict
 	}
 	return &Lease{KBID: kbID, Token: token, ExpiresAt: now.Add(ttl)}, nil
+}
+
+func (m *RedisManager) Peek(ctx context.Context, kbID string) (*Lease, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	token, err := m.Client.Get(ctx, m.key(kbID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	ttl, err := m.Client.PTTL(ctx, m.key(kbID)).Result()
+	if err != nil {
+		return nil, err
+	}
+	return &Lease{KBID: kbID, Token: token, ExpiresAt: m.now().Add(ttl)}, nil
 }
 
 func (m *RedisManager) Renew(ctx context.Context, lease *Lease, ttl time.Duration) (*Lease, error) {

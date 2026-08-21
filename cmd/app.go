@@ -40,6 +40,7 @@ type AppConfig struct {
 	CacheEvictionInterval time.Duration
 	MaxMediaBytes         int64
 	MCP                   mcpserver.Config
+	DeferredPublish       bool
 	Logger                *slog.Logger
 }
 
@@ -149,6 +150,7 @@ func mergeWithDefaultAppConfig(cfg AppConfig) AppConfig {
 		d.MaxMediaBytes = cfg.MaxMediaBytes
 	}
 	d.MCP = cfg.MCP
+	d.DeferredPublish = cfg.DeferredPublish
 	return d
 }
 
@@ -205,6 +207,7 @@ func (a *App) registerRoutes() {
 		return errors.Is(err, kb.ErrCacheBudgetExceeded)
 	}
 	deps.MaxMediaBytes = a.config.MaxMediaBytes
+	deps.DeferredPublish = a.config.DeferredPublish
 	deps.AppMetrics = a.metrics
 
 	// HTTP-only closures: media upload and file ingest are exposed on the
@@ -293,8 +296,13 @@ func buildKBDeps(loader *kb.KB, logger *slog.Logger) Dependencies {
 		deps.FindOperationTerminal = loader.FindOperationTerminal
 		deps.OperationStages = loader.OperationStages
 	}
-	deps.DeleteDocuments = func(ctx context.Context, kbID string, ids []string) error {
-		return loader.DeleteDocsAndUpload(ctx, kbID, ids, kb.DeleteDocsOptions{})
+	deps.DeleteDocuments = func(ctx context.Context, kbID string, ids []string, opts kb.DeleteDocsOptions) error {
+		return loader.DeleteDocsAndUpload(ctx, kbID, ids, opts)
+	}
+	deps.CacheDir = loader.CacheDir
+	deps.Sessions = loader.IngestSessionsFor()
+	if loader.EventStore != nil {
+		deps.AppendSessionCommit = loader.AppendSessionCommit
 	}
 	deps.FetchVectors = loader.FetchVectors
 	deps.QueryVectors = func(ctx context.Context, kbID string, vec []float32, k int, filter *search.FilterExpr) ([]kb.QueryResult, error) {

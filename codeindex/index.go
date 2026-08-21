@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	minnowcode "github.com/mikills/minnow/codeindex/indexer"
@@ -35,7 +40,8 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 	if err != nil {
 		return indexResult{}, err
 	}
-	target, previous, releaseLock, err := prepareRefreshTarget(target, operationTTL+time.Minute)
+	staleAfter := operationTTL + time.Minute
+	target, previous, statePath, releaseLock, err := prepareRefreshTarget(target, staleAfter)
 	if err != nil {
 		return indexResult{}, err
 	}
@@ -56,11 +62,22 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 	if err := minnowcode.ValidateConfirmation(opts, len(files)); err != nil {
 		return indexResult{}, err
 	}
-	client, journal, err := startUpload(ctx, cfg, target, progress)
+	// Not when the id is minted, since a run that stops at the prompt has
+	// uploaded nothing to pin.
+	if target.MintedKBID {
+		saveReservedKBID(target)
+	}
+	own := journalRecovery{
+		ownJournal: uploadJournalPath(target), statePath: statePath, staleAfter: staleAfter,
+	}
+	client, journal, invalidated, err := startUpload(ctx, cfg, target, own, progress)
 	if err != nil {
 		return indexResult{}, err
 	}
 	defer journal.close()
+	// Recovery just deleted their chunks. The copy read before that still
+	// calls them unchanged, which would leave them out of the index.
+	forgetFiles(previous, invalidated)
 	sink := &documentSink{
 		client: client, kbID: target.KBID, policy: policy, journal: journal, progress: progress,
 	}
@@ -82,17 +99,23 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 	if err := sendDeletes(ctx, client, target.KBID, plan.deleteIDs); err != nil {
 		return indexResult{}, err
 	}
+	// State must not record success before the deferred writes are published.
+	if err := client.commit(ctx, target.KBID); err != nil {
+		return indexResult{}, err
+	}
+	clearSession(target)
 	plan.state.UpdatedAt = time.Now().UTC()
-	statePath, err := saveIndexState(target, plan.state)
+	savedPath, err := saveIndexState(target, plan.state)
 	if err != nil {
 		return indexResult{}, err
 	}
+	clearReservedKBID(target)
 	if err := saveRegistrySelection(target, opts); err != nil {
 		return indexResult{}, err
 	}
 	// State now records every emitted chunk, so a leftover journal is orphan-free.
 	_ = journal.remove()
-	plan.result.StatePath = statePath
+	plan.result.StatePath = savedPath
 	progress.done(plan.result)
 	return plan.result, nil
 }
@@ -101,26 +124,43 @@ func startUpload(
 	ctx context.Context,
 	cfg Config,
 	target indexTarget,
+	own journalRecovery,
 	progress *progressReporter,
-) (*minnowClient, *uploadJournal, error) {
+) (*minnowClient, *uploadJournal, []string, error) {
 	client, err := newMinnowClient(cfg)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := client.check(ctx); err != nil {
-		return nil, nil, fmt.Errorf("connect to Minnow at %s: %w", cfg.Minnow.URL, err)
+		return nil, nil, nil, fmt.Errorf("connect to Minnow at %s: %w", cfg.Minnow.URL, err)
 	}
-	journal, err := startUploadJournal(ctx, client, target, progress)
+	// Publishing per batch is slower but never strands writes.
+	if client.canDeferPublish {
+		client.sessionKB = target.KBID
+		client.sessionID = loadSession(target)
+		client.onSession = func(id string) { saveSession(target, id) }
+		client.onWait = progress.waitingForSession
+	}
+	journal, invalidated, err := startUploadJournal(ctx, client, target, own, progress)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return client, journal, nil
+	return client, journal, invalidated, nil
 }
 
-func prepareRefreshTarget(target indexTarget, staleAfter time.Duration) (indexTarget, indexState, func(), error) {
+func forgetFiles(state indexState, paths []string) {
+	for _, path := range paths {
+		delete(state.Files, path)
+	}
+}
+
+func prepareRefreshTarget(
+	target indexTarget,
+	staleAfter time.Duration,
+) (indexTarget, indexState, string, func(), error) {
 	releaseLock, err := acquireRefreshLocks(target, staleAfter)
 	if err != nil {
-		return indexTarget{}, indexState{}, nil, err
+		return indexTarget{}, indexState{}, "", nil, err
 	}
 	prepared := false
 	defer func() {
@@ -130,19 +170,19 @@ func prepareRefreshTarget(target indexTarget, staleAfter time.Duration) (indexTa
 	}()
 	if target.Git {
 		if err := minnowcode.EnsureLocalStateIgnored(target.StateRoot); err != nil {
-			return indexTarget{}, indexState{}, nil, err
+			return indexTarget{}, indexState{}, "", nil, err
 		}
 	}
-	previous, _, stateExists, err := loadIndexState(target)
+	previous, statePath, stateExists, err := loadIndexState(target)
 	if err != nil {
-		return indexTarget{}, indexState{}, nil, err
+		return indexTarget{}, indexState{}, "", nil, err
 	}
 	target, err = assignIndexGeneration(target, previous, stateExists)
 	if err != nil {
-		return indexTarget{}, indexState{}, nil, err
+		return indexTarget{}, indexState{}, "", nil, err
 	}
 	prepared = true
-	return target, previous, releaseLock, nil
+	return target, previous, statePath, releaseLock, nil
 }
 
 func acquireRefreshLocks(target indexTarget, staleAfter time.Duration) (func(), error) {
@@ -428,4 +468,33 @@ func saveRegistrySelection(target indexTarget, opts minnowcode.Options) error {
 		delete(registry.Indexes, target.LegacyIndexKey)
 	}
 	return minnowcode.SaveRegistry(target.StateRoot, registry)
+}
+
+// sessionPath holds the handle the server issued, so an interrupted run
+// resumes its own session instead of waiting out the lease.
+func sessionPath(target indexTarget) string {
+	sum := sha256.Sum256([]byte(target.KBID))
+	name := ".session-" + hex.EncodeToString(sum[:8])
+	return filepath.Join(target.StateRoot, ".minnow", "codeindex", name)
+}
+
+func loadSession(target indexTarget) string {
+	data, err := os.ReadFile(sessionPath(target))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// saveSession is best effort, since losing the handle only costs the wait.
+func saveSession(target indexTarget, id string) {
+	path := sessionPath(target)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(path, []byte(id), 0o600)
+}
+
+func clearSession(target indexTarget) {
+	_ = os.Remove(sessionPath(target))
 }

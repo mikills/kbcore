@@ -15,6 +15,7 @@ type JobSet struct {
 	MediaGCMark      JobRunner
 	MediaGCSweep     JobRunner
 	MediaUploadAbort JobRunner
+	SessionReap      JobRunner
 }
 
 type JobIDs struct {
@@ -25,6 +26,7 @@ type JobIDs struct {
 	MediaGCMark      string
 	MediaGCSweep     string
 	MediaUploadAbort string
+	SessionReap      string
 }
 
 type JobExpressions struct {
@@ -35,6 +37,7 @@ type JobExpressions struct {
 	MediaGCMark      string
 	MediaGCSweep     string
 	MediaUploadAbort string
+	SessionReap      string
 }
 
 type EnabledJobs struct {
@@ -43,6 +46,7 @@ type EnabledJobs struct {
 	InboxCleanup     bool
 	MediaJobs        bool
 	MediaUploadAbort bool
+	SessionReap      bool
 }
 
 type NamedJobRunner func(context.Context, string) error
@@ -62,6 +66,7 @@ func RegisterDefaultNamedJobs(
 		MediaGCMark:      namedJob(enabled.MediaJobs, ids.MediaGCMark, run),
 		MediaGCSweep:     namedJob(enabled.MediaJobs, ids.MediaGCSweep, run),
 		MediaUploadAbort: namedJob(enabled.MediaUploadAbort, ids.MediaUploadAbort, run),
+		SessionReap:      namedJob(enabled.SessionReap, ids.SessionReap, run),
 	})
 }
 
@@ -88,6 +93,7 @@ func RegisterDefaultJobs(s *Scheduler, ids JobIDs, exprs JobExpressions, jobs Jo
 		registerIfPresent(s, ids.MediaGCMark, exprs.MediaGCMark, jobs.MediaGCMark),
 		registerIfPresent(s, ids.MediaGCSweep, exprs.MediaGCSweep, jobs.MediaGCSweep),
 		registerIfPresent(s, ids.MediaUploadAbort, exprs.MediaUploadAbort, jobs.MediaUploadAbort),
+		registerIfPresent(s, ids.SessionReap, exprs.SessionReap, jobs.SessionReap),
 	)
 }
 

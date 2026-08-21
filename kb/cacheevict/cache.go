@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -292,6 +293,19 @@ func removeEntry(cfg Config, entry Entry, reason Reason, result *SweepResult) bo
 	return true
 }
 
+// Names the server keeps for itself. They are not knowledge bases and must
+// survive eviction and clearing.
+const (
+	LeaseDirName       = ".leases"
+	InstanceIDFileName = ".instance-id"
+)
+
+var ControlEntryNames = []string{LeaseDirName, InstanceIDFileName}
+
+func IsControlEntry(name string) bool {
+	return slices.Contains(ControlEntryNames, name)
+}
+
 func ScanEntries(root string) ([]Entry, int64) {
 	items, err := os.ReadDir(root)
 	if err != nil {
@@ -300,7 +314,8 @@ func ScanEntries(root string) ([]Entry, int64) {
 	entries := make([]Entry, 0, len(items))
 	var total int64
 	for _, item := range items {
-		if !item.IsDir() {
+		// Charging control state to the cache would evict it to reclaim space.
+		if !item.IsDir() || IsControlEntry(item.Name()) {
 			continue
 		}
 		kbPath := filepath.Join(root, item.Name())

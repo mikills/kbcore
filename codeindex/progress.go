@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -47,6 +48,20 @@ func (p *progressReporter) recovered(chunks int) {
 		return
 	}
 	p.logf("removed %d chunks left behind by an interrupted run", chunks)
+}
+
+func (p *progressReporter) waitingForSession(d time.Duration) {
+	if p == nil {
+		return
+	}
+	p.logf("another run holds this knowledge base, waiting %s for it to lapse", d.Round(time.Second))
+}
+
+func (p *progressReporter) recoveryDeferred(journalPath string, err error) {
+	if p == nil {
+		return
+	}
+	p.logf("left %s for a later run: %v", filepath.Base(journalPath), err)
 }
 
 func (p *progressReporter) fileChunked(chunks int) {

@@ -26,7 +26,17 @@ type Config struct {
 	Media     MediaConfig     `yaml:"media"           json:"media"`
 	Sharding  ShardingConfig  `yaml:"sharding"        json:"sharding"`
 	CodeIndex CodeIndexConfig `yaml:"code_index"      json:"code_index"`
+	Ingest    IngestConfig    `yaml:"ingest"          json:"ingest"`
 	MCP       MCPConfig       `yaml:"mcp"             json:"mcp"`
+}
+
+// IngestConfig covers ingest behaviour that is not per-request.
+type IngestConfig struct {
+	// DeferredPublish lets a client hold many batches and commit once. Every
+	// request in a session must reach the instance holding the rows, so it is
+	// only safe where one writer owns the data directory. Omitted decides from
+	// the blob store.
+	DeferredPublish *bool `yaml:"deferred_publish,omitempty" json:"deferred_publish,omitempty"`
 }
 
 // HTTPConfig describes the public HTTP server.
@@ -687,4 +697,13 @@ func (c *Config) applyMCPDefaults() {
 	if !c.MCP.httpStatelessSet {
 		c.MCP.HTTPStateless = true
 	}
+}
+
+// DeferredPublishEnabled defaults from the blob store, since local storage is
+// one instance by construction and shared storage may not be.
+func (c *Config) DeferredPublishEnabled() bool {
+	if c.Ingest.DeferredPublish != nil {
+		return *c.Ingest.DeferredPublish
+	}
+	return c.Storage.Blob.Kind == "local"
 }

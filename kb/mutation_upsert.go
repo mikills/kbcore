@@ -5,10 +5,13 @@ import "context"
 type DeleteDocsOptions struct {
 	HardDelete   bool
 	CleanupGraph bool
+	DeferPublish bool
 }
 
 type UpsertDocsOptions struct {
 	GraphEnabled *bool
+	// Publishing rebuilds every index, so a bulk load pays it once.
+	DeferPublish bool
 }
 
 func (l *KB) UpsertDocs(ctx context.Context, kbID string, docs []Document) error {
@@ -56,7 +59,9 @@ func (l *KB) UpsertDocsAndUploadWithRetryAndOptions(
 			return err
 		}
 
-		_, err = format.Ingest(ctx, IngestUpsertRequest{KBID: kbID, Docs: docs, Upload: true, Options: opts})
+		_, err = format.Ingest(ctx, IngestUpsertRequest{
+			KBID: kbID, Docs: docs, Upload: !opts.DeferPublish, Options: opts,
+		})
 		return err
 	})
 }
@@ -70,7 +75,9 @@ func (l *KB) PublishPreparedDocs(
 ) error {
 	return l.publishPreparedDocs(
 		ctx,
-		PreparedPublishRequest{KBID: kbID, Docs: docs, GraphResult: graphResult, Options: opts, Upload: true},
+		PreparedPublishRequest{
+			KBID: kbID, Docs: docs, GraphResult: graphResult, Options: opts, Upload: !opts.DeferPublish,
+		},
 	)
 }
 
@@ -85,6 +92,11 @@ func (l *KB) publishPreparedDocs(ctx context.Context, req PreparedPublishRequest
 	}
 	_, err = publisher.PublishPrepared(ctx, req)
 	return err
+}
+
+// CommitPreparedDocs publishes writes accumulated by DeferPublish.
+func (l *KB) CommitPreparedDocs(ctx context.Context, kbID string) error {
+	return l.commitPreparedDocs(ctx, kbID)
 }
 
 func (l *KB) commitPreparedDocs(ctx context.Context, kbID string) error {
@@ -140,7 +152,9 @@ func (l *KB) DeleteDocsAndUploadWithRetry(
 			return err
 		}
 
-		_, err = format.Delete(ctx, IngestDeleteRequest{KBID: kbID, DocIDs: docIDs, Upload: true, Options: opts})
+		_, err = format.Delete(ctx, IngestDeleteRequest{
+			KBID: kbID, DocIDs: docIDs, Upload: !opts.DeferPublish, Options: opts,
+		})
 		return err
 	})
 }

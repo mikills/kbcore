@@ -151,3 +151,31 @@ func (r *recordingManifestStore) Delete(ctx context.Context, kbID string) error 
 	r.deleteCount++
 	return nil
 }
+
+func TestClearCache(t *testing.T) {
+	t.Run("removes cached knowledge bases and keeps lease state", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		kbPath := filepath.Join(cacheDir, "kb-a")
+		require.NoError(t, os.MkdirAll(kbPath, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(kbPath, "blob"), []byte("abc"), 0o644))
+		leasePath := filepath.Join(cacheDir, ".leases")
+		require.NoError(t, os.MkdirAll(leasePath, 0o755))
+		lockPath := filepath.Join(leasePath, "kb-a.lock")
+		require.NoError(t, os.WriteFile(lockPath, []byte("held"), 0o600))
+		instancePath := filepath.Join(cacheDir, ".instance-id")
+		require.NoError(t, os.WriteFile(instancePath, []byte("instance-1"), 0o600))
+
+		// Clearing is the operator's escape hatch for a knowledge base wedged by
+		// an abandoned session, so it has to delete one that is still marked.
+		require.NoError(t, MarkPendingSession(kbPath))
+
+		k := NewKB(&LocalBlobStore{Root: t.TempDir()}, cacheDir)
+		require.NoError(t, k.ClearCache())
+
+		require.NoDirExists(t, kbPath)
+		// Clearing cached shards must not drop the record of who is mid-write,
+		// nor the identity that decides whose session this instance owns.
+		require.FileExists(t, lockPath)
+		require.FileExists(t, instancePath)
+	})
+}

@@ -25,6 +25,11 @@ func (f *DuckDBArtifactFormat) CompactIfNeeded(ctx context.Context, kbID string)
 	lock.Lock()
 	defer lock.Unlock()
 
+	// Compacting would move the manifest past the session's local rows.
+	if kb.HasPendingSession(filepath.Join(f.deps.CacheDir, kbID)) {
+		return &kb.CompactionPublishResult{Performed: false}, nil
+	}
+
 	releaseLease, err := f.acquireCompactionLease(ctx, kbID)
 	if err != nil {
 		return nil, err

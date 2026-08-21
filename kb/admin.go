@@ -74,7 +74,7 @@ func (l *KB) deleteKBCache(kbID string) []error {
 	}
 	var errs []error
 	path := filepath.Join(l.CacheDir, kbID)
-	if !l.removeCacheEntry(cacheevict.Entry{KBID: kbID, Path: path}) {
+	if !l.removeCacheEntry(cacheevict.Entry{KBID: kbID, Path: path}, true) {
 		errs = append(errs, fmt.Errorf("remove cache dir for %q", kbID))
 	}
 	_, total := cacheevict.ScanEntries(l.CacheDir)
@@ -134,8 +134,11 @@ func (l *KB) ClearCache() error {
 		return err
 	}
 	for _, entry := range entries {
+		if cacheevict.IsControlEntry(entry.Name()) {
+			continue
+		}
 		path := filepath.Join(l.CacheDir, entry.Name())
-		if !l.removeCacheEntry(cacheevict.Entry{KBID: entry.Name(), Path: path}) {
+		if !l.removeCacheEntry(cacheevict.Entry{KBID: entry.Name(), Path: path}, true) {
 			return fmt.Errorf("remove cache entry %q", entry.Name())
 		}
 	}

@@ -11,9 +11,9 @@ import (
 )
 
 type vectorUpsertDoc struct {
-	ID        string         `json:"id"`
-	Vector    []float32      `json:"vector"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
+	ID       string         `json:"id"`
+	Vector   []float32      `json:"vector"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 type vectorUpsertRequest struct {
@@ -35,14 +35,19 @@ type vectorQueryResult struct {
 }
 
 type vectorDeleteRequest struct {
-	KBID string   `json:"kb_id"`
-	IDs  []string `json:"ids"`
+	KBID         string   `json:"kb_id"`
+	IDs          []string `json:"ids"`
+	DeferPublish bool     `json:"defer_publish,omitempty"`
+	SessionID    string   `json:"session_id,omitempty"`
 }
 
-type vectorHandler struct{ deps Dependencies }
+type vectorHandler struct {
+	deps     Dependencies
+	sessions *kb.IngestSessions
+}
 
-func registerVectorRoutes(e *echo.Echo, deps Dependencies) {
-	h := vectorHandler{deps}
+func registerVectorRoutes(e *echo.Echo, deps Dependencies, sessions *kb.IngestSessions) {
+	h := vectorHandler{deps: deps, sessions: sessions}
 	e.POST("/v1/vectors/upsert", h.upsert)
 	e.POST("/v1/vectors/query", h.query)
 	e.POST("/v1/vectors/fetch", h.fetch)
@@ -52,7 +57,7 @@ func registerVectorRoutes(e *echo.Echo, deps Dependencies) {
 func (h vectorHandler) upsert(c echo.Context) error { return handleVectorUpsert(c, h.deps) }
 func (h vectorHandler) query(c echo.Context) error  { return handleVectorQuery(c, h.deps) }
 func (h vectorHandler) fetch(c echo.Context) error  { return handleVectorFetch(c, h.deps) }
-func (h vectorHandler) delete(c echo.Context) error { return handleVectorDelete(c, h.deps) }
+func (h vectorHandler) delete(c echo.Context) error { return handleVectorDelete(c, h.deps, h.sessions) }
 
 func handleVectorUpsert(c echo.Context, deps Dependencies) error {
 	var req vectorUpsertRequest
@@ -169,7 +174,7 @@ func handleVectorFetch(c echo.Context, deps Dependencies) error {
 	return c.JSON(http.StatusOK, map[string]any{"records": records})
 }
 
-func handleVectorDelete(c echo.Context, deps Dependencies) error {
+func handleVectorDelete(c echo.Context, deps Dependencies, sessions *kb.IngestSessions) error {
 	var req vectorDeleteRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: errInvalidRequestBody})
@@ -185,8 +190,25 @@ func handleVectorDelete(c echo.Context, deps Dependencies) error {
 		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: errKBUnavailable})
 	}
 
-	if err := deps.DeleteDocuments(c.Request().Context(), req.KBID, req.IDs); err != nil {
+	// A deferred delete needs the same session as a deferred ingest.
+	var sessionID string
+	if req.DeferPublish {
+		if !deferredPublishReady(deps) {
+			return c.JSON(
+				http.StatusBadRequest,
+				map[string]any{errorResponseKey: errDeferredPublishDisabled},
+			)
+		}
+		held, err := sessions.Hold(c.Request().Context(), req.KBID, req.SessionID)
+		if err != nil {
+			return writeIngestSessionError(c, deps, sessions, req.KBID, err)
+		}
+		sessionID = held
+	}
+	deleteOpts := kb.DeleteDocsOptions{DeferPublish: req.DeferPublish}
+	if err := deps.DeleteDocuments(c.Request().Context(), req.KBID, req.IDs, deleteOpts); err != nil {
+		releaseIngestSession(c.Request().Context(), sessions, req.KBID, req.SessionID, sessionID)
 		return WriteError(c, err, deps.IsBudgetExceeded)
 	}
-	return c.JSON(http.StatusOK, map[string]any{"ids": req.IDs})
+	return c.JSON(http.StatusOK, map[string]any{"ids": req.IDs, "session_id": sessionID})
 }

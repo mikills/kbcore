@@ -74,6 +74,36 @@ func TestLoad(t *testing.T) {
 		require.EqualValues(t, 67108864, *cfg.Sharding.ShardTriggerBytes)
 		require.NotNil(t, cfg.Sharding.CompactionEnabled)
 		require.True(t, *cfg.Sharding.CompactionEnabled)
+
+		require.NotNil(t, cfg.Ingest.DeferredPublish)
+		require.True(t, *cfg.Ingest.DeferredPublish)
+	})
+
+	// Deferred publishing pins a client to the instance holding its rows, so
+	// which deployments get it by default is a safety decision, not a detail.
+	t.Run("deferred publish follows the blob store unless it is set", func(t *testing.T) {
+		enabled := true
+		disabled := false
+		cases := []struct {
+			name string
+			kind string
+			set  *bool
+			want bool
+		}{
+			{"local storage is one instance by construction", "local", nil, true},
+			{"shared storage may be several instances", "s3", nil, false},
+			{"tiered storage may be several instances", "tiered", nil, false},
+			{"an operator can turn it on for shared storage", "s3", &enabled, true},
+			{"an operator can turn it off for local storage", "local", &disabled, false},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				cfg := &Config{}
+				cfg.Storage.Blob.Kind = tc.kind
+				cfg.Ingest.DeferredPublish = tc.set
+				require.Equal(t, tc.want, cfg.DeferredPublishEnabled())
+			})
+		}
 	})
 
 	t.Run("tiered storage applies safe defaults and resolves journal path", func(t *testing.T) {
@@ -460,9 +490,8 @@ sharding:
 	})
 
 	t.Run("explicit compaction_enabled true also sets the sentinel", func(t *testing.T) {
-		// The third state matters because kb.DefaultShardingPolicy() already
-		// has CompactionEnabled=true. we still need CompactionEnabledSet to
-		// flip so downstream code can tell user-confirmed-true from default.
+		// The third state matters because kb.DefaultShardingPolicy() already has
+		// CompactionEnabled=true.
 		dir := t.TempDir()
 		path := filepath.Join(dir, "minnow.yaml")
 		require.NoError(t, os.WriteFile(path, []byte(`

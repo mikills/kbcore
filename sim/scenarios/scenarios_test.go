@@ -36,4 +36,24 @@ func TestNewDocumentWorkflowScenarios(t *testing.T) {
 		VectorPrimitive(h)
 		h.AssertInvariants()
 	})
+
+	// Every deferred scenario ends with the rows published, so no_doc_loss
+	// covers the whole session and not just the batches that were uploaded.
+	t.Run("deferred_session_commit", func(t *testing.T) {
+		h := sim.New(t, sim.WithSeed(23), sim.WithInvariants(invariants...))
+		DeferredSessionCommit(h)
+		h.AssertInvariants()
+	})
+
+	t.Run("abandoned_session_reaped", func(t *testing.T) {
+		h := sim.New(t, sim.WithSeed(29), sim.WithInvariants(invariants...))
+		AbandonedSessionReaped(h)
+		h.AssertInvariants()
+	})
+
+	t.Run("deferred_commit_under_blob_faults", func(t *testing.T) {
+		h := sim.New(t, sim.WithSeed(31), sim.WithInvariants(invariants...))
+		DeferredCommitUnderBlobFaults(h)
+		h.AssertInvariants()
+	})
 }

@@ -36,7 +36,7 @@ func (f *DuckDBArtifactFormat) Ingest(ctx context.Context, req kb.IngestUpsertRe
 	lock.Lock()
 	defer lock.Unlock()
 
-	db, err := f.openPreparedMutationDB(ctx, req.KBID, preparedDocs, req.Docs[0].ID)
+	db, err := f.openPreparedMutationDB(ctx, req.KBID, preparedDocs, req.Docs[0].ID, req.Options.DeferPublish)
 	if err != nil {
 		return kb.IngestResult{}, err
 	}
@@ -61,7 +61,11 @@ func (f *DuckDBArtifactFormat) Ingest(ctx context.Context, req kb.IngestUpsertRe
 
 func (f *DuckDBArtifactFormat) commitUpsertMutation(ctx context.Context, db *sql.DB, req kb.IngestUpsertRequest) error {
 	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
-	if err := f.postMutationCommit(ctx, db, req.KBID, req.Upload, policy.TargetShardBytes); err != nil {
+	commit := mutationCommitOptions{
+		kbID: req.KBID, upload: req.Upload, deferred: req.Options.DeferPublish,
+		targetShardBytes: policy.TargetShardBytes, maxAttempts: 1,
+	}
+	if err := f.postMutationCommitWithRetry(ctx, db, commit); err != nil {
 		return err
 	}
 	return f.cleanupUploadedPreShardSnapshot(ctx, req)
@@ -79,6 +83,7 @@ func (f *DuckDBArtifactFormat) openPreparedMutationDB(
 	kbID string,
 	preparedDocs []preparedUpsertDoc,
 	firstDocID string,
+	deferred bool,
 ) (*sql.DB, error) {
 	kbDir := filepath.Join(f.deps.CacheDir, kbID)
 	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
@@ -86,7 +91,7 @@ func (f *DuckDBArtifactFormat) openPreparedMutationDB(
 	if len(seedVec) == 0 {
 		return nil, fmt.Errorf("embed doc %q for shard bootstrap: empty embedding", firstDocID)
 	}
-	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: kbID, kbDir: kbDir, dbPath: dbPath, embeddingDim: len(seedVec), allowBootstrap: true}); err != nil {
+	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: kbID, kbDir: kbDir, dbPath: dbPath, embeddingDim: len(seedVec), allowBootstrap: true, joinsSession: deferred}); err != nil {
 		return nil, err
 	}
 	return f.openConfiguredDB(ctx, dbPath)
@@ -136,7 +141,11 @@ func (f *DuckDBArtifactFormat) Delete(ctx context.Context, req kb.IngestDeleteRe
 
 	kbDir := filepath.Join(f.deps.CacheDir, req.KBID)
 	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
-	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: req.KBID, kbDir: kbDir, dbPath: dbPath}); err != nil {
+	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: req.KBID, kbDir: kbDir, dbPath: dbPath, joinsSession: req.Options.DeferPublish}); err != nil {
+		// The orphans this caller wants gone cannot exist.
+		if errors.Is(err, kb.ErrKBUninitialized) {
+			return kb.IngestResult{}, nil
+		}
 		return kb.IngestResult{}, err
 	}
 
@@ -151,7 +160,11 @@ func (f *DuckDBArtifactFormat) Delete(ctx context.Context, req kb.IngestDeleteRe
 	}
 
 	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
-	if err := f.postMutationCommit(ctx, db, req.KBID, req.Upload, policy.TargetShardBytes); err != nil {
+	commit := mutationCommitOptions{
+		kbID: req.KBID, upload: req.Upload, deferred: req.Options.DeferPublish,
+		targetShardBytes: policy.TargetShardBytes, maxAttempts: 1,
+	}
+	if err := f.postMutationCommitWithRetry(ctx, db, commit); err != nil {
 		return kb.IngestResult{}, err
 	}
 
@@ -175,7 +188,7 @@ func (f *DuckDBArtifactFormat) PublishPrepared(
 	lock.Lock()
 	defer lock.Unlock()
 
-	db, err := f.openPreparedMutationDB(ctx, req.KBID, preparedDocs, req.Docs[0].ID)
+	db, err := f.openPreparedMutationDB(ctx, req.KBID, preparedDocs, req.Docs[0].ID, req.Options.DeferPublish)
 	if err != nil {
 		return kb.IngestResult{}, err
 	}
@@ -193,7 +206,7 @@ func (f *DuckDBArtifactFormat) PublishPrepared(
 	}
 
 	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
-	if err := f.postMutationCommitWithRetry(ctx, db, mutationCommitOptions{kbID: req.KBID, upload: req.Upload, targetShardBytes: policy.TargetShardBytes, maxAttempts: 5}); err != nil {
+	if err := f.postMutationCommitWithRetry(ctx, db, mutationCommitOptions{kbID: req.KBID, upload: req.Upload, deferred: req.Options.DeferPublish, targetShardBytes: policy.TargetShardBytes, maxAttempts: 5}); err != nil {
 		return kb.IngestResult{}, err
 	}
 	if err := f.cleanupPreparedPublishUpload(ctx, req); err != nil {
@@ -222,7 +235,7 @@ func (f *DuckDBArtifactFormat) PublishPreparedStream(
 	if err != nil {
 		return kb.IngestResult{}, err
 	}
-	if err := f.commitPreparedStream(ctx, req.KBID, dbPath); err != nil {
+	if err := f.commitPreparedStream(ctx, req.KBID, dbPath, req.Options); err != nil {
 		return kb.IngestResult{}, err
 	}
 	return kb.IngestResult{MutatedCount: mutated}, nil
@@ -257,7 +270,7 @@ func (f *DuckDBArtifactFormat) applyPreparedStream(
 		if err := ensurePreparedSeedVector(prepared, docs); err != nil {
 			return mutated, err
 		}
-		if err := f.applyPreparedStreamBatch(ctx, preparedStreamBatch{kbID: req.KBID, kbDir: kbDir, dbPath: dbPath, prepared: prepared, mutatedBefore: mutated}); err != nil {
+		if err := f.applyPreparedStreamBatch(ctx, preparedStreamBatch{kbID: req.KBID, kbDir: kbDir, dbPath: dbPath, prepared: prepared, mutatedBefore: mutated, deferred: req.Options.DeferPublish}); err != nil {
 			return mutated, err
 		}
 		mutated += len(prepared)
@@ -277,14 +290,22 @@ type preparedStreamBatch struct {
 	dbPath        string
 	prepared      []preparedUpsertDoc
 	mutatedBefore int
+	deferred      bool
 }
 
 func (f *DuckDBArtifactFormat) applyPreparedStreamBatch(ctx context.Context, batch preparedStreamBatch) error {
 	lock := f.lockFor(batch.kbID)
 	lock.Lock()
 	defer lock.Unlock()
-	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: batch.kbID, kbDir: batch.kbDir, dbPath: batch.dbPath, embeddingDim: len(batch.prepared[0].Embedding), allowBootstrap: true}); err != nil {
+	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: batch.kbID, kbDir: batch.kbDir, dbPath: batch.dbPath, embeddingDim: len(batch.prepared[0].Embedding), allowBootstrap: true, joinsSession: batch.deferred}); err != nil {
 		return err
+	}
+	// Per batch, because the lock is released between batches and eviction
+	// would reclaim anything not yet marked.
+	if batch.deferred {
+		if err := kb.MarkPendingSession(batch.kbDir); err != nil {
+			return err
+		}
 	}
 	db, err := f.openConfiguredDB(ctx, batch.dbPath)
 	if err != nil {
@@ -319,7 +340,12 @@ func (f *DuckDBArtifactFormat) validatePreparedBatchDimensions(
 	)
 }
 
-func (f *DuckDBArtifactFormat) commitPreparedStream(ctx context.Context, kbID string, dbPath string) error {
+func (f *DuckDBArtifactFormat) commitPreparedStream(
+	ctx context.Context,
+	kbID string,
+	dbPath string,
+	opts kb.UpsertDocsOptions,
+) error {
 	lock := f.lockFor(kbID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -329,8 +355,15 @@ func (f *DuckDBArtifactFormat) commitPreparedStream(ctx context.Context, kbID st
 	}
 	defer db.Close()
 	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
-	if err := f.postMutationCommitWithRetry(ctx, db, mutationCommitOptions{kbID: kbID, upload: true, targetShardBytes: policy.TargetShardBytes, maxAttempts: 5}); err != nil {
+	commit := mutationCommitOptions{
+		kbID: kbID, upload: !opts.DeferPublish, deferred: opts.DeferPublish,
+		targetShardBytes: policy.TargetShardBytes, maxAttempts: 5,
+	}
+	if err := f.postMutationCommitWithRetry(ctx, db, commit); err != nil {
 		return err
+	}
+	if opts.DeferPublish {
+		return nil
 	}
 	return f.cleanupPreShardSnapshotObjectsBestEffort(ctx, kbID)
 }
@@ -345,6 +378,10 @@ func (f *DuckDBArtifactFormat) CommitPrepared(ctx context.Context, kbID string) 
 
 	kbDir := filepath.Join(f.deps.CacheDir, kbID)
 	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
+	// Republishing unchanged rows costs a full rebuild and churns every reader.
+	if !kb.HasPendingSession(kbDir) {
+		return nil
+	}
 	if _, err := os.Stat(dbPath); err != nil {
 		return err
 	}
@@ -354,7 +391,12 @@ func (f *DuckDBArtifactFormat) CommitPrepared(ctx context.Context, kbID string) 
 	}
 	defer db.Close()
 	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
-	if err := f.postMutationCommitWithRetry(ctx, db, mutationCommitOptions{kbID: kbID, upload: true, targetShardBytes: policy.TargetShardBytes, maxAttempts: 5}); err != nil {
+	// Only an explicit commit ends the session.
+	commit := mutationCommitOptions{
+		kbID: kbID, upload: true, endsSession: true,
+		targetShardBytes: policy.TargetShardBytes, maxAttempts: 5,
+	}
+	if err := f.postMutationCommitWithRetry(ctx, db, commit); err != nil {
 		return err
 	}
 	return f.cleanupPreShardSnapshotObjectsBestEffort(ctx, kbID)
@@ -368,6 +410,7 @@ func (f *DuckDBArtifactFormat) PrepareAndOpenDB(ctx context.Context, kbID string
 
 	kbDir := filepath.Join(f.deps.CacheDir, kbID)
 	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
+	// Not exempt: writes here would ride out under another client's commit.
 	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: kbID, kbDir: kbDir, dbPath: dbPath}); err != nil {
 		return nil, err
 	}
@@ -383,11 +426,19 @@ type mutableShardRequest struct {
 	dbPath         string
 	embeddingDim   int
 	allowBootstrap bool
+	// joinsSession marks a write that belongs to the open session. Anything
+	// else is refused while rows are pending.
+	joinsSession bool
 }
 
 func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(ctx context.Context, req mutableShardRequest) error {
 	if strings.TrimSpace(req.kbID) == "" {
 		return fmt.Errorf(errEmptyKBID)
+	}
+	// An open session does not move the manifest, so the staleness check below
+	// waves this through and publishes rows the client has not committed.
+	if !req.joinsSession && kb.HasPendingSession(req.kbDir) {
+		return kb.UnpublishedWritesError(req.kbID)
 	}
 
 	manifestVersion, err := f.deps.ManifestStore.HeadVersion(ctx, req.kbID)
@@ -395,6 +446,18 @@ func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(ctx context.Context, r
 		return err
 	}
 	if manifestVersion == "" {
+		// Unpublished rows make a knowledge base look absent, not empty.
+		if kb.HasPendingSession(req.kbDir) {
+			err := f.reuseLocalShardDB(ctx, req)
+			if err == nil {
+				return nil
+			}
+			// Reported as absent, a delete answers success for rows it never
+			// removed. A writer instead rebuilds, below.
+			if !req.allowBootstrap {
+				return fmt.Errorf("reuse local shard for %s: %w", req.kbID, err)
+			}
+		}
 		return f.bootstrapMutableShardDB(ctx, req.kbDir, req.dbPath, req.embeddingDim, req.allowBootstrap)
 	}
 	localVersionPath := localShardManifestVersionPath(req.kbDir)
@@ -404,6 +467,18 @@ func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(ctx context.Context, r
 	}
 	if fresh {
 		return f.ensureDocsMetadataColumn(ctx, req.dbPath)
+	}
+	if kb.HasPendingSession(req.kbDir) {
+		return kb.UnpublishedWritesError(req.kbID)
+	}
+	// An emptied knowledge base has nothing to reconstruct from, and refusing
+	// would wedge every later writer on a cold cache.
+	emptied, err := f.manifestHasNoShards(ctx, req.kbID)
+	if err != nil {
+		return err
+	}
+	if emptied {
+		return f.bootstrapMutableShardDB(ctx, req.kbDir, req.dbPath, req.embeddingDim, req.allowBootstrap)
 	}
 	return f.refreshMutableShardDB(
 		ctx,
@@ -415,6 +490,32 @@ func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(ctx context.Context, r
 			manifestVersion:  manifestVersion,
 		},
 	)
+}
+
+// manifestHasNoShards reports a published knowledge base holding nothing.
+func (f *DuckDBArtifactFormat) manifestHasNoShards(ctx context.Context, kbID string) (bool, error) {
+	doc, err := f.deps.ManifestStore.Get(ctx, kbID)
+	if err != nil {
+		if errors.Is(err, kb.ErrManifestNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(doc.Manifest.Shards) == 0, nil
+}
+
+// reuseLocalShardDB adopts a shard holding rows that were never published.
+// Only a writer carries a dimension, so only a writer can repair the schema.
+func (f *DuckDBArtifactFormat) reuseLocalShardDB(ctx context.Context, req mutableShardRequest) error {
+	if _, err := os.Stat(req.dbPath); err != nil {
+		return err
+	}
+	if req.embeddingDim > 0 {
+		if err := f.createEmptyMutableShardDBLocked(ctx, req.kbDir, req.dbPath, req.embeddingDim); err != nil {
+			return err
+		}
+	}
+	return f.ensureDocsMetadataColumn(ctx, req.dbPath)
 }
 
 func (f *DuckDBArtifactFormat) bootstrapMutableShardDB(
@@ -534,23 +635,12 @@ func (f *DuckDBArtifactFormat) ensureDocsMetadataColumn(ctx context.Context, dbP
 	return nil
 }
 
-func (f *DuckDBArtifactFormat) postMutationCommit(
-	ctx context.Context,
-	db *sql.DB,
-	kbID string,
-	upload bool,
-	targetShardBytes int64,
-) error {
-	return f.postMutationCommitWithRetry(
-		ctx,
-		db,
-		mutationCommitOptions{kbID: kbID, upload: upload, targetShardBytes: targetShardBytes, maxAttempts: 1},
-	)
-}
-
 type mutationCommitOptions struct {
-	kbID             string
+	kbID string
+	// deferred opens a session; merely skipping the upload does not.
 	upload           bool
+	deferred         bool
+	endsSession      bool
 	targetShardBytes int64
 	maxAttempts      int
 }
@@ -563,6 +653,13 @@ func (f *DuckDBArtifactFormat) postMutationCommitWithRetry(
 	kbDir := filepath.Join(f.deps.CacheDir, opts.kbID)
 	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
 
+	// Before the checkpoint, so a crash cannot leave rows unmarked.
+	if opts.deferred {
+		if err := kb.MarkPendingSession(kbDir); err != nil {
+			return err
+		}
+	}
+
 	if err := checkpointAndCloseMutationDB(ctx, db); err != nil {
 		return err
 	}
@@ -570,6 +667,13 @@ func (f *DuckDBArtifactFormat) postMutationCommitWithRetry(
 	if opts.upload {
 		if err := f.publishMutationSnapshotWithBackoff(ctx, mutationPublishRequest{kbID: opts.kbID, kbDir: kbDir, dbPath: dbPath, targetShardBytes: opts.targetShardBytes, maxAttempts: opts.maxAttempts}); err != nil {
 			return err
+		}
+		// Before the housekeeping below, whose failure would otherwise leave
+		// the marker set and the cache unreclaimable.
+		if opts.endsSession {
+			if err := kb.ClearPendingSession(kbDir); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -622,6 +726,7 @@ func (f *DuckDBArtifactFormat) publishMutationSnapshotWithBackoff(
 		req.maxAttempts = 1
 	}
 	state := mutationPublishRetry{maxAttempts: req.maxAttempts}
+	var lastErr error
 	for attempt := 1; attempt <= state.maxAttempts; attempt++ {
 		newVersion, artifactCount, err := f.publishMutationSnapshotAttempt(
 			ctx,
@@ -630,6 +735,7 @@ func (f *DuckDBArtifactFormat) publishMutationSnapshotWithBackoff(
 			req.targetShardBytes,
 		)
 		if err != nil {
+			lastErr = err
 			if state.retry(ctx, req.kbID, attempt, err) {
 				continue
 			}
@@ -638,7 +744,8 @@ func (f *DuckDBArtifactFormat) publishMutationSnapshotWithBackoff(
 		f.deps.Metrics.RecordShardCount(req.kbID, artifactCount)
 		return writeLocalShardManifestVersion(localShardManifestVersionPath(req.kbDir), newVersion)
 	}
-	return nil
+	// Reporting success here would clear the marker with nothing published.
+	return lastErr
 }
 
 type mutationPublishRetry struct{ maxAttempts int }

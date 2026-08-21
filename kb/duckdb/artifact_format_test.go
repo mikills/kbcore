@@ -30,8 +30,9 @@ func TestDuckDBArtifactFormat(t *testing.T) {
 }
 
 type stubManifestStore struct {
-	doc *kb.ManifestDocument
-	err error
+	doc  *kb.ManifestDocument
+	err  error
+	head string
 }
 
 func (s *stubManifestStore) Get(context.Context, string) (*kb.ManifestDocument, error) {
@@ -41,7 +42,9 @@ func (s *stubManifestStore) Get(context.Context, string) (*kb.ManifestDocument, 
 	return s.doc, nil
 }
 
-func (s *stubManifestStore) HeadVersion(context.Context, string) (string, error) { return "", nil }
+func (s *stubManifestStore) HeadVersion(context.Context, string) (string, error) {
+	return s.head, nil
+}
 func (s *stubManifestStore) UpsertIfMatch(context.Context, string, kb.SnapshotShardManifest, string) (string, error) {
 	return "", nil
 }
@@ -266,8 +269,7 @@ func TestOfflineExtensionLoadAll(t *testing.T) {
 }
 
 // TestOfflineExtensionLoad verifies openConfiguredDB behavior with offline
-// extension loading. This catches regressions where DuckDB's autoinstall
-// silently downloads extensions.
+// extension loading.
 func TestOfflineExtensionLoad(t *testing.T) {
 	localExtDir := ResolveExtensionDir()
 
@@ -424,10 +426,10 @@ func testHNSWIndexPresentAfterCompaction(t *testing.T) {
 	ctx := context.Background()
 	kbID := "kb-hnsw-compaction"
 	policy := kb.ShardingPolicy{
-		ShardTriggerVectorRows: 1,
-		TargetShardBytes:       512,
-		CompactionEnabled:      true,
-		CompactionMinShardCount: 2,
+		ShardTriggerVectorRows:   1,
+		TargetShardBytes:         512,
+		CompactionEnabled:        true,
+		CompactionMinShardCount:  2,
 		CompactionTombstoneRatio: 0.0,
 	}
 	harness := kb.NewTestHarness(t, kbID).

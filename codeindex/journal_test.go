@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	indexer "github.com/mikills/minnow/codeindex/indexer"
 )
@@ -18,11 +20,12 @@ type recordingDeleter struct {
 	kbIDs   []string
 	deleted []string
 	failOn  int
+	failKB  string
 }
 
 func (r *recordingDeleter) delete(_ context.Context, kbID string, ids []string) error {
 	r.calls++
-	if r.failOn > 0 && r.calls == r.failOn {
+	if (r.failOn > 0 && r.calls == r.failOn) || (r.failKB != "" && kbID == r.failKB) {
 		return errors.New("delete failed")
 	}
 	r.kbIDs = append(r.kbIDs, kbID)
@@ -75,7 +78,7 @@ func TestRecoverUploadJournal(t *testing.T) {
 		// No state file: the first-ever index crashed, so the next run mints a new KBID.
 		writeJournalFile(t, filepath.Join(dir, "main-abc.json.journal"), "code-gen1", "c1", "c2", "c1")
 		deleter := &recordingDeleter{}
-		if err := recoverUploadJournals(context.Background(), deleter, dir, nil); err != nil {
+		if _, err := recoverUploadJournals(context.Background(), deleter, dir, journalRecovery{}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if strings.Join(deleter.deleted, ",") != "c1,c2" {
@@ -92,7 +95,7 @@ func TestRecoverUploadJournal(t *testing.T) {
 		writeStateFile(t, statePath, "c1", "c2")
 		writeJournalFile(t, statePath+".journal", "code-gen1", "c1", "c2")
 		deleter := &recordingDeleter{}
-		if err := recoverUploadJournals(context.Background(), deleter, dir, nil); err != nil {
+		if _, err := recoverUploadJournals(context.Background(), deleter, dir, journalRecovery{}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if len(deleter.deleted) != 0 {
@@ -108,7 +111,7 @@ func TestRecoverUploadJournal(t *testing.T) {
 		writeJournalFile(t, filepath.Join(dir, "main-abc.json.journal"), "kb-main", "m1")
 		writeJournalFile(t, filepath.Join(dir, "feature-def.json.journal"), "kb-feature", "f1")
 		deleter := &recordingDeleter{}
-		if err := recoverUploadJournals(context.Background(), deleter, dir, nil); err != nil {
+		if _, err := recoverUploadJournals(context.Background(), deleter, dir, journalRecovery{}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if len(deleter.kbIDs) != 2 {
@@ -129,7 +132,7 @@ func TestRecoverUploadJournal(t *testing.T) {
 		}
 		writeJournalFile(t, path, "code-gen1", ids...)
 		deleter := &recordingDeleter{failOn: 2}
-		if err := recoverUploadJournals(context.Background(), deleter, dir, nil); err == nil {
+		if _, err := recoverUploadJournals(context.Background(), deleter, dir, journalRecovery{}, nil); err == nil {
 			t.Fatal("expected the delete failure to propagate")
 		}
 		if deleter.calls != 2 {
@@ -151,7 +154,7 @@ func TestRecoverUploadJournal(t *testing.T) {
 			[]string{"v2a"}, []string{"reverted.go"})
 
 		deleter := &recordingDeleter{}
-		if err := recoverUploadJournals(context.Background(), deleter, dir, nil); err != nil {
+		if _, err := recoverUploadJournals(context.Background(), deleter, dir, journalRecovery{}, nil); err != nil {
 			t.Fatal(err)
 		}
 		got := strings.Join(deleter.deleted, ",")
@@ -172,7 +175,7 @@ func TestRecoverUploadJournal(t *testing.T) {
 
 	t.Run("no journal is a no-op", func(t *testing.T) {
 		deleter := &recordingDeleter{}
-		if err := recoverUploadJournals(context.Background(), deleter, t.TempDir(), nil); err != nil {
+		if _, err := recoverUploadJournals(context.Background(), deleter, t.TempDir(), journalRecovery{}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if deleter.calls != 0 {
@@ -282,4 +285,162 @@ func TestDocumentSinkSkipsIngestWhenJournalFails(t *testing.T) {
 	if len(order) != 0 {
 		t.Fatalf("ingested despite journal failure: %v", order)
 	}
+}
+
+func TestJournalRecoveryRebuildsFilesItInvalidated(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init", "-b", "main")
+	runTestGit(t, root, "config", "user.email", "codeindex@example.com")
+	runTestGit(t, root, "config", "user.name", "Code Index")
+	for name, body := range map[string]string{
+		"a.go": "package main\nfunc A() {}\n",
+		"b.go": "package main\nfunc B() {}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runTestGit(t, root, "add", ".")
+	runTestGit(t, root, "commit", "-m", "initial")
+
+	server := newTestMinnowServer(t)
+	defer server.Close()
+	cfg := defaultConfig()
+	cfg.Minnow.URL = server.URL
+	cfg.CodeIndex.PollInterval = "1ms"
+	cfg.CodeIndex.OperationTimeout = "1s"
+	requireConfirm := false
+	cfg.CodeIndex.RequireConfirm = &requireConfirm
+	opts := indexCLIOptions{root: root, yes: true}
+
+	first, err := refreshIndex(context.Background(), cfg, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := resolveTarget(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A run killed after it recorded a.go as stale: recovery deletes those
+	// chunks, so the next run has to rebuild the file rather than trust the
+	// state entry it read a moment earlier.
+	writeJournalFileWith(t, indexStatePath(target)+".journal", first.KBID, nil, []string{"a.go"})
+
+	server.mu.Lock()
+	server.ingests = nil
+	server.mu.Unlock()
+
+	second, err := refreshIndex(context.Background(), cfg, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.IndexedFiles != 1 || second.UnchangedFiles != 1 {
+		t.Fatalf("indexed %d, unchanged %d, want a.go rebuilt and b.go left alone",
+			second.IndexedFiles, second.UnchangedFiles)
+	}
+	server.mu.Lock()
+	ingests := append([]ingestRequest(nil), server.ingests...)
+	server.mu.Unlock()
+	var paths []string
+	for _, in := range ingests {
+		for _, doc := range in.Documents {
+			if path, ok := doc.Metadata["code_path"].(string); ok {
+				paths = append(paths, path)
+			}
+		}
+	}
+	if len(paths) == 0 || !slices.Contains(paths, "a.go") {
+		t.Fatalf("uploaded %v, want a.go back in the index", paths)
+	}
+}
+
+func TestJournalRecoveryScope(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a journal held by a live run is left alone", func(t *testing.T) {
+		dir := t.TempDir()
+		other := filepath.Join(dir, "other-abc.json.journal")
+		writeJournalFile(t, other, "kb-other", "c1")
+		// One checkout can hold several indexes. The chunks in a running index's
+		// journal are about to be recorded, not orphaned.
+		lock := indexLock{PID: os.Getpid(), Token: "t", CreatedAt: time.Now().UTC()}
+		data, err := json.Marshal(lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "other-abc.json.lock"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		deleter := &recordingDeleter{}
+		own := journalRecovery{ownJournal: filepath.Join(dir, "mine-abc.json.journal"), staleAfter: time.Hour}
+		if _, err := recoverUploadJournals(ctx, deleter, dir, own, nil); err != nil {
+			t.Fatal(err)
+		}
+		if len(deleter.deleted) != 0 {
+			t.Fatalf("deleted %v out from under a running index", deleter.deleted)
+		}
+		if _, err := os.Stat(other); err != nil {
+			t.Fatalf("a running index's journal was removed: %v", err)
+		}
+	})
+
+	t.Run("another index's journal that cannot be cleaned does not stop this run", func(t *testing.T) {
+		dir := t.TempDir()
+		other := filepath.Join(dir, "other-abc.json.journal")
+		writeJournalFile(t, other, "kb-other", "c1")
+		mine := filepath.Join(dir, "mine-abc.json.journal")
+		writeJournalFile(t, mine, "kb-mine", "c2")
+
+		// A knowledge base with an open session refuses an unrelated delete.
+		deleter := &recordingDeleter{failKB: "kb-other"}
+		own := journalRecovery{ownJournal: mine, staleAfter: time.Hour}
+		if _, err := recoverUploadJournals(ctx, deleter, dir, own, nil); err != nil {
+			t.Fatalf("another index's leftovers stopped this run: %v", err)
+		}
+		if _, err := os.Stat(other); err != nil {
+			t.Fatalf("a journal that was never cleaned was removed anyway: %v", err)
+		}
+		// This run's own journal still has to be cleaned before it uploads.
+		if strings.Join(deleter.deleted, ",") != "c2" {
+			t.Fatalf("deleted %v, want this run's own orphans", deleter.deleted)
+		}
+	})
+
+	t.Run("the run's own journal failing stops the run", func(t *testing.T) {
+		dir := t.TempDir()
+		mine := filepath.Join(dir, "mine-abc.json.journal")
+		writeJournalFile(t, mine, "kb-mine", "c1")
+
+		// Uploading on top of orphans this run cannot remove leaves chunks in
+		// the knowledge base that no later run can ever address.
+		deleter := &recordingDeleter{failKB: "kb-mine"}
+		own := journalRecovery{ownJournal: mine, staleAfter: time.Hour}
+		if _, err := recoverUploadJournals(ctx, deleter, dir, own, nil); err == nil {
+			t.Fatal("this run uploaded over orphans it could not remove")
+		}
+	})
+
+	t.Run("the run's own journal is reconciled against the state it loaded", func(t *testing.T) {
+		dir := t.TempDir()
+		journal := filepath.Join(dir, "new-abc.json.journal")
+		// An index key migration leaves state at the legacy path, so the file beside
+		// the journal does not exist.
+		legacy := filepath.Join(dir, "old-abc.json")
+		writeStateFileWith(t, legacy, map[string]stateFile{"a.go": {ChunkIDs: []string{"c1", "c2"}}})
+		writeJournalFileWith(t, journal, "kb-1", nil, []string{"a.go"})
+
+		deleter := &recordingDeleter{}
+		own := journalRecovery{ownJournal: journal, statePath: legacy, staleAfter: time.Hour}
+		invalidated, err := recoverUploadJournals(ctx, deleter, dir, own, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Join(deleter.deleted, ",") != "c1,c2" {
+			t.Fatalf("deleted %v, want the stale file's chunks", deleter.deleted)
+		}
+		if strings.Join(invalidated[journal], ",") != "a.go" {
+			t.Fatalf("invalidated %v, want a.go", invalidated[journal])
+		}
+	})
 }

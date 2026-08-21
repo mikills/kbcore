@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -135,72 +136,114 @@ func loadUploadJournal(path string) (journalContents, error) {
 	return contents, scanner.Err()
 }
 
+// journalRecovery names the run doing the recovering, whose own state file is
+// not the one beside the journal while an index key is being migrated.
+type journalRecovery struct {
+	ownJournal string
+	statePath  string
+	staleAfter time.Duration
+}
+
+// startUploadJournal returns the paths recovery dropped from this target's
+// state, which the caller must forget from the copy it read beforehand.
 func startUploadJournal(
 	ctx context.Context,
 	client documentDeleter,
 	target indexTarget,
+	own journalRecovery,
 	progress *progressReporter,
-) (*uploadJournal, error) {
-	path := uploadJournalPath(target)
-	if err := recoverUploadJournals(ctx, client, filepath.Dir(path), progress); err != nil {
-		return nil, err
+) (*uploadJournal, []string, error) {
+	path := own.ownJournal
+	invalidated, err := recoverUploadJournals(ctx, client, filepath.Dir(path), own, progress)
+	if err != nil {
+		return nil, nil, err
 	}
-	return openUploadJournal(path, target.KBID)
+	journal, err := openUploadJournal(path, target.KBID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return journal, invalidated[path], nil
 }
 
-// Chunks ingested but never recorded in state are unreachable by any later delete.
+// Chunks ingested but never recorded in state are unreachable by any later
+// delete. Reports the paths dropped from each state file, keyed by journal.
 func recoverUploadJournals(
 	ctx context.Context,
 	client documentDeleter,
 	dir string,
+	own journalRecovery,
 	progress *progressReporter,
-) error {
+) (map[string][]string, error) {
 	paths, err := filepath.Glob(filepath.Join(dir, "*"+journalSuffix))
 	if err != nil {
-		return err
+		return nil, err
 	}
+	invalidated := make(map[string][]string)
 	for _, path := range paths {
-		if err := recoverUploadJournal(ctx, client, path, progress); err != nil {
-			return err
+		if path != own.ownJournal && journalRunIsLive(path, own.staleAfter) {
+			// Another index is uploading these right now, not orphaning them.
+			continue
+		}
+		statePath := strings.TrimSuffix(path, journalSuffix)
+		if path == own.ownJournal && own.statePath != "" {
+			statePath = own.statePath
+		}
+		dropped, err := recoverUploadJournal(ctx, client, path, statePath, progress)
+		if err != nil {
+			if own.ownJournal != "" && path != own.ownJournal {
+				// Another index's leftovers, which a later run can retry.
+				// Failing costs this run everything.
+				progress.recoveryDeferred(path, err)
+				continue
+			}
+			return nil, err
+		}
+		if len(dropped) > 0 {
+			invalidated[path] = dropped
 		}
 	}
-	return nil
+	return invalidated, nil
+}
+
+// journalRunIsLive reports whether this journal's index is locked by a live run.
+func journalRunIsLive(journalPath string, staleAfter time.Duration) bool {
+	active, err := indexLockIsActive(strings.TrimSuffix(journalPath, journalSuffix)+".lock", staleAfter)
+	return err == nil && active
 }
 
 func recoverUploadJournal(
 	ctx context.Context,
 	client documentDeleter,
-	path string,
+	path, statePath string,
 	progress *progressReporter,
-) error {
+) ([]string, error) {
 	contents, err := loadUploadJournal(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if contents.kbID == "" || (len(contents.ids) == 0 && len(contents.stale) == 0) {
-		return removeIfExists(path)
+		return nil, removeIfExists(path)
 	}
-	statePath := strings.TrimSuffix(path, journalSuffix)
 	state, err := loadStateFile(statePath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	doomed, invalidated := reconcileJournal(contents, state)
 	if err := sendDeletes(ctx, client, contents.kbID, doomed); err != nil {
-		return err
+		return nil, err
 	}
 	progress.recovered(len(doomed))
-	if invalidated {
+	if len(invalidated) > 0 {
 		if err := writeIndexStateFile(statePath, state); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return removeIfExists(path)
+	return invalidated, removeIfExists(path)
 }
 
-// Returns the chunks to delete and whether state entries were dropped so their
-// files get rebuilt on the next run.
-func reconcileJournal(contents journalContents, state indexState) ([]string, bool) {
+// Returns the chunks to delete and the state entries dropped so their files get
+// rebuilt on the next run.
+func reconcileJournal(contents journalContents, state indexState) ([]string, []string) {
 	known := make(map[string]struct{})
 	for _, file := range state.Files {
 		for _, id := range file.ChunkIDs {
@@ -221,7 +264,7 @@ func reconcileJournal(contents journalContents, state indexState) ([]string, boo
 			add(id)
 		}
 	}
-	invalidated := false
+	var invalidated []string
 	for _, stale := range contents.stale {
 		file, ok := state.Files[stale]
 		if !ok {
@@ -231,7 +274,7 @@ func reconcileJournal(contents journalContents, state indexState) ([]string, boo
 			add(id)
 		}
 		delete(state.Files, stale)
-		invalidated = true
+		invalidated = append(invalidated, stale)
 	}
 	return doomed, invalidated
 }
