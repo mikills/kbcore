@@ -77,8 +77,8 @@ func (l *KB) deleteKBCache(kbID string) []error {
 	if !l.removeCacheEntry(cacheevict.Entry{KBID: kbID, Path: path}, true) {
 		errs = append(errs, fmt.Errorf("remove cache dir for %q", kbID))
 	}
-	_, total := cacheevict.ScanEntries(l.CacheDir)
-	l.recordCacheBytesCurrent(total)
+	_, current, held := cacheevict.ScanEntriesWithHeld(l.CacheDir, l.cacheEntryHoldsLiveState)
+	l.recordCacheUsage(current, held)
 	return errs
 }
 
@@ -142,6 +142,6 @@ func (l *KB) ClearCache() error {
 			return fmt.Errorf("remove cache entry %q", entry.Name())
 		}
 	}
-	l.recordCacheBytesCurrent(0)
+	l.recordCacheUsage(0, 0)
 	return nil
 }

@@ -4,13 +4,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 )
+
+// ErrFileChanged reports a file changed after scanning.
+var ErrFileChanged = errors.New("code index file changed while scanning")
 
 type ScannedFile struct {
 	AbsPath   string
@@ -55,12 +60,15 @@ func BuildDocuments(
 		return nil, nil, err
 	}
 	data, err := os.ReadFile(file.AbsPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, fmt.Errorf("%w: %s", ErrFileChanged, file.RelPath)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != file.Hash {
-		return nil, nil, fmt.Errorf("code index file changed while scanning: %s", file.RelPath)
+		return nil, nil, fmt.Errorf("%w: %s", ErrFileChanged, file.RelPath)
 	}
 	return BuildDocumentsFromBytes(ctx, repoID, file, data, opts)
 }

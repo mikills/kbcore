@@ -32,7 +32,7 @@ func (l *KB) evictCacheProjected(ctx context.Context, protectedEntry string, inc
 		},
 		Sweep: func() cacheevict.SweepResult {
 			result := l.evictCacheSweepOnce(protectedEntry, incomingBytes)
-			l.recordCacheBytesCurrent(result.CurrentBytes)
+			l.recordCacheUsage(result.CurrentBytes, result.HeldBytes)
 			return result
 		},
 	})
@@ -44,12 +44,17 @@ func (l *KB) evictCacheProjected(ctx context.Context, protectedEntry string, inc
 	}
 	l.recordCacheBudgetExceeded()
 	return fmt.Errorf(
-		"%w: current_bytes=%d max_bytes=%d protected_entries=%d",
+		"%w: current_bytes=%d max_bytes=%d protected_entries=%d held_bytes=%d",
 		ErrCacheBudgetExceeded,
 		result.CurrentBytes,
 		result.MaxBytes,
 		result.ProtectedEntries,
+		result.HeldBytes,
 	)
+}
+
+func (l *KB) cacheEntryHoldsLiveState(kbID string) bool {
+	return HasPendingSession(filepath.Join(l.CacheDir, kbID))
 }
 
 func (l *KB) evictCacheSweepOnce(protectedEntry string, incomingBytes int64) cacheevict.SweepResult {
@@ -69,6 +74,7 @@ func (l *KB) evictCacheSweepOnce(protectedEntry string, incomingBytes int64) cac
 		MinFreeBytes:         minFreeBytes,
 		IncomingBytes:        incomingBytes,
 		Protected:            protectedCacheEntries(protectedEntry),
+		Unevictable:          l.cacheEntryHoldsLiveState,
 		Now:                  l.Clock.Now(),
 		Remove: func(entry cacheevict.Entry, reason cacheevict.Reason) bool {
 			return l.removeCacheEntry(entry, false)
@@ -142,9 +148,10 @@ func protectedCacheEntries(explicitProtect string) map[string]bool {
 	return protected
 }
 
-func (l *KB) recordCacheBytesCurrent(v int64) {
+func (l *KB) recordCacheUsage(current, held int64) {
 	l.mu.Lock()
-	l.cacheBytesCurrent = v
+	l.cacheBytesCurrent = current
+	l.cacheHeldBytes = held
 	l.mu.Unlock()
 }
 
@@ -182,6 +189,7 @@ func (l *KB) CacheEvictionMetricsSnapshot() CacheEvictionMetricsSnapshot {
 	l.mu.Lock()
 	snapshot := CacheEvictionMetricsSnapshot{
 		CacheBytesCurrent:        l.cacheBytesCurrent,
+		CacheHeldBytes:           l.cacheHeldBytes,
 		CacheEvictionsTTLTotal:   l.cacheEvictionsTTLTotal,
 		CacheEvictionsSizeTotal:  l.cacheEvictionsSizeTotal,
 		CacheEvictionErrorsTotal: l.cacheEvictionErrorsTotal,

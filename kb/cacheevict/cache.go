@@ -37,8 +37,10 @@ type Config struct {
 	// Protected accepts either a KB ID (protect all its entries) or an exact
 	// entry path (protect one shard).
 	Protected map[string]bool
-	Now       time.Time
-	Remove    func(Entry, Reason) bool
+	// Unevictable reports KBs whose bytes must not count toward MaxBytes.
+	Unevictable func(kbID string) bool
+	Now         time.Time
+	Remove      func(Entry, Reason) bool
 }
 
 type DiskUsage struct {
@@ -48,6 +50,7 @@ type DiskUsage struct {
 
 type MetricsSnapshot struct {
 	CacheBytesCurrent        int64
+	CacheHeldBytes           int64
 	CacheEvictionsTTLTotal   uint64
 	CacheEvictionsSizeTotal  uint64
 	CacheEvictionErrorsTotal uint64
@@ -67,6 +70,8 @@ func OpenMetricsText(m MetricsSnapshot) string {
 		fmt.Sprintf("minnow_cache_budget_exceeded_total %d", m.CacheBudgetExceededTotal),
 		"# TYPE minnow_cache_bytes_current gauge",
 		fmt.Sprintf("minnow_cache_bytes_current %d", m.CacheBytesCurrent),
+		"# TYPE minnow_cache_held_bytes gauge",
+		fmt.Sprintf("minnow_cache_held_bytes %d", m.CacheHeldBytes),
 		"# TYPE minnow_cache_disk_capacity_bytes gauge",
 		fmt.Sprintf("minnow_cache_disk_capacity_bytes %d", m.DiskCapacityBytes),
 		"# TYPE minnow_cache_disk_available_bytes gauge",
@@ -105,6 +110,7 @@ func RetryUntilWithinBudget(cfg RetryConfig) (SweepResult, bool, error) {
 
 type SweepResult struct {
 	CurrentBytes     int64
+	HeldBytes        int64
 	MaxBytes         int64
 	ProtectedEntries int
 	OverBudget       bool
@@ -114,11 +120,17 @@ type SweepResult struct {
 }
 
 func Sweep(cfg Config) SweepResult {
+	entries, total, held := ScanEntriesWithHeld(cfg.Root, cfg.Unevictable)
+	result := sweepScanned(cfg, entries, total)
+	result.HeldBytes = held
+	return result
+}
+
+func sweepScanned(cfg Config, entries []Entry, total int64) SweepResult {
 	watermarksEnabled := cfg.HighWatermarkPercent > 0 || cfg.MinFreeBytes > 0
 	if cfg.MaxBytes <= 0 && cfg.TTL <= 0 && !watermarksEnabled {
 		return SweepResult{MaxBytes: cfg.MaxBytes}
 	}
-	entries, total := ScanEntries(cfg.Root)
 	effectiveMax, limitActive, watermarkBytesToFree, targetAvailable, usageErr := effectiveMaxBytes(cfg, total)
 	incomingOverMax := cfg.MaxBytes > 0 && cfg.IncomingBytes > cfg.MaxBytes
 	if usageErr != nil {
@@ -307,12 +319,18 @@ func IsControlEntry(name string) bool {
 }
 
 func ScanEntries(root string) ([]Entry, int64) {
+	entries, total, _ := ScanEntriesWithHeld(root, nil)
+	return entries, total
+}
+
+// ScanEntriesWithHeld reports reclaimable entries and held bytes separately.
+func ScanEntriesWithHeld(root string, unevictable func(string) bool) ([]Entry, int64, int64) {
 	items, err := os.ReadDir(root)
 	if err != nil {
-		return nil, 0
+		return nil, 0, 0
 	}
 	entries := make([]Entry, 0, len(items))
-	var total int64
+	var total, held int64
 	for _, item := range items {
 		// Charging control state to the cache would evict it to reclaim space.
 		if !item.IsDir() || IsControlEntry(item.Name()) {
@@ -321,6 +339,10 @@ func ScanEntries(root string) ([]Entry, int64) {
 		kbPath := filepath.Join(root, item.Name())
 		size, touch, ok := DirStats(kbPath)
 		if !ok {
+			continue
+		}
+		if unevictable != nil && unevictable(item.Name()) {
+			held += size
 			continue
 		}
 		if total > math.MaxInt64-size {
@@ -337,7 +359,7 @@ func ScanEntries(root string) ([]Entry, int64) {
 		// DuckDB query caches use per-shard entries above.
 		entries = append(entries, Entry{KBID: item.Name(), Path: kbPath, Bytes: size, LastTouch: touch})
 	}
-	return entries, total
+	return entries, total, held
 }
 
 func scanQueryShards(kbID, root string) ([]Entry, bool, bool) {

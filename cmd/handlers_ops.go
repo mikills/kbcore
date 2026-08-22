@@ -249,6 +249,10 @@ func eventStatusPayload(ev *kb.KBEvent) map[string]any {
 			out["stage"] = payload.Stage
 			out["will_retry"] = payload.WillRetry
 			out["file_results"] = payload.FileResults
+			out["error"] = payload.Error
+			if ev.LastError == "" {
+				out["last_error"] = payload.Error
+			}
 		}
 	}
 	return out

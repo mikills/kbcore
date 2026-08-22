@@ -38,7 +38,8 @@ minnow config init dev-openai
 
 ## Bootstrap environment variables
 
-`MINNOW_CONFIG` and the logging vars are read before the config file; `MINNOW_DUCKDB_MEMORY_LIMIT` is applied to the parsed config:
+`MINNOW_CONFIG` and the logging vars are read before the config file. Other
+bootstrap overrides are applied to the parsed config:
 
 | Env var             | Purpose                                                                    |
 | ------------------- | -------------------------------------------------------------------------- |
@@ -46,6 +47,8 @@ minnow config init dev-openai
 | `MINNOW_LOG_FORMAT` | Logger format (`text` / `json`). Read before the YAML so parse errors log.|
 | `MINNOW_LOG_LEVEL`  | Minimum log level (`debug` / `info` / `warn` / `error`). Defaults to `info`. |
 | `MINNOW_DUCKDB_MEMORY_LIMIT` | Overrides `format.duckdb.memory_limit`, for deployments whose YAML is baked into an image. |
+| `MINNOW_CACHE_MAX_BYTES` | Overrides `storage.cache.max_bytes`, for the same reason. Accepts bytes or a `KB` / `MB` / `GB` suffix. |
+| `MINNOW_OPENAI_EMBEDDING_DIMENSIONS` | Overrides `embedder.openai_compatible.dimensions`. Existing knowledge bases must be rebuilt after changing it. |
 
 All other deployment knobs are YAML fields.
 
@@ -149,13 +152,17 @@ for a complete configuration.
 | Field            | Type     | Default         | Notes                        |
 | ---------------- | -------- | --------------- | ---------------------------- |
 | `dir`            | path     | `./.temp/cache` | Relative to YAML file.       |
-| `max_bytes`      | int      | `0`             | `0` = unbounded.             |
+| `max_bytes`      | int      | `0`             | `0` = unbounded. `MINNOW_CACHE_MAX_BYTES` overrides it at startup. |
 | `entry_ttl`      | duration | `0s`            | `0` = no TTL.                |
 | `warm_shards`                  | int      | `0`             | Pre-download the N most-recently-sealed shards per KB into the cache at startup, in the background. `0` = off. |
 | `evict_interval`               | duration | `30s`           |                              |
 | `high_watermark_percent`       | int      | `0`             | Filesystem-used percentage that triggers eviction. `0` = disabled; otherwise 2–99. |
 | `low_watermark_percent`        | int      | high minus 10   | Once triggered, evict toward this lower filesystem-used percentage. Must be below `high_watermark_percent`. |
 | `min_free_bytes`               | int      | `0`             | Also trigger eviction when filesystem-available bytes fall below this reserve. |
+
+Open ingest sessions are excluded from `max_bytes` because they cannot be
+evicted safely. `minnow_cache_held_bytes` reports their size; use filesystem
+watermarks or `min_free_bytes` to protect bounded volumes.
 
 Queries run against local shard files, so a shard not yet in `dir` is fetched
 from the blob store on first touch (a cold `GET` in S3 or tiered mode).

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -74,10 +75,15 @@ func (k *KB) IndexCodebase(ctx context.Context, opts CodeIndexOptions) (CodeInde
 		return CodeIndexResult{}, err
 	}
 
-	result, deleteIDs, nextFiles, nextChunks := diffCodeIndexManifest(target, manifest, scanned, skipped)
-	if err := k.publishCodeIndexChanges(ctx, target, codeIndexPublishState{scanned: scanned, nextFiles: nextFiles, nextChunks: nextChunks, result: &result}); err != nil {
+	result, deletions, superseded, nextFiles, nextChunks := diffCodeIndexManifest(target, manifest, scanned, skipped)
+	if err := k.publishCodeIndexChanges(ctx, target, codeIndexPublishState{
+		scanned: scanned, nextFiles: nextFiles, nextChunks: nextChunks, oldChunks: manifest.Chunks,
+		deletions: deletions, superseded: superseded, result: &result,
+	}); err != nil {
 		return CodeIndexResult{}, err
 	}
+	deleteIDs := deletions.sortedIDs()
+	result.ChunksDeleted = len(deleteIDs)
 	if err := k.deleteRemovedCodeChunks(ctx, target.KBID, deleteIDs); err != nil {
 		return CodeIndexResult{}, err
 	}
@@ -85,7 +91,7 @@ func (k *KB) IndexCodebase(ctx context.Context, opts CodeIndexOptions) (CodeInde
 		return CodeIndexResult{}, err
 	}
 	slog.Default().
-		InfoContext(ctx, "code index complete", logKeyKBID, target.KBID, "indexed_files", result.IndexedFiles, "unchanged_files", result.UnchangedFiles, "chunks_indexed", result.ChunksIndexed, "total_duration_ms", time.Since(started).Milliseconds())
+		InfoContext(ctx, "code index complete", logKeyKBID, target.KBID, "indexed_files", result.IndexedFiles, "unchanged_files", result.UnchangedFiles, "changed_during_run", result.ChangedDuringRun, "chunks_indexed", result.ChunksIndexed, "total_duration_ms", time.Since(started).Milliseconds())
 	return result, nil
 }
 
@@ -111,7 +117,7 @@ func diffCodeIndexManifest(
 	manifest codeIndexManifest,
 	scanned []codeScannedFile,
 	skipped int,
-) (CodeIndexResult, []string, map[string]codeIndexedFile, map[string]CodeChunkMetadata) {
+) (CodeIndexResult, codeIndexDeletionPlan, map[string]codeIndexedFile, map[string]codeIndexedFile, map[string]CodeChunkMetadata) {
 	current := make(map[string]codeScannedFile, len(scanned))
 	for _, file := range scanned {
 		current[file.RelPath] = file
@@ -125,15 +131,15 @@ func diffCodeIndexManifest(
 		SkippedFiles: skipped,
 		ManifestKey:  codeIndexManifestKey(target.KBID),
 	}
-	var deleteIDs []string
+	deletions := make(codeIndexDeletionPlan)
+	superseded := make(map[string]codeIndexedFile)
 	nextFiles := make(map[string]codeIndexedFile, len(current))
 	nextChunks := make(map[string]CodeChunkMetadata)
 	for relPath, old := range manifest.Files {
 		file, ok := current[relPath]
 		if !ok {
-			deleteIDs = append(deleteIDs, old.ChunkIDs...)
+			deletions.add(old.ChunkIDs)
 			result.DeletedFiles++
-			result.ChunksDeleted += len(old.ChunkIDs)
 			continue
 		}
 		if old.Hash == file.Hash && old.Language == file.Language {
@@ -146,16 +152,42 @@ func diffCodeIndexManifest(
 			result.UnchangedFiles++
 			continue
 		}
-		deleteIDs = append(deleteIDs, old.ChunkIDs...)
-		result.ChunksDeleted += len(old.ChunkIDs)
+		deletions.add(old.ChunkIDs)
+		superseded[relPath] = old
 	}
-	return result, deleteIDs, nextFiles, nextChunks
+	return result, deletions, superseded, nextFiles, nextChunks
+}
+
+type codeIndexDeletionPlan map[string]struct{}
+
+func (p codeIndexDeletionPlan) add(ids []string) {
+	for _, id := range ids {
+		p[id] = struct{}{}
+	}
+}
+
+func (p codeIndexDeletionPlan) remove(ids []string) {
+	for _, id := range ids {
+		delete(p, id)
+	}
+}
+
+func (p codeIndexDeletionPlan) sortedIDs() []string {
+	ids := make([]string, 0, len(p))
+	for id := range p {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 type codeIndexPublishState struct {
 	scanned    []codeScannedFile
 	nextFiles  map[string]codeIndexedFile
 	nextChunks map[string]CodeChunkMetadata
+	oldChunks  map[string]CodeChunkMetadata
+	deletions  codeIndexDeletionPlan
+	superseded map[string]codeIndexedFile
 	result     *CodeIndexResult
 }
 
@@ -276,6 +308,9 @@ type codeDocumentStreamer struct {
 	policy     CodeIndexResourcePolicy
 	nextFiles  map[string]codeIndexedFile
 	nextChunks map[string]CodeChunkMetadata
+	oldChunks  map[string]CodeChunkMetadata
+	deletions  codeIndexDeletionPlan
+	superseded map[string]codeIndexedFile
 	result     *CodeIndexResult
 	filePos    int
 	pending    []Document
@@ -291,6 +326,9 @@ func newCodeDocumentStreamer(k *KB, target resolvedCodeIndexTarget, state codeIn
 		policy:     codeindex.ResourcePolicyFromOptions(target.Options),
 		nextFiles:  state.nextFiles,
 		nextChunks: state.nextChunks,
+		oldChunks:  state.oldChunks,
+		deletions:  state.deletions,
+		superseded: state.superseded,
 		result:     state.result,
 	}
 }
@@ -355,6 +393,19 @@ func (s *codeDocumentStreamer) shouldReadMoreFiles() bool {
 
 func (s *codeDocumentStreamer) addCodeFile(ctx context.Context, file codeScannedFile) error {
 	docs, metas, err := buildCodeDocuments(ctx, s.root, s.repoID, file, s.opts)
+	if errors.Is(err, codeindex.ErrFileChanged) {
+		if old, ok := s.superseded[file.RelPath]; ok {
+			s.nextFiles[file.RelPath] = old
+			for _, id := range old.ChunkIDs {
+				if chunk, exists := s.oldChunks[id]; exists {
+					s.nextChunks[id] = chunk
+				}
+			}
+			s.deletions.remove(old.ChunkIDs)
+		}
+		s.result.ChangedDuringRun++
+		return nil
+	}
 	if err != nil {
 		return err
 	}
