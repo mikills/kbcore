@@ -678,7 +678,12 @@ func (f *DuckDBArtifactFormat) postMutationCommitWithRetry(
 	}
 
 	if err := f.deps.EvictCacheIfNeeded(ctx, opts.kbID); err != nil {
-		return err
+		if !opts.upload {
+			return err
+		}
+		// Cache cleanup cannot invalidate a durable publish.
+		slog.Default().WarnContext(ctx, "post-publish cache eviction failed",
+			logKeyKBID, opts.kbID, logKeyError, err)
 	}
 
 	return nil

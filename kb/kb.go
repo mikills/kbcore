@@ -81,6 +81,7 @@ type KB struct {
 	MediaContentTypeAllowlist []string
 
 	cacheBytesCurrent        int64
+	cacheHeldBytes           int64
 	cacheEvictionsTTLTotal   uint64
 	cacheEvictionsSizeTotal  uint64
 	cacheEvictionErrorsTotal uint64

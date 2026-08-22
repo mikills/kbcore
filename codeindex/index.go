@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,19 +17,20 @@ import (
 )
 
 type indexResult struct {
-	KBID           string `json:"kb_id"`
-	IndexKey       string `json:"index_key"`
-	Description    string `json:"description"`
-	Ref            string `json:"ref,omitempty"`
-	Root           string `json:"root"`
-	ScannedFiles   int    `json:"scanned_files"`
-	SkippedFiles   int    `json:"skipped_files"`
-	IndexedFiles   int    `json:"indexed_files"`
-	DeletedFiles   int    `json:"deleted_files"`
-	UnchangedFiles int    `json:"unchanged_files"`
-	ChunksIndexed  int    `json:"chunks_indexed"`
-	ChunksDeleted  int    `json:"chunks_deleted"`
-	StatePath      string `json:"state_path"`
+	KBID             string `json:"kb_id"`
+	IndexKey         string `json:"index_key"`
+	Description      string `json:"description"`
+	Ref              string `json:"ref,omitempty"`
+	Root             string `json:"root"`
+	ScannedFiles     int    `json:"scanned_files"`
+	SkippedFiles     int    `json:"skipped_files"`
+	IndexedFiles     int    `json:"indexed_files"`
+	DeletedFiles     int    `json:"deleted_files"`
+	UnchangedFiles   int    `json:"unchanged_files"`
+	ChangedDuringRun int    `json:"changed_during_run,omitempty"`
+	ChunksIndexed    int    `json:"chunks_indexed"`
+	ChunksDeleted    int    `json:"chunks_deleted"`
+	StatePath        string `json:"state_path"`
 }
 
 func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexResult, error) {
@@ -241,6 +243,7 @@ func buildIndexPlan(
 	for _, file := range files {
 		current[file.RelPath] = file
 	}
+	superseded := make(map[string]stateFile)
 	for path, old := range previous.Files {
 		file, exists := current[path]
 		if !exists {
@@ -255,8 +258,7 @@ func buildIndexPlan(
 			delete(current, path)
 			continue
 		}
-		plan.deleteIDs = append(plan.deleteIDs, old.ChunkIDs...)
-		plan.stalePaths = append(plan.stalePaths, path)
+		superseded[path] = old
 	}
 	paths := make([]string, 0, len(current))
 	for path := range current {
@@ -267,6 +269,18 @@ func buildIndexPlan(
 	for _, path := range paths {
 		file := current[path]
 		docs, _, err := minnowcode.BuildDocuments(ctx, target.Root, target.RepoID, file, opts)
+		if errors.Is(err, minnowcode.ErrFileChanged) {
+			if old, indexed := superseded[path]; indexed {
+				plan.state.Files[path] = old
+				// Retained chunks still belong to the previous pipeline.
+				if previous.Pipeline != pipeline {
+					plan.state.Pipeline = previous.Pipeline
+				}
+				delete(superseded, path)
+			}
+			plan.result.ChangedDuringRun++
+			continue
+		}
 		if err != nil {
 			return indexPlan{}, err
 		}
@@ -283,6 +297,10 @@ func buildIndexPlan(
 		}
 		plan.result.IndexedFiles++
 		plan.result.ChunksIndexed += len(docs)
+	}
+	for path, old := range superseded {
+		plan.deleteIDs = append(plan.deleteIDs, old.ChunkIDs...)
+		plan.stalePaths = append(plan.stalePaths, path)
 	}
 	filteredDeletes := plan.deleteIDs[:0]
 	for _, id := range plan.deleteIDs {

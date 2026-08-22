@@ -98,4 +98,7 @@ func (p *progressReporter) done(result indexResult) {
 		result.IndexedFiles, result.UnchangedFiles, result.DeletedFiles,
 		result.ChunksIndexed, result.ChunksDeleted, result.KBID,
 	)
+	if result.ChangedDuringRun > 0 {
+		p.logf("%d files changed while indexing, left for the next run", result.ChangedDuringRun)
+	}
 }

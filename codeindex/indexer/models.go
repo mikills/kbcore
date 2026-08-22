@@ -27,18 +27,19 @@ type Options struct {
 }
 
 type Result struct {
-	KBID           string `json:"kb_id"`
-	IndexKey       string `json:"index_key"`
-	Description    string `json:"description,omitempty"`
-	Root           string `json:"root"`
-	ScannedFiles   int    `json:"scanned_files"`
-	SkippedFiles   int    `json:"skipped_files"`
-	IndexedFiles   int    `json:"indexed_files"`
-	DeletedFiles   int    `json:"deleted_files"`
-	UnchangedFiles int    `json:"unchanged_files"`
-	ChunksIndexed  int    `json:"chunks_indexed"`
-	ChunksDeleted  int    `json:"chunks_deleted"`
-	ManifestKey    string `json:"manifest_key"`
+	KBID             string `json:"kb_id"`
+	IndexKey         string `json:"index_key"`
+	Description      string `json:"description,omitempty"`
+	Root             string `json:"root"`
+	ScannedFiles     int    `json:"scanned_files"`
+	SkippedFiles     int    `json:"skipped_files"`
+	IndexedFiles     int    `json:"indexed_files"`
+	DeletedFiles     int    `json:"deleted_files"`
+	UnchangedFiles   int    `json:"unchanged_files"`
+	ChangedDuringRun int    `json:"changed_during_run,omitempty"`
+	ChunksIndexed    int    `json:"chunks_indexed"`
+	ChunksDeleted    int    `json:"chunks_deleted"`
+	ManifestKey      string `json:"manifest_key"`
 }
 
 type Status struct {

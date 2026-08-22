@@ -163,6 +163,33 @@ func TestReapAbandonedSession(t *testing.T) {
 	require.Contains(t, ids, "orphan", "the reaper cleared the marker without publishing")
 }
 
+func TestReapCachePressure(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-abandoned-session-over-budget"
+	harness := kb.NewTestHarness(t, kbID).WithEmbedder(newFixtureEmbedder(8)).Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+
+	deferBatch(t, loader, kbID, []kb.Document{{ID: "durable", Text: "durable abandoned row"}})
+	require.True(t, kb.HasPendingSession(harness.CacheDir()+"/"+kbID))
+	loader.SetMaxCacheBytes(1)
+
+	reaped, err := loader.ReapAbandonedSessions(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, reaped)
+	require.False(t, kb.HasPendingSession(harness.CacheDir()+"/"+kbID))
+
+	loader.SetMaxCacheBytes(0)
+	require.NoError(t, loader.ClearCache())
+	results, err := loader.Search(ctx, kbID, nil, &kb.SearchOptions{
+		Mode: kb.SearchModeBM25, TopK: 10, QueryText: "durable abandoned row",
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, "durable", results[0].ID)
+}
+
 // A live session belongs to a client that is still writing.
 func TestReapLeavesLiveSessionAlone(t *testing.T) {
 	ctx := context.Background()
