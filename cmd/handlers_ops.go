@@ -43,6 +43,7 @@ type tokenBucket struct {
 // capabilityIngestSessions tells a client this server can commit a session.
 const capabilityIngestSessions = "ingest_sessions"
 const capabilityDocumentScopes = "document_scopes"
+const capabilitySessionCommitScope = "session_commit_scope"
 
 func newIPRateLimiter(rate, burst float64) *ipRateLimiter {
 	return &ipRateLimiter{rate: rate, burst: burst, stripes: make([]rateLimitStripe, operationsLimiterStripes)}
@@ -113,6 +114,9 @@ func registerOpsRoutes(e *echo.Echo, deps Dependencies) {
 		}
 		if deps.ReplaceScope != nil && deps.GetScope != nil && deps.ListScopes != nil && deps.ScheduleScopeGC != nil {
 			capabilities = append(capabilities, capabilityDocumentScopes)
+			if deferredPublishReady(deps) {
+				capabilities = append(capabilities, capabilitySessionCommitScope)
+			}
 		}
 		return c.JSON(http.StatusOK, map[string]any{"status": "ok", "capabilities": capabilities})
 	})

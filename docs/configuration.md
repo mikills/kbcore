@@ -283,7 +283,9 @@ CLI and MCP code tools accept `index_key`; when `kb_id` is omitted, Minnow reads
 this registry and resolves the key to the right KB. If no entry exists,
 `default` maps to KB `default`, and other keys map to `code-<key>`.
 For a remote Minnow server without the client repository, pass both `kb_id` and
-`scope_id` to `minnow_code_search`.
+`scope_id` to `minnow_code_search`. Coding agents should normally use the local
+read-only `codeindex mcp` server, which resolves both values from the current
+checkout and calls Minnow over HTTP.
 
 ### Codeindex client config
 

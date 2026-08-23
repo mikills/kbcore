@@ -64,6 +64,8 @@ func run(ctx context.Context, args []string) int {
 		return runRemove(ctx, args[1:])
 	case "hooks":
 		return runHooks(ctx, args[1:])
+	case "mcp":
+		return runMCP(ctx, args[1:])
 	case "--version", "version":
 		fmt.Println("codeindex " + versionString())
 		return 0
@@ -77,7 +79,7 @@ func run(ctx context.Context, args []string) int {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: codeindex <setup|codebase|refresh|status|remove|hooks>")
+	fmt.Fprintln(os.Stderr, "usage: codeindex <setup|codebase|refresh|status|remove|hooks|mcp>")
 	fmt.Fprintln(os.Stderr, "       codeindex --version")
 }
 
@@ -218,6 +220,22 @@ func runStatus(args []string) int {
 	state, path, stateExists, err := loadIndexState(target)
 	if err != nil {
 		return writeCommandError(fmt.Errorf("load index state: %w", err), 1)
+	}
+	checkpoint, checkpointExists, checkpointErr := loadRunCheckpoint(target)
+	if checkpointErr != nil {
+		return writeCommandError(fmt.Errorf("load run checkpoint: %w", checkpointErr), 1)
+	}
+	if checkpointExists {
+		target.KBID = checkpoint.State.KBID
+		state = checkpoint.State
+		status := statusFromState(target, strings.TrimSpace(opts.minnowURL), path, state)
+		status.Indexed = false
+		status.Phase = string(checkpoint.Phase)
+		status.Recoverable = true
+		if err := writeJSON(status); err != nil {
+			return writeCommandError(fmt.Errorf("write json: %w", err), 1)
+		}
+		return 0
 	}
 	if stateExists {
 		target.KBID = state.KBID

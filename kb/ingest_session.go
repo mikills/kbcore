@@ -187,6 +187,21 @@ func (l *KB) IngestSessionsFor() *IngestSessions {
 	return l.ingestSessions
 }
 
+func (l *KB) SessionPending(ctx context.Context, kbID, sessionID string) (bool, error) {
+	if l == nil || l.CacheDir == "" || !HasPendingSession(filepath.Join(l.CacheDir, kbID)) {
+		return false, nil
+	}
+	current, err := l.IngestSessionsFor().Peek(ctx, kbID)
+	if err != nil {
+		return false, err
+	}
+	if current == nil {
+		return true, nil
+	}
+	_, token, ok := strings.Cut(strings.TrimSpace(sessionID), ":")
+	return ok && token != "" && current.Token == token, nil
+}
+
 // ReapAbandonedSessions publishes deferred rows whose client never came back.
 // The lease is the liveness signal, so taking it means the rows are complete
 // as of the last batch. Nothing else clears a crashed run's marker.

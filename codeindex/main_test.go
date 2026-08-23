@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -547,6 +548,19 @@ func TestLegacyState(t *testing.T) {
 	require.Equal(t, legacyKBID, loaded.KBID)
 }
 
+func TestStateScope(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init", "-b", "main")
+	target, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+	state := emptyIndexState(target)
+	state.ScopeID = "scope-from-another-branch"
+	require.NoError(t, writeIndexStateFile(indexStatePath(target), state))
+
+	_, _, _, err = loadIndexState(target)
+	require.ErrorContains(t, err, "state scope does not match")
+}
+
 func TestLocalLegacy(t *testing.T) {
 	root := t.TempDir()
 	runTestGit(t, root, "init", "-b", "main")
@@ -645,6 +659,7 @@ func TestLegacyExplicitIndexKeyStateMigratesInPlace(t *testing.T) {
 		context.Background(), target, indexer.NormalizeOptions(indexer.Options{}),
 		pipelineFingerprint(indexer.NormalizeOptions(indexer.Options{})), loaded, nil, 0,
 		func(context.Context, []indexer.Document) error { return nil },
+		planRecovery{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -750,6 +765,43 @@ func TestStatusReadsLocalStateWithoutConfig(t *testing.T) {
 	}
 }
 
+func TestStatusPrefersCheckpoint(t *testing.T) {
+	root := t.TempDir()
+	target, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+	old := emptyIndexState(target)
+	old.UpdatedAt = time.Now().UTC()
+	old.Files["old.go"] = stateFile{ChunkIDs: []string{"old"}}
+	_, err = saveIndexState(target, old)
+	require.NoError(t, err)
+	pending := emptyIndexState(target)
+	pending.Files["new.go"] = stateFile{ChunkIDs: []string{"new-a", "new-b"}}
+	require.NoError(t, saveRunCheckpoint(target, runCheckpoint{
+		Phase: runPhaseFinalizing, State: pending,
+	}))
+
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	stdout := os.Stdout
+	os.Stdout = writer
+	defer func() {
+		os.Stdout = stdout
+		_ = writer.Close()
+		_ = reader.Close()
+	}()
+	code := runStatus([]string{"--root", root})
+	require.NoError(t, writer.Close())
+	os.Stdout = stdout
+	data, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Equal(t, 0, code)
+	var status indexStatus
+	require.NoError(t, json.Unmarshal(data, &status))
+	require.False(t, status.Indexed)
+	require.True(t, status.Recoverable)
+	require.Equal(t, 2, status.ChunkCount)
+}
+
 type testMinnowServer struct {
 	*httptest.Server
 	mu        sync.Mutex
@@ -794,7 +846,7 @@ func newTestMinnowServer(t *testing.T) *testMinnowServer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "ok", "capabilities": []string{"ingest_sessions", "document_scopes"},
+			"status": "ok", "capabilities": []string{"ingest_sessions", "document_scopes", "session_commit_scope"},
 		})
 	})
 	mux.HandleFunc("/rag/ingest", func(w http.ResponseWriter, r *http.Request) {
@@ -831,6 +883,10 @@ func newTestMinnowServer(t *testing.T) *testMinnowServer {
 		var request struct {
 			KBID      string `json:"kb_id"`
 			SessionID string `json:"session_id"`
+			Scope     *struct {
+				ScopeID     string   `json:"scope_id"`
+				DocumentIDs []string `json:"document_ids"`
+			} `json:"scope"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Error(err)
@@ -838,6 +894,12 @@ func newTestMinnowServer(t *testing.T) *testMinnowServer {
 			return
 		}
 		server.mu.Lock()
+		if (request.SessionID == "" && server.session != "") ||
+			(request.SessionID != "" && request.SessionID != server.session) {
+			server.mu.Unlock()
+			http.Error(w, "another client holds the session", http.StatusConflict)
+			return
+		}
 		if status := server.commitStatus; status != 0 {
 			server.mu.Unlock()
 			http.Error(w, "commit failed", status)
@@ -850,8 +912,14 @@ func newTestMinnowServer(t *testing.T) *testMinnowServer {
 				server.published[doc.ID] = struct{}{}
 			}
 		}
-		// The publish releases the session, so the next run opens its own.
-		server.session = ""
+		if server.scopeStatus == 0 && request.Scope != nil {
+			server.scopes[request.Scope.ScopeID] = append([]string(nil), request.Scope.DocumentIDs...)
+			server.scopePuts++
+		}
+		if server.scopeStatus == 0 {
+			// The completed publish releases the session, so the next run opens its own.
+			server.session = ""
+		}
 		server.mu.Unlock()
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -862,7 +930,16 @@ func newTestMinnowServer(t *testing.T) *testMinnowServer {
 	mux.HandleFunc("/rag/operations/evt-commit", func(w http.ResponseWriter, _ *http.Request) {
 		server.mu.Lock()
 		server.mutations = append(server.mutations, "publish")
+		scopeStatus := server.scopeStatus
 		server.mu.Unlock()
+		if scopeStatus != 0 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"terminal": map[string]any{
+					"kind": "worker.failed", "status": "failed", "stage": "scope", "last_error": "scope failed",
+				},
+			})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"terminal": map[string]any{"kind": "kb.published", "status": "done"},
 		})

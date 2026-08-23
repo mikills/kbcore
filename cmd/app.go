@@ -279,6 +279,7 @@ func buildKBDeps(loader *kb.KB, logger *slog.Logger) Dependencies {
 	deps.IndexCodebase = loader.IndexCodebase
 	deps.CodeIndexStatus = loader.CodeIndexStatus
 	deps.SearchCode = loader.SearchCode
+	deps.CodeIndexPending = loader.SessionPending
 	deps.InstallCodeHooks = kb.InstallCodeIndexHooks
 	deps.UninstallCodeHooks = kb.UninstallCodeIndexHooks
 	deps.CodeHookStatus = kb.CodeIndexHookStatus

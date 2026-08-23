@@ -27,6 +27,7 @@ type Dependencies struct {
 	IndexCodebase       func(context.Context, kb.CodeIndexOptions) (kb.CodeIndexResult, error)
 	CodeIndexStatus     func(context.Context, string) (kb.CodeIndexStatus, error)
 	SearchCode          func(context.Context, string, string, kb.CodeSearchOptions) ([]kb.CodeSearchResult, error)
+	CodeIndexPending    func(context.Context, string, string) (bool, error)
 	InstallCodeHooks    func(context.Context, kb.CodeHookOptions) (kb.CodeHookStatus, error)
 	UninstallCodeHooks  func(context.Context, string) (kb.CodeHookStatus, error)
 	CodeHookStatus      func(context.Context, string) (kb.CodeHookStatus, error)
@@ -82,6 +83,7 @@ func Register(e *echo.Echo, deps Dependencies) {
 	registerMediaRoutes(e, deps)
 	registerVectorRoutes(e, deps, sessions)
 	registerScopeRoutes(e, deps)
+	registerCodeRoutes(e, deps)
 }
 
 func requestIDs(c echo.Context) (string, string) {

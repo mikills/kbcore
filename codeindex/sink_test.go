@@ -188,6 +188,7 @@ func TestBuildIndexPlanEmitError(t *testing.T) {
 	_, err = buildIndexPlan(
 		context.Background(), target, opts, pipelineFingerprint(opts), indexState{}, files, skipped,
 		func(context.Context, []indexer.Document) error { return want },
+		planRecovery{},
 	)
 	if !errors.Is(err, want) {
 		t.Fatalf("got %v, want %v", err, want)

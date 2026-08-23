@@ -105,12 +105,15 @@ kill -0 <pid> || echo "dead"
 Remove a lock by hand only after confirming the process is dead and the wait is
 not acceptable.
 
-A `.journal` file next to it records the target KB and every chunk ID sent
-before ingest. The next run reads it, deletes chunks the dead run left behind,
-and invalidates state for the affected files. Prefer letting a normal run
-recover rather than deleting a journal by hand, since deleting it strands those
-chunks in Minnow. A journal holding only a `kb` header means nothing was
-uploaded and it is safe to remove.
+A `.journal` file next to it records completed files and acknowledged chunks.
+A `.pending` file records a completed upload awaiting hosted finalization. The
+next ordinary indexing invocation resumes both automatically. Do not delete
+either file by hand; doing so discards the information needed to skip confirmed
+work or reconcile a hosted finalization.
+
+During finalization, the CLI reports `publishing and finalizing branch scope`
+with elapsed-time heartbeats. The hosted operation continues if the CLI exits.
+Use `codeindex status` to inspect its local phase.
 
 ## The service runs out of memory
 

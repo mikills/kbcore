@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,8 +15,13 @@ func TestJournal(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, journal.record([]string{"a", "b"}))
 	require.NoError(t, journal.confirm([]string{"a"}))
+	require.NoError(t, journal.recordFile("a.go", "pipeline", stateFile{
+		Hash: "hash", Language: "go", ChunkIDs: []string{"a"},
+	}))
+	require.NoError(t, journal.recordScope("rev-a", true))
 	require.NoError(t, journal.recordSession("instance:token"))
 	require.NoError(t, journal.markPublished())
+	require.NoError(t, journal.recordScope("rev-b", true))
 	require.NoError(t, journal.close())
 
 	resumed, contents, err := resumeUploadJournal(path, "kb", "main")
@@ -25,6 +31,10 @@ func TestJournal(t *testing.T) {
 	require.Empty(t, contents.sessionID)
 	require.True(t, contents.published)
 	require.Equal(t, []string{"a"}, contents.publishedConfirmed)
+	require.Equal(t, []string{"a"}, contents.files["a.go"].State.ChunkIDs)
+	require.True(t, contents.scopeRecorded)
+	require.True(t, contents.scopeExists)
+	require.Equal(t, "rev-b", contents.scopeRevision)
 	require.NoError(t, resumed.remove())
 	_, err = os.Stat(path)
 	require.ErrorIs(t, err, os.ErrNotExist)
@@ -40,4 +50,20 @@ func TestJournalIdentity(t *testing.T) {
 	require.Error(t, err)
 	_, _, err = resumeUploadJournal(path, "other", "main")
 	require.Error(t, err)
+}
+
+func TestJournalLargeFileCheckpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.journal")
+	j, _, err := resumeUploadJournal(path, "kb", "main")
+	require.NoError(t, err)
+	ids := make([]string, 2000)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("chunk-%064d", i)
+	}
+	require.NoError(t, j.recordFile("large.go", "pipeline", stateFile{Hash: "hash", ChunkIDs: ids}))
+	require.NoError(t, j.close())
+
+	contents, err := loadUploadJournal(path)
+	require.NoError(t, err)
+	require.Equal(t, ids, contents.files["large.go"].State.ChunkIDs)
 }

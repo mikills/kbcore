@@ -186,6 +186,11 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 		return indexResult{}, err
 	}
 	progress := newProgressReporter(cli.quiet)
+	if recovered, ok, err := resumeRunCheckpoint(ctx, cfg, target, opts, progress); err != nil {
+		return indexResult{}, err
+	} else if ok {
+		previous = recovered
+	}
 	files, skipped, err := minnowcode.Scan(ctx, target.Root, opts, minnowcode.DefaultExcludePatterns)
 	if err != nil {
 		return indexResult{}, err
@@ -204,6 +209,10 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 		return indexResult{}, err
 	}
 	defer journal.close()
+	journalContents, err := loadUploadJournal(uploadJournalPath(target))
+	if err != nil {
+		return indexResult{}, err
+	}
 	sink := &documentSink{
 		client: client, kbID: target.KBID, policy: policy, journal: journal, progress: progress,
 		confirmed: confirmed,
@@ -213,7 +222,12 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 		return sink.emit(ctx, docs)
 	}
 	pipeline := pipelineFingerprint(opts)
-	plan, err := buildIndexPlan(ctx, target, opts, pipeline, previous, files, skipped, emit)
+	plan, err := buildIndexPlan(ctx, target, opts, pipeline, previous, files, skipped, emit, planRecovery{
+		files: confirmedJournalFiles(journalContents, confirmed, pipeline),
+		record: func(path string, state stateFile) error {
+			return journal.recordFile(path, pipeline, state)
+		},
+	})
 	if err != nil {
 		return indexResult{}, err
 	}
@@ -221,20 +235,34 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 		return indexResult{}, err
 	}
 	plan.result.ChunksIndexed = sink.uploaded
-	plan.result.ChunksReused = sink.reused
+	plan.result.ChunksReused += sink.reused
+	checkpoint := newRunCheckpoint(
+		plan, opts.IncludeUntracked, client.scopeRevision, client.scopeExists,
+	)
+	if err := saveRunCheckpoint(target, checkpoint); err != nil {
+		return indexResult{}, fmt.Errorf("save run checkpoint: %w", err)
+	}
 	// State must not record success before the deferred writes are published.
 	allIDs := stateChunkIDs(plan.state)
 	if _, err := client.scheduleGC(ctx, target.KBID, allIDs); err != nil {
 		return indexResult{}, err
 	}
-	if err := client.commit(ctx, target.KBID); err != nil {
-		if !isHTTPConflict(err) {
-			return indexResult{}, err
-		}
-		published, fetchErr := client.published(ctx, target.KBID, allIDs)
-		if fetchErr != nil || len(published) != len(allIDs) {
-			return indexResult{}, err
-		}
+	checkpoint.Phase = runPhaseFinalizing
+	if err := saveRunCheckpoint(target, checkpoint); err != nil {
+		return indexResult{}, fmt.Errorf("save finalizing checkpoint: %w", err)
+	}
+	progress.phase("publishing and finalizing branch scope")
+	client.onOperationPoll = func() { progress.phaseHeartbeat("publishing and finalizing branch scope") }
+	client.scopeAttempt = checkpoint.FinalizeAttempt
+	client.onScopeAttempt = func(attempt int) error {
+		checkpoint.FinalizeAttempt = attempt
+		return saveRunCheckpoint(target, checkpoint)
+	}
+	if err := finalizeRun(
+		ctx, client, target.KBID, target.ScopeID, allIDs,
+		checkpoint.ScopeRevision, checkpoint.ScopeExists,
+	); err != nil {
+		return indexResult{}, err
 	}
 	if _, err := client.scheduleGC(ctx, target.KBID, allIDs); err != nil {
 		return indexResult{}, err
@@ -242,10 +270,12 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 	if err := journal.markPublished(); err != nil {
 		return indexResult{}, err
 	}
-	clearSession(target)
-	if err := client.replaceScope(ctx, target.KBID, target.ScopeID, allIDs); err != nil {
-		return indexResult{}, err
+	checkpoint.Phase = runPhaseFinalized
+	if err := saveRunCheckpoint(target, checkpoint); err != nil {
+		return indexResult{}, fmt.Errorf("save finalized checkpoint: %w", err)
 	}
+	progress.phase("published and finalized branch scope")
+	clearSession(target)
 	scheduled, err := client.scheduleGC(ctx, target.KBID, plan.deleteIDs)
 	if err != nil {
 		return indexResult{}, err
@@ -259,11 +289,178 @@ func refreshIndex(ctx context.Context, cfg Config, cli indexCLIOptions) (indexRe
 	if err := saveRegistrySelection(target, opts); err != nil {
 		return indexResult{}, err
 	}
+	if err := removeRunCheckpoint(target); err != nil {
+		return indexResult{}, err
+	}
 	// State now records every emitted chunk, so a leftover journal is orphan-free.
 	_ = journal.remove()
 	plan.result.StatePath = savedPath
 	progress.done(plan.result)
 	return plan.result, nil
+}
+
+func resumeRunCheckpoint(
+	ctx context.Context,
+	cfg Config,
+	target indexTarget,
+	opts minnowcode.Options,
+	progress *progressReporter,
+) (indexState, bool, error) {
+	checkpoint, exists, err := loadRunCheckpoint(target)
+	if err != nil || !exists {
+		return indexState{}, false, err
+	}
+	progress.phase("recovering interrupted finalization")
+	client, err := newMinnowClient(cfg)
+	if err != nil {
+		return indexState{}, false, err
+	}
+	if err := client.check(ctx); err != nil {
+		return indexState{}, false, err
+	}
+	if !client.canCommitScope {
+		return indexState{}, false, fmt.Errorf(
+			"Minnow at %s does not support atomic session scope commits", cfg.Minnow.URL,
+		)
+	}
+	if _, err := client.scopeMembers(ctx, target.KBID, target.ScopeID); err != nil {
+		return indexState{}, false, err
+	}
+	allIDs := stateChunkIDs(checkpoint.State)
+	client.sessionKB = target.KBID
+	client.sessionID = loadSession(target)
+	if client.sessionID != "" || !client.scopeMatches(allIDs) {
+		client.onWait = progress.waitingForSession
+		client.onOperationPoll = func() { progress.phaseHeartbeat("recovering interrupted finalization") }
+		client.scopeAttempt = checkpoint.FinalizeAttempt
+		client.onScopeAttempt = func(attempt int) error {
+			checkpoint.FinalizeAttempt = attempt
+			return saveRunCheckpoint(target, checkpoint)
+		}
+		if _, err := client.scheduleGC(ctx, target.KBID, allIDs); err != nil {
+			return indexState{}, false, err
+		}
+		checkpoint.Phase = runPhaseFinalizing
+		if err := saveRunCheckpoint(target, checkpoint); err != nil {
+			return indexState{}, false, err
+		}
+		if err := finalizeRun(
+			ctx, client, target.KBID, target.ScopeID, allIDs,
+			checkpoint.ScopeRevision, checkpoint.ScopeExists,
+		); err != nil {
+			if errors.Is(err, errPublishedMissing) {
+				journal, _, journalErr := resumeUploadJournal(
+					uploadJournalPath(target), target.KBID, target.ScopeID,
+				)
+				if journalErr != nil {
+					return indexState{}, false, errors.Join(err, journalErr)
+				}
+				journalErr = errors.Join(journal.markPublished(), journal.close())
+				if journalErr != nil {
+					return indexState{}, false, errors.Join(err, journalErr)
+				}
+				if removeErr := removeRunCheckpoint(target); removeErr != nil {
+					return indexState{}, false, errors.Join(err, removeErr)
+				}
+				clearSession(target)
+				progress.phase("re-uploading missing index data")
+				return indexState{}, false, nil
+			}
+			return indexState{}, false, err
+		}
+	}
+	checkpoint.Phase = runPhaseFinalized
+	if err := saveRunCheckpoint(target, checkpoint); err != nil {
+		return indexState{}, false, err
+	}
+	if _, err := client.scheduleGC(ctx, target.KBID, checkpoint.DeleteIDs); err != nil {
+		return indexState{}, false, err
+	}
+	checkpoint.State.UpdatedAt = time.Now().UTC()
+	if _, err := saveIndexState(target, checkpoint.State); err != nil {
+		return indexState{}, false, err
+	}
+	opts.IncludeUntracked = checkpoint.IncludeUntracked
+	if err := saveRegistrySelection(target, opts); err != nil {
+		return indexState{}, false, err
+	}
+	if err := removeRunCheckpoint(target); err != nil {
+		return indexState{}, false, err
+	}
+	if err := removeIfExists(uploadJournalPath(target)); err != nil {
+		return indexState{}, false, err
+	}
+	clearSession(target)
+	progress.phase("recovered finalized index")
+	return checkpoint.State, true, nil
+}
+
+var errPublishedMissing = errors.New("published index data is missing")
+
+func finalizeRun(
+	ctx context.Context,
+	client *minnowClient,
+	kbID, scopeID string,
+	ids []string,
+	expectedRevision string,
+	expectedScope bool,
+) error {
+	scopeOnly := client.sessionID == ""
+	client.scopeRevision = expectedRevision
+	client.scopeExists = expectedScope
+	commitErr := client.commit(ctx, kbID, scopeID, ids)
+	if commitErr == nil {
+		return nil
+	}
+	if !isHTTPConflict(commitErr) && !(scopeOnly && isOperationFailed(commitErr)) {
+		return commitErr
+	}
+	published, err := client.published(ctx, kbID, ids)
+	if err != nil {
+		return errors.Join(commitErr, err)
+	}
+	if !allIDsPresent(ids, published) {
+		if err := client.refreshScope(ctx, kbID, scopeID); err != nil {
+			return errors.Join(commitErr, err)
+		}
+		if client.scopeRevision != expectedRevision || client.scopeExists != expectedScope {
+			return commitErr
+		}
+		return fmt.Errorf("%w: %v", errPublishedMissing, commitErr)
+	}
+	if err := client.refreshScope(ctx, kbID, scopeID); err != nil {
+		return errors.Join(commitErr, err)
+	}
+	if client.scopeMatches(ids) {
+		return nil
+	}
+	if client.scopeRevision != expectedRevision || client.scopeExists != expectedScope {
+		return commitErr
+	}
+	client.sessionID = ""
+	if scopeOnly && isOperationFailed(commitErr) {
+		if err := client.advanceScopeAttempt(); err != nil {
+			return errors.Join(commitErr, err)
+		}
+	}
+	if err := client.commit(ctx, kbID, scopeID, ids); err != nil {
+		if isOperationFailed(err) {
+			if attemptErr := client.advanceScopeAttempt(); attemptErr != nil {
+				return errors.Join(commitErr, err, attemptErr)
+			}
+		}
+		return errors.Join(commitErr, err)
+	}
+	return nil
+}
+
+func allIDsPresent(ids []string, present map[string]struct{}) bool {
+	for _, id := range ids {
+		if _, ok := present[id]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func startUpload(
@@ -283,6 +480,9 @@ func startUpload(
 	if !client.canScope {
 		return nil, nil, nil, fmt.Errorf("Minnow at %s does not support document scopes", cfg.Minnow.URL)
 	}
+	if !client.canCommitScope {
+		return nil, nil, nil, fmt.Errorf("Minnow at %s does not support atomic session scope commits", cfg.Minnow.URL)
+	}
 	journal, contents, err := startUploadJournal(journalPath, target)
 	if err != nil {
 		return nil, nil, nil, err
@@ -294,7 +494,7 @@ func startUpload(
 			storedSession := loadSession(target)
 			client.sessionID = firstNonEmpty(contents.sessionID, storedSession)
 			if contents.sessionID == "" && storedSession != "" && len(target.MigrationIDs) > 0 {
-				if err := client.commit(ctx, target.KBID); err != nil && !isHTTPConflict(err) {
+				if err := client.commitSession(ctx, target.KBID); err != nil && !isHTTPConflict(err) {
 					journal.close()
 					return nil, nil, nil, fmt.Errorf("publish legacy ingest session: %w", err)
 				}
@@ -360,6 +560,13 @@ func startUpload(
 	}
 	for id := range members {
 		confirmed[id] = struct{}{}
+	}
+	if contents.scopeRecorded {
+		client.scopeRevision = contents.scopeRevision
+		client.scopeExists = contents.scopeExists
+	} else if err := journal.recordScope(client.scopeRevision, client.scopeExists); err != nil {
+		journal.close()
+		return nil, nil, nil, err
 	}
 	return client, journal, confirmed, nil
 }
@@ -453,6 +660,38 @@ type indexPlan struct {
 	result     indexResult
 }
 
+type planRecovery struct {
+	files  map[string]stateFile
+	record func(path string, state stateFile) error
+}
+
+func confirmedJournalFiles(
+	contents journalContents,
+	confirmed map[string]struct{},
+	pipeline string,
+) map[string]stateFile {
+	var files map[string]stateFile
+	for path, file := range contents.files {
+		if file.Pipeline != pipeline || !allChunksConfirmed(file.State.ChunkIDs, confirmed) {
+			continue
+		}
+		if files == nil {
+			files = make(map[string]stateFile)
+		}
+		files[path] = file.State
+	}
+	return files
+}
+
+func allChunksConfirmed(ids []string, confirmed map[string]struct{}) bool {
+	for _, id := range ids {
+		if _, ok := confirmed[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func buildIndexPlan(
 	ctx context.Context,
 	target indexTarget,
@@ -462,6 +701,7 @@ func buildIndexPlan(
 	files []minnowcode.ScannedFile,
 	skipped int,
 	emit emitFunc,
+	recovery planRecovery,
 ) (indexPlan, error) {
 	plan := indexPlan{
 		state: indexState{
@@ -477,6 +717,16 @@ func buildIndexPlan(
 	current := make(map[string]minnowcode.ScannedFile, len(files))
 	for _, file := range files {
 		current[file.RelPath] = file
+	}
+	for path, recovered := range recovery.files {
+		file, exists := current[path]
+		if !exists || recovered.Hash != file.Hash || recovered.Language != file.Language {
+			continue
+		}
+		plan.state.Files[path] = recovered
+		plan.result.UnchangedFiles++
+		plan.result.ChunksReused += len(recovered.ChunkIDs)
+		delete(current, path)
 	}
 	superseded := make(map[string]stateFile)
 	for path, old := range previous.Files {
@@ -524,12 +774,18 @@ func buildIndexPlan(
 			chunkIDs = append(chunkIDs, doc.ID)
 			newChunkIDs[doc.ID] = struct{}{}
 		}
+		state := stateFile{
+			Hash: file.Hash, SizeBytes: file.SizeBytes, Language: file.Language, ChunkIDs: chunkIDs,
+		}
+		if recovery.record != nil {
+			if err := recovery.record(path, state); err != nil {
+				return indexPlan{}, err
+			}
+		}
 		if err := emit(ctx, docs); err != nil {
 			return indexPlan{}, err
 		}
-		plan.state.Files[path] = stateFile{
-			Hash: file.Hash, SizeBytes: file.SizeBytes, Language: file.Language, ChunkIDs: chunkIDs,
-		}
+		plan.state.Files[path] = state
 		plan.result.IndexedFiles++
 		plan.result.ChunksIndexed += len(docs)
 	}

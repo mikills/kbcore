@@ -113,6 +113,22 @@ func TestIngestSession(t *testing.T) {
 	})
 }
 
+func TestAtomicCommitRequired(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"capabilities": []string{"ingest_sessions", "document_scopes"},
+		})
+	}))
+	defer server.Close()
+	cfg := defaultConfig()
+	cfg.Minnow.URL = server.URL
+	_, _, _, err := startUpload(
+		context.Background(), cfg, indexTarget{KBID: "kb", ScopeID: "main"},
+		filepath.Join(t.TempDir(), "run.journal"), newProgressReporter(true),
+	)
+	require.ErrorContains(t, err, "atomic session scope commits")
+}
+
 // An interrupted run must present its own handle again rather than wait out the
 // server's lease, and unrelated indexes must not share one.
 func TestSessionStore(t *testing.T) {
@@ -144,6 +160,37 @@ func TestSessionStore(t *testing.T) {
 }
 
 func TestCommit(t *testing.T) {
+	t.Run("an active session publishes a matching scope", func(t *testing.T) {
+		server := newTestMinnowServer(t)
+		defer server.Close()
+		client := newTestMinnowClient(t, server.URL)
+		client.sessionID = "instance:token"
+		client.scopeExists = true
+		client.scopeIDs = []string{"chunk"}
+		server.mu.Lock()
+		server.session = client.sessionID
+		server.mu.Unlock()
+
+		require.NoError(t, client.commit(context.Background(), "kb", "main", []string{"chunk"}))
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		require.Equal(t, []string{"instance:token"}, server.commits)
+	})
+
+	t.Run("a matching cached scope still uses server CAS", func(t *testing.T) {
+		server := newTestMinnowServer(t)
+		defer server.Close()
+		client := newTestMinnowClient(t, server.URL)
+		client.scopeExists = true
+		client.scopeRevision = "rev-main"
+		client.scopeIDs = []string{"chunk"}
+
+		require.NoError(t, client.commit(context.Background(), "kb", "main", []string{"chunk"}))
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		require.Equal(t, []string{""}, server.commits)
+	})
+
 	t.Run("a server that cannot commit is never asked to defer", func(t *testing.T) {
 		var paths []string
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -164,7 +211,7 @@ func TestCommit(t *testing.T) {
 		if client.canDeferPublish {
 			t.Fatal("deferring against a server that never advertised the capability")
 		}
-		if err := client.commit(context.Background(), "kb"); err != nil {
+		if err := client.commitSession(context.Background(), "kb"); err != nil {
 			t.Fatalf("commit without a session: %v", err)
 		}
 		for _, p := range paths {
@@ -210,7 +257,7 @@ func TestCommit(t *testing.T) {
 			t.Fatal(err)
 		}
 		client.sessionID = "session-token"
-		err = client.commit(context.Background(), "kb")
+		err = client.commitSession(context.Background(), "kb")
 		if err == nil || !strings.Contains(err.Error(), "another client") {
 			t.Fatalf("conflict was not surfaced: %v", err)
 		}

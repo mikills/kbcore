@@ -802,6 +802,7 @@ func buildWorkerPools(k *kb.KB, cfg *config.Config, app *appcmd.App) ([]*kb.Work
 				KB:             k,
 				ID:             "session-commit-worker",
 				ReleaseSession: k.IngestSessionsFor().Release,
+				FinalizeScope:  k.FinalizeSessionScope,
 			},
 			cfg.Workers.DocumentPublish,
 		},

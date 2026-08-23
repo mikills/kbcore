@@ -281,7 +281,7 @@ func TestACommitSurvivesAFailedSessionRelease(t *testing.T) {
 			return errors.New("lease backend is down")
 		},
 	}
-	payload, err := json.Marshal(SessionCommitPayload{KBID: "kb"})
+	payload, err := json.Marshal(SessionCommitPayload{KBID: "kb", SessionID: "instance:token"})
 	if err != nil {
 		t.Fatal(err)
 	}

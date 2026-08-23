@@ -617,8 +617,10 @@ func (l *KB) runScheduledJob(ctx context.Context, jobID string) error {
 		_, err := l.EventStore.Requeue(ctx, l.Clock.Now())
 		return err
 	case EventCleanupJobID:
-		_, err := l.EventStore.Cleanup(ctx, l.Clock.Now().Add(-EventRetention))
-		return err
+		cutoff := l.Clock.Now().Add(-EventRetention)
+		_, scopeErr := l.SweepSessionCommitScopes(ctx, cutoff)
+		_, eventErr := l.EventStore.Cleanup(ctx, cutoff)
+		return errors.Join(scopeErr, eventErr)
 	case InboxCleanupJobID:
 		_, err := l.EventInbox.Cleanup(ctx, l.Clock.Now().Add(-InboxRetention))
 		return err

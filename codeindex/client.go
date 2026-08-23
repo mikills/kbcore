@@ -35,12 +35,16 @@ type minnowClient struct {
 	runID           string
 	canDeferPublish bool
 	canScope        bool
+	canCommitScope  bool
 	onSession       func(string) error
 	onWait          func(time.Duration)
+	onOperationPoll func()
 	conflictBudget  time.Duration
 	scopeRevision   string
 	scopeIDs        []string
 	scopeExists     bool
+	scopeAttempt    int
+	onScopeAttempt  func(int) error
 }
 
 type jsonCall struct {
@@ -97,6 +101,10 @@ type operationTerminal struct {
 	WillRetry bool   `json:"will_retry"`
 }
 
+type operationFailedError struct{ message string }
+
+func (e *operationFailedError) Error() string { return "Minnow operation failed: " + e.message }
+
 func newMinnowClient(cfg Config) (*minnowClient, error) {
 	if err := validateMinnowURL(cfg.Minnow.URL); err != nil {
 		return nil, err
@@ -129,7 +137,44 @@ func (c *minnowClient) check(ctx context.Context) error {
 	}
 	c.canDeferPublish = slices.Contains(out.Capabilities, capabilityIngestSessions)
 	c.canScope = slices.Contains(out.Capabilities, capabilityDocumentScopes)
+	c.canCommitScope = slices.Contains(out.Capabilities, capabilitySessionCommitScope)
 	return nil
+}
+
+type codeSearchRequest struct {
+	KBID     string `json:"kb_id"`
+	ScopeID  string `json:"scope_id"`
+	Query    string `json:"query"`
+	K        int    `json:"k,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Language string `json:"language,omitempty"`
+}
+
+type codeSearchResponse struct {
+	KBID    string                    `json:"kb_id"`
+	Results []minnowcode.SearchResult `json:"results"`
+}
+
+func (c *minnowClient) searchCode(ctx context.Context, request codeSearchRequest) (codeSearchResponse, error) {
+	var response codeSearchResponse
+	key := "codeindex-search-" + shortHash(strings.Join([]string{
+		request.KBID, request.ScopeID, request.Query, request.Path, request.Language, strconv.Itoa(request.K),
+	}, "\x00"))
+	if err := c.doJSONWithRetry(ctx, http.MethodPost, "/v1/code/search", request, key, &response); err != nil {
+		return codeSearchResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *minnowClient) sessionPending(ctx context.Context, kbID, sessionID string) (bool, error) {
+	var response struct {
+		Pending bool `json:"pending"`
+	}
+	body := map[string]string{"kb_id": kbID, "session_id": sessionID}
+	if err := c.doJSONWithRetry(ctx, http.MethodPost, "/v1/code/status", body, "", &response); err != nil {
+		return false, err
+	}
+	return response.Pending, nil
 }
 
 func (c *minnowClient) ingest(ctx context.Context, kbID string, docs []minnowcode.Document) error {
@@ -155,18 +200,34 @@ func (c *minnowClient) ingest(ctx context.Context, kbID string, docs []minnowcod
 	return c.waitForOperation(ctx, accepted.EventID)
 }
 
-// commit publishes everything the session deferred, as an operation to follow
-// so no proxy read timeout sits between the run and its writes.
-func (c *minnowClient) commit(ctx context.Context, kbID string) error {
+// commit publishes deferred rows and applies their opaque scope in one hosted
+// operation, so both steps continue after the client disconnects.
+func (c *minnowClient) commit(ctx context.Context, kbID, scopeID string, ids []string) error {
+	body := map[string]any{"kb_id": kbID, "session_id": c.sessionID}
+	body["scope"] = map[string]any{
+		"scope_id": scopeID, "document_ids": ids, "revision": c.scopeRevision,
+	}
+	idemKey := c.sessionID
+	if idemKey == "" {
+		parts := append([]string{kbID, scopeID, c.scopeRevision, strconv.Itoa(c.scopeAttempt)}, ids...)
+		idemKey = "codeindex-scope-" + shortHash(strings.Join(parts, "\x00"))
+	}
+	return c.submitCommit(ctx, body, idemKey)
+}
+
+func (c *minnowClient) commitSession(ctx context.Context, kbID string) error {
 	if c.sessionID == "" {
 		return nil
 	}
-	body := map[string]any{"kb_id": kbID, "session_id": c.sessionID}
+	return c.submitCommit(ctx, map[string]any{"kb_id": kbID, "session_id": c.sessionID}, c.sessionID)
+}
+
+func (c *minnowClient) submitCommit(ctx context.Context, body map[string]any, idemKey string) error {
 	// Keyed so a lost response retries onto the same operation.
 	var accepted acceptedOperation
 	if err := c.doJSON(ctx, jsonCall{
 		client: c.http, method: http.MethodPost, path: "/rag/commit",
-		body: body, idemKey: c.sessionID, out: &accepted,
+		body: body, idemKey: idemKey, out: &accepted,
 	}); err != nil {
 		return err
 	}
@@ -175,6 +236,10 @@ func (c *minnowClient) commit(ctx context.Context, kbID string) error {
 	}
 	// A publish rebuilds every shard, which outlasts the per-batch budget.
 	return c.awaitOperation(ctx, accepted.EventID, commitTimeout)
+}
+
+func (c *minnowClient) scopeMatches(ids []string) bool {
+	return c.scopeExists && slices.Equal(c.scopeIDs, ids)
 }
 
 func (c *minnowClient) delete(ctx context.Context, kbID string, ids []string) error {
@@ -260,16 +325,21 @@ func (c *minnowClient) scopeMembers(ctx context.Context, kbID, scopeID string) (
 	for _, id := range out.DocumentIDs {
 		members[id] = struct{}{}
 	}
-	currentIDs, revision, exists, err := c.getScope(ctx, kbID, scopeID)
-	if err != nil {
+	if err := c.refreshScope(ctx, kbID, scopeID); err != nil {
 		return nil, err
 	}
-	if exists {
-		c.scopeRevision = revision
-		c.scopeIDs = currentIDs
-		c.scopeExists = true
-	}
 	return members, nil
+}
+
+func (c *minnowClient) refreshScope(ctx context.Context, kbID, scopeID string) error {
+	ids, revision, exists, err := c.getScope(ctx, kbID, scopeID)
+	if err != nil {
+		return err
+	}
+	c.scopeRevision = revision
+	c.scopeIDs = ids
+	c.scopeExists = exists
+	return nil
 }
 
 func (c *minnowClient) getScope(ctx context.Context, kbID, scopeID string) ([]string, string, bool, error) {
@@ -372,26 +442,48 @@ func (c *minnowClient) awaitOperation(ctx context.Context, eventID string, budge
 					continue
 				}
 				message := firstNonEmpty(status.Terminal.LastError, status.Terminal.Stage, status.Terminal.Kind)
-				return fmt.Errorf("Minnow operation failed: %s", message)
+				return &operationFailedError{message: message}
 			}
 			if status.Terminal.Kind == "kb.published" && status.Terminal.Status == "done" {
 				return nil
 			}
 			if status.Terminal.Status == "pending" || status.Terminal.Status == "claimed" {
+				if c.onOperationPoll != nil {
+					c.onOperationPoll()
+				}
 				if err := waitForPoll(waitCtx, ticker.C); err != nil {
 					return fmt.Errorf("wait for Minnow operation %s: %w", eventID, err)
 				}
 				continue
 			}
 			message := firstNonEmpty(status.Terminal.LastError, status.Terminal.Stage, status.Terminal.Kind)
-			return fmt.Errorf("Minnow operation failed: %s", message)
+			return &operationFailedError{message: message}
 		}
 		select {
 		case <-waitCtx.Done():
 			return fmt.Errorf("wait for Minnow operation %s: %w", eventID, waitCtx.Err())
 		case <-ticker.C:
+			if c.onOperationPoll != nil {
+				c.onOperationPoll()
+			}
 		}
 	}
+}
+
+func (c *minnowClient) advanceScopeAttempt() error {
+	next := c.scopeAttempt + 1
+	if c.onScopeAttempt != nil {
+		if err := c.onScopeAttempt(next); err != nil {
+			return err
+		}
+	}
+	c.scopeAttempt = next
+	return nil
+}
+
+func isOperationFailed(err error) bool {
+	var failed *operationFailedError
+	return errors.As(err, &failed)
 }
 
 func (c *minnowClient) doJSONWithRetry(ctx context.Context, method, path string, body any, idemKey string, out any) error {
@@ -625,10 +717,11 @@ func (c *minnowClient) idempotencyKey(kbID string, docs []minnowcode.Document) s
 }
 
 const (
-	capabilityIngestSessions = "ingest_sessions"
-	capabilityDocumentScopes = "document_scopes"
-	commitTimeout            = 30 * time.Minute
-	maxResponseBytes         = 64 << 20
+	capabilityIngestSessions     = "ingest_sessions"
+	capabilityDocumentScopes     = "document_scopes"
+	capabilitySessionCommitScope = "session_commit_scope"
+	commitTimeout                = 30 * time.Minute
+	maxResponseBytes             = 64 << 20
 
 	// Outlasts a server side session lease.
 	sessionConflictBudget = 11 * time.Minute
