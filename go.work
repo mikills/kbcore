@@ -4,5 +4,3 @@ use (
 	.
 	./codeindex
 )
-
-replace github.com/mikills/minnow v0.1.0 => .

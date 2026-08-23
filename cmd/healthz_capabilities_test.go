@@ -11,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	kb "github.com/mikills/minnow/kb"
+	"github.com/stretchr/testify/require"
 )
 
 func capabilitiesOf(t *testing.T, deps Dependencies) []string {
@@ -37,6 +38,19 @@ func TestHealthzCapabilities(t *testing.T) {
 	commit := func(context.Context, kb.SessionCommitPayload, string, string) (string, string, bool, error) {
 		return "evt", "idem", true, nil
 	}
+	replace := func(context.Context, string, string, []string, string) (kb.Scope, error) {
+		return kb.Scope{}, nil
+	}
+	get := func(context.Context, string, string) (kb.Scope, error) { return kb.Scope{}, nil }
+	list := func(context.Context, string) ([]kb.Scope, error) { return nil, nil }
+	schedule := func(_ context.Context, _ string, ids []string) ([]string, error) { return ids, nil }
+
+	t.Run("document scopes", func(t *testing.T) {
+		got := capabilitiesOf(t, Dependencies{
+			ReplaceScope: replace, GetScope: get, ListScopes: list, ScheduleScopeGC: schedule,
+		})
+		require.Contains(t, got, capabilityDocumentScopes)
+	})
 
 	t.Run("deferred publish is advertised when commit is wired and one writer owns the data", func(t *testing.T) {
 		got := capabilitiesOf(t, Dependencies{AppendSessionCommit: commit, DeferredPublish: true})

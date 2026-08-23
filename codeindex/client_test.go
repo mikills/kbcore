@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	indexer "github.com/mikills/minnow/codeindex/indexer"
+	indexer "github.com/mikills/minnow/kb/codeindex"
 )
 
 func TestMinnowClientRetriesHealthAndDeleteUsingRetryAfter(t *testing.T) {

@@ -32,7 +32,7 @@ type vectorQuerySelection struct {
 }
 
 func (f *DuckDBArtifactFormat) selectVectorQueryPath(ctx context.Context, kbID string) (vectorQueryPath, error) {
-	selection, err := f.resolveVectorQuerySelection(ctx, kbID, nil)
+	selection, err := f.resolveVectorQuerySelection(ctx, kbID, nil, false)
 	if err != nil {
 		return vectorQueryPathShardFanout, err
 	}
@@ -43,6 +43,7 @@ func (f *DuckDBArtifactFormat) resolveVectorQuerySelection(
 	ctx context.Context,
 	kbID string,
 	queryVec []float32,
+	allShards bool,
 ) (*vectorQuerySelection, error) {
 	doc, err := f.deps.ManifestStore.Get(ctx, kbID)
 	if err != nil {
@@ -61,7 +62,7 @@ func (f *DuckDBArtifactFormat) resolveVectorQuerySelection(
 	}
 
 	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
-	if len(manifest.Shards) <= policy.SmallKBMaxShards {
+	if allShards || len(manifest.Shards) <= policy.SmallKBMaxShards {
 		return &vectorQuerySelection{
 			Path: vectorQueryPathSmallShardFast,
 			Plan: vectorplan.SmallShardPlan(policy, manifest.Shards),
@@ -81,6 +82,7 @@ func (f *DuckDBArtifactFormat) searchTopK(
 	queryVec []float32,
 	k int,
 	filter *search.FilterExpr,
+	documentIDs []string,
 ) ([]kb.QueryResult, error) {
 	if k <= 0 {
 		return []kb.QueryResult{}, nil
@@ -89,7 +91,7 @@ func (f *DuckDBArtifactFormat) searchTopK(
 		return nil, fmt.Errorf("query vector cannot be empty")
 	}
 
-	selection, err := f.resolveVectorQuerySelection(ctx, kbID, queryVec)
+	selection, err := f.resolveVectorQuerySelection(ctx, kbID, queryVec, documentIDs != nil)
 	if err != nil {
 		return nil, fmt.Errorf("select vector query path: %w", err)
 	}
@@ -100,7 +102,10 @@ func (f *DuckDBArtifactFormat) searchTopK(
 	localTopK := vectorplan.LocalTopK(k, policy)
 	results, shardErr := f.queryTopKFromShards(
 		ctx,
-		shardTopKQuery{kbID: kbID, queryVec: queryVec, k: k, localTopK: localTopK, plan: selection.Plan, filter: filter},
+		shardTopKQuery{
+			kbID: kbID, queryVec: queryVec, k: k, localTopK: localTopK,
+			plan: selection.Plan, filter: filter, documentIDs: documentIDs,
+		},
 	)
 	if shardErr != nil {
 		f.deps.Metrics.RecordShardExecutionFailure(kbID)
@@ -110,12 +115,13 @@ func (f *DuckDBArtifactFormat) searchTopK(
 }
 
 type shardTopKQuery struct {
-	kbID      string
-	queryVec  []float32
-	k         int
-	localTopK int
-	plan      shardQueryPlan
-	filter    *search.FilterExpr
+	kbID        string
+	queryVec    []float32
+	k           int
+	localTopK   int
+	plan        shardQueryPlan
+	filter      *search.FilterExpr
+	documentIDs []string
 }
 
 func (f *DuckDBArtifactFormat) queryTopKFromShards(
@@ -135,6 +141,7 @@ func (f *DuckDBArtifactFormat) queryTopKFromShards(
 		k:           query.localTopK,
 		parallelism: query.plan.Parallelism,
 		filter:      query.filter,
+		documentIDs: query.documentIDs,
 	}
 	if shouldUseTwoPhaseMaterialization(query.plan.Fanout, query.localTopK, query.k) {
 		return f.queryTopKRefsFromShards(ctx, workload, query.k)
@@ -153,6 +160,7 @@ type shardQueryWorkload struct {
 	k           int
 	parallelism int
 	filter      *search.FilterExpr
+	documentIDs []string
 }
 
 func shouldUseTwoPhaseMaterialization(fanout int, localTopK int, finalTopK int) bool {
@@ -229,17 +237,18 @@ func (f *DuckDBArtifactFormat) queryShardsTopK(
 		f.startVectorShardQuery(
 			ctx,
 			vectorShardQueryWork{
-				kbID:     workload.kbID,
-				idx:      i,
-				shard:    workload.shards[i],
-				queryVec: workload.queryVec,
-				k:        workload.k,
-				filter:   workload.filter,
-				sem:      sem,
-				errCh:    errCh,
-				results:  results,
-				cancel:   cancel,
-				wg:       &wg,
+				kbID:        workload.kbID,
+				idx:         i,
+				shard:       workload.shards[i],
+				queryVec:    workload.queryVec,
+				k:           workload.k,
+				filter:      workload.filter,
+				documentIDs: workload.documentIDs,
+				sem:         sem,
+				errCh:       errCh,
+				results:     results,
+				cancel:      cancel,
+				wg:          &wg,
 			},
 		)
 	}
@@ -255,31 +264,33 @@ func (f *DuckDBArtifactFormat) queryShardsTopK(
 }
 
 type vectorShardQueryWork struct {
-	kbID     string
-	idx      int
-	shard    kb.SnapshotShardMetadata
-	queryVec []float32
-	k        int
-	filter   *search.FilterExpr
-	sem      chan struct{}
-	errCh    chan error
-	results  [][]kb.QueryResult
-	cancel   context.CancelFunc
-	wg       *sync.WaitGroup
+	kbID        string
+	idx         int
+	shard       kb.SnapshotShardMetadata
+	queryVec    []float32
+	k           int
+	filter      *search.FilterExpr
+	documentIDs []string
+	sem         chan struct{}
+	errCh       chan error
+	results     [][]kb.QueryResult
+	cancel      context.CancelFunc
+	wg          *sync.WaitGroup
 }
 
 type vectorShardRefQueryWork struct {
-	kbID     string
-	idx      int
-	shard    kb.SnapshotShardMetadata
-	queryVec []float32
-	k        int
-	filter   *search.FilterExpr
-	sem      chan struct{}
-	errCh    chan error
-	results  [][]rankedDocRef
-	cancel   context.CancelFunc
-	wg       *sync.WaitGroup
+	kbID        string
+	idx         int
+	shard       kb.SnapshotShardMetadata
+	queryVec    []float32
+	k           int
+	filter      *search.FilterExpr
+	documentIDs []string
+	sem         chan struct{}
+	errCh       chan error
+	results     [][]rankedDocRef
+	cancel      context.CancelFunc
+	wg          *sync.WaitGroup
 }
 
 func (f *DuckDBArtifactFormat) startVectorShardQuery(ctx context.Context, work vectorShardQueryWork) {
@@ -295,7 +306,9 @@ func (f *DuckDBArtifactFormat) runVectorShardQuery(ctx context.Context, work vec
 		return
 	}
 	defer func() { <-work.sem }()
-	rows, err := f.querySingleShardTopK(ctx, work.kbID, work.shard, shardQueryInput{queryVec: work.queryVec, k: work.k, filter: work.filter})
+	rows, err := f.querySingleShardTopK(ctx, work.kbID, work.shard, shardQueryInput{
+		queryVec: work.queryVec, k: work.k, filter: work.filter, documentIDs: work.documentIDs,
+	})
 	if err != nil {
 		select {
 		case work.errCh <- err:
@@ -330,7 +343,8 @@ func (f *DuckDBArtifactFormat) queryShardsTopKRefs(
 	for i := range workload.shards {
 		f.startVectorShardRefQuery(ctx, vectorShardRefQueryWork{
 			kbID: workload.kbID, idx: i, shard: workload.shards[i], queryVec: workload.queryVec,
-			k: workload.k, filter: workload.filter, sem: sem, errCh: errCh, results: results, cancel: cancel, wg: &wg,
+			k: workload.k, filter: workload.filter, documentIDs: workload.documentIDs,
+			sem: sem, errCh: errCh, results: results, cancel: cancel, wg: &wg,
 		})
 	}
 	wg.Wait()
@@ -355,7 +369,9 @@ func (f *DuckDBArtifactFormat) runVectorShardRefQuery(ctx context.Context, work 
 		return
 	}
 	defer func() { <-work.sem }()
-	rows, err := f.querySingleShardTopKRefs(ctx, work.kbID, work.shard, shardQueryInput{queryVec: work.queryVec, k: work.k, filter: work.filter})
+	rows, err := f.querySingleShardTopKRefs(ctx, work.kbID, work.shard, shardQueryInput{
+		queryVec: work.queryVec, k: work.k, filter: work.filter, documentIDs: work.documentIDs,
+	})
 	if err != nil {
 		select {
 		case work.errCh <- err:
@@ -369,9 +385,10 @@ func (f *DuckDBArtifactFormat) runVectorShardRefQuery(ctx context.Context, work 
 
 // shardQueryInput carries the per-query parameters passed to each shard.
 type shardQueryInput struct {
-	queryVec []float32
-	k        int
-	filter   *search.FilterExpr
+	queryVec    []float32
+	k           int
+	filter      *search.FilterExpr
+	documentIDs []string
 }
 
 func (f *DuckDBArtifactFormat) querySingleShardTopK(
@@ -385,7 +402,9 @@ func (f *DuckDBArtifactFormat) querySingleShardTopK(
 		return nil, err
 	}
 	defer conn.mu.Unlock()
-	results, err := queryTopKWithDB(ctx, conn.db, in.queryVec, in.k, vectorQueryOpts{filter: in.filter})
+	results, err := queryTopKWithDB(ctx, conn.db, in.queryVec, in.k, vectorQueryOpts{
+		filter: in.filter, documentIDs: in.documentIDs,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("query shard %s: %w", shard.ShardID, err)
 	}
@@ -403,7 +422,9 @@ func (f *DuckDBArtifactFormat) querySingleShardTopKRefs(
 		return nil, err
 	}
 	defer conn.mu.Unlock()
-	refs, err := queryTopKRefsWithDB(ctx, conn.db, in.queryVec, in.k, vectorQueryOpts{filter: in.filter})
+	refs, err := queryTopKRefsWithDB(ctx, conn.db, in.queryVec, in.k, vectorQueryOpts{
+		filter: in.filter, documentIDs: in.documentIDs,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("query shard refs %s: %w", shard.ShardID, err)
 	}

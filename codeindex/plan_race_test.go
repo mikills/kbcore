@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	minnowcode "github.com/mikills/minnow/codeindex/indexer"
+	minnowcode "github.com/mikills/minnow/kb/codeindex"
 	"github.com/stretchr/testify/require"
 )
 

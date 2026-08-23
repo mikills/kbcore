@@ -95,9 +95,12 @@ type KB struct {
 	defaultFormatKind string
 	initErr           error
 
-	mu          sync.Mutex
-	lockStripes [256]sync.Mutex
-	shardGC     []delayedShardGCEntry
+	mu           sync.Mutex
+	lockStripes  [256]sync.Mutex
+	scopeCacheMu sync.RWMutex
+	scopeCache   map[string]Scope
+	scopeLocks   [256]sync.Mutex
+	shardGC      []delayedShardGCEntry
 }
 
 type KBOption func(*KB)

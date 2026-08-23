@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -89,6 +91,9 @@ func TestService(t *testing.T) {
 	})
 
 	t.Run("code indexing submits options", func(t *testing.T) {
+		root := t.TempDir()
+		resolvedRoot, err := filepath.EvalSymlinks(root)
+		require.NoError(t, err)
 		svc := newTestService(func(s *Service) {
 			s.Config.CodeIndex = CodeIndexDefaults{
 				Include:      []string{"**/*.go"},
@@ -107,7 +112,8 @@ func TestService(t *testing.T) {
 			}
 			s.IndexCodebase = func(_ context.Context, opts kb.CodeIndexOptions) (kb.CodeIndexResult, error) {
 				require.Equal(t, "kb-code", opts.KBID)
-				require.Equal(t, "/repo", opts.Root)
+				require.Equal(t, resolvedRoot, opts.Root)
+				require.Equal(t, "default", opts.IndexKey)
 				require.Equal(t, []string{"**/*.go"}, opts.Include)
 				require.Equal(t, []string{"vendor/**"}, opts.Exclude)
 				require.EqualValues(t, 1234, opts.MaxFileBytes)
@@ -124,10 +130,56 @@ func TestService(t *testing.T) {
 		_, out, err := svc.indexCodebase(
 			context.Background(),
 			nil,
-			codeIndexInput{KBID: "kb-code", Root: "/repo", IncludeUntracked: true},
+			codeIndexInput{KBID: "kb-code", Root: root, IncludeUntracked: true},
 		)
 		require.NoError(t, err)
 		require.Equal(t, 1, out.IndexedFiles)
+	})
+
+	t.Run("scoped indexing uses CLI", func(t *testing.T) {
+		root := t.TempDir()
+		require.NoError(t, os.Mkdir(filepath.Join(root, ".minnow"), 0o755))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(root, ".minnow", "codebase-indexes.json"),
+			[]byte(`{"schema_version":"minnow.codebase_indexes/v1","codebase_indexes":{"main":{"kb_id":"repo","scope_id":"branch","root":"."}}}`),
+			0o644,
+		))
+		called := false
+		svc := newTestService(func(s *Service) {
+			s.IndexCodebase = func(context.Context, kb.CodeIndexOptions) (kb.CodeIndexResult, error) {
+				called = true
+				return kb.CodeIndexResult{}, nil
+			}
+		})
+
+		_, _, err := svc.indexCodebase(
+			context.Background(), nil, codeIndexInput{Root: root, IndexKey: "main"},
+		)
+		require.ErrorContains(t, err, "must be refreshed with codeindex")
+		require.False(t, called)
+	})
+
+	t.Run("scoped status uses CLI", func(t *testing.T) {
+		root := t.TempDir()
+		require.NoError(t, os.Mkdir(filepath.Join(root, ".minnow"), 0o755))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(root, ".minnow", "codebase-indexes.json"),
+			[]byte(`{"schema_version":"minnow.codebase_indexes/v1","codebase_indexes":{"main":{"kb_id":"repo","scope_id":"branch","root":"."}}}`),
+			0o644,
+		))
+		called := false
+		svc := newTestService(func(s *Service) {
+			s.CodeIndexStatus = func(context.Context, string) (kb.CodeIndexStatus, error) {
+				called = true
+				return kb.CodeIndexStatus{}, nil
+			}
+		})
+
+		_, _, err := svc.codeIndexStatus(
+			context.Background(), nil, codeIndexStatusInput{Root: root, IndexKey: "main"},
+		)
+		require.ErrorContains(t, err, "available through codeindex")
+		require.False(t, called)
 	})
 
 	t.Run("code search returns enriched results", func(t *testing.T) {
@@ -136,13 +188,14 @@ func TestService(t *testing.T) {
 				require.Equal(t, "kb-code", kbID)
 				require.Equal(t, "handler", query)
 				require.Equal(t, "go", opts.Language)
+				require.Equal(t, "branch", opts.ScopeID)
 				return []kb.CodeSearchResult{{ID: "c1", Path: "main.go", Language: "go", StartLine: 1, EndLine: 5}}, nil
 			}
 		})
 		_, out, err := svc.codeSearch(
 			context.Background(),
 			nil,
-			codeSearchInput{KBID: "kb-code", Query: "handler", K: 5, Language: "go"},
+			codeSearchInput{KBID: "kb-code", ScopeID: "branch", Query: "handler", K: 5, Language: "go"},
 		)
 		require.NoError(t, err)
 		require.Len(t, out.Results, 1)

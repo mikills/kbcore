@@ -49,6 +49,7 @@ func (l *KB) cleanupDeletedKB(ctx context.Context, kbID string, manifest *Manife
 	cleanupErrs = append(cleanupErrs, l.deleteManifestShards(ctx, manifest)...)
 	cleanupErrs = append(cleanupErrs, l.deleteKBCache(kbID)...)
 	cleanupErrs = append(cleanupErrs, l.deleteKBMedia(ctx, kbID)...)
+	cleanupErrs = append(cleanupErrs, l.deleteKBScopes(ctx, kbID)...)
 	return cleanupErrs
 }
 

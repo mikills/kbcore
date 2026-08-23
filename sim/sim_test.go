@@ -37,6 +37,9 @@ func TestSim(t *testing.T) {
 		"repeated_small_ingests":  scenarios.RepeatedSmallIngests,
 		"concurrent_ingest_query": scenarios.ConcurrentIngestAndQuery,
 		"random_ops_fuzz":         scenarios.RandomOpsFuzz,
+		"scope_upload_fault":      scenarios.ScopeUploadFault,
+		"scope_read_fault":        scenarios.ScopeReadFault,
+		"scope_isolation":         scenarios.ScopeIsolation,
 	}
 
 	invariants := []sim.Invariant{

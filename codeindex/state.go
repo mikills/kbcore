@@ -12,15 +12,17 @@ import (
 	"sync"
 	"time"
 
-	minnowcode "github.com/mikills/minnow/codeindex/indexer"
+	minnowcode "github.com/mikills/minnow/kb/codeindex"
 )
 
-const indexStateSchema = "codeindex.state/v1"
+const indexStateSchema = "codeindex.state/v2"
 
 type indexState struct {
 	SourcePath    string               `json:"-"`
+	Legacy        bool                 `json:"-"`
 	SchemaVersion string               `json:"schema_version"`
 	KBID          string               `json:"kb_id"`
+	ScopeID       string               `json:"scope_id"`
 	RepoID        string               `json:"repo_id"`
 	Ref           string               `json:"ref,omitempty"`
 	Root          string               `json:"root"`
@@ -38,6 +40,7 @@ type stateFile struct {
 
 type indexStatus struct {
 	KBID        string     `json:"kb_id"`
+	ScopeID     string     `json:"scope_id"`
 	IndexKey    string     `json:"index_key"`
 	Description string     `json:"description"`
 	MinnowURL   string     `json:"minnow_url"`
@@ -72,9 +75,10 @@ func loadIndexState(target indexTarget) (indexState, string, bool, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return indexState{}, path, false, err
 	}
-	if state.SchemaVersion != indexStateSchema {
+	if state.SchemaVersion != indexStateSchema && state.SchemaVersion != "codeindex.state/v1" {
 		return indexState{}, path, false, fmt.Errorf("unsupported state schema %q", state.SchemaVersion)
 	}
+	state.Legacy = state.SchemaVersion == "codeindex.state/v1"
 	if !kbIDMatchesTarget(state.KBID, target) || state.RepoID != target.RepoID || state.Ref != target.Ref || state.Root != target.Root {
 		return indexState{}, path, false, fmt.Errorf("state identity does not match the selected index")
 	}
@@ -82,12 +86,16 @@ func loadIndexState(target indexTarget) (indexState, string, bool, error) {
 		state.Files = map[string]stateFile{}
 	}
 	state.SourcePath = path
+	if state.ScopeID == "" {
+		state.ScopeID = target.ScopeID
+	}
+	state.SchemaVersion = indexStateSchema
 	return state, path, true, nil
 }
 
 func emptyIndexState(target indexTarget) indexState {
 	return indexState{
-		SchemaVersion: indexStateSchema, KBID: target.KBID, RepoID: target.RepoID,
+		SchemaVersion: indexStateSchema, KBID: target.KBID, ScopeID: target.ScopeID, RepoID: target.RepoID,
 		Ref: target.Ref, Root: target.Root, Files: map[string]stateFile{},
 	}
 }
@@ -96,8 +104,17 @@ func kbIDMatchesTarget(kbID string, target indexTarget) bool {
 	if kbID == "" || target.KBID == "" {
 		return false
 	}
-	return (target.LegacyKBID != "" && kbID == target.LegacyKBID) ||
-		kbID == target.KBID || strings.HasPrefix(kbID, target.KBID+"-")
+	return (target.LegacyKBID != "" && (kbID == target.LegacyKBID || validGeneratedKBID(kbID, target.LegacyKBID))) ||
+		kbID == target.KBID || validGeneratedKBID(kbID, target.KBID)
+}
+
+func validGeneratedKBID(kbID, base string) bool {
+	suffix, ok := strings.CutPrefix(kbID, base+"-")
+	if !ok || len(suffix) != generationSuffixLen {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
 }
 
 func saveIndexState(target indexTarget, state indexState) (string, error) {
@@ -165,7 +182,10 @@ type heldIndexLock struct {
 }
 
 func acquireIndexLock(target indexTarget, staleAfter time.Duration) (func(), error) {
-	path := indexStatePath(target) + ".lock"
+	return acquireLockPath(indexStatePath(target)+".lock", target.IndexKey, staleAfter)
+}
+
+func acquireLockPath(path, name string, staleAfter time.Duration) (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
@@ -200,7 +220,7 @@ func acquireIndexLock(target indexTarget, staleAfter time.Duration) (func(), err
 			return nil, activeErr
 		}
 		if active {
-			return nil, fmt.Errorf("index refresh already running for %s (lock %s)", target.IndexKey, path)
+			return nil, fmt.Errorf("index refresh already running for %s (lock %s)", name, path)
 		}
 		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 			return nil, removeErr
@@ -292,7 +312,7 @@ func (lock *heldIndexLock) ownsPath() bool {
 
 func statusFromState(target indexTarget, minnowURL, path string, state indexState) indexStatus {
 	status := indexStatus{
-		KBID: target.KBID, IndexKey: target.IndexKey, Description: target.Description,
+		KBID: target.KBID, ScopeID: firstNonEmpty(state.ScopeID, target.ScopeID), IndexKey: target.IndexKey, Description: target.Description,
 		MinnowURL: minnowURL, Root: target.Root, RepoID: target.RepoID, Ref: target.Ref,
 		StatePath: path,
 	}

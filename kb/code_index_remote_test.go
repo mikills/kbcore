@@ -36,3 +36,16 @@ func TestFilterCodeSearchResultsFallsBackToPreparedMetadataWithLegacyManifest(t 
 	require.Len(t, filtered, 1)
 	require.Equal(t, "new.go", filtered[0].Path)
 }
+
+func TestCodeScopeFilter(t *testing.T) {
+	results := []ExpandedResult{
+		{ID: "main", Metadata: map[string]any{"code_path": "main.go"}},
+		{ID: "feature", Metadata: map[string]any{"code_path": "feature.go"}},
+	}
+	members := map[string]struct{}{"feature": {}}
+
+	filtered := filterCodeSearchResultsWithScope(
+		results, codeIndexManifest{}, CodeSearchOptions{TopK: 10}, members,
+	)
+	require.Equal(t, []string{"feature"}, []string{filtered[0].ID})
+}

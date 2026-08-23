@@ -76,12 +76,12 @@ Optional overrides:
 |---|---|---|
 | `--root` | `.` | Repository root to index. |
 | `--index-key` | repository branch or directory identity | Stable agent-facing key. |
-| `--kb` | repository + branch derived | Backing knowledge base id. |
+| `--kb` | repository derived | Backing knowledge base id. |
 | `--description` | empty | Human label stored in the registry. |
 | `--include-untracked` | off | Index files not tracked by Git. |
 
-For Git repositories, codeindex combines repository identity with the checked-out
-branch. Branches remain independently searchable instead of overwriting one KB.
+For Git repositories, branches share repository vectors and receive separate
+opaque scopes. Unchanged chunks are reused and searches remain branch-aware.
 Without Git, the absolute directory provides stable identity. The command output
 and `codeindex status` show the selected `kb_id` for HTTP or MCP searches.
 
@@ -92,12 +92,12 @@ codeindex hooks install
 codeindex hooks status
 ```
 
-Refreshes are state-based: codeindex hashes tracked files (`git ls-files`) against
-the branch-specific state in `.minnow/codeindex/`, rechunks only changed files,
-and removes stale IDs after publishing replacements. Codeindex adds `/.minnow/`
-to `.git/info/exclude` so generated state is not staged. If that state is lost, a
-new KB generation is created to avoid mixing a full upload with stale remote
-chunks. Without hooks, run `codeindex refresh` after code changes.
+Refreshes compare tracked files (`git ls-files`) with branch state under
+`.minnow/codeindex/`, upload only missing chunks, and replace the branch scope.
+Acknowledged batches survive interruption in the local journal. Codeindex adds
+`/.minnow/` to `.git/info/exclude` so generated state is not staged. Without
+hooks, run `codeindex refresh` after code changes. Run `codeindex remove` on a
+branch before deleting it to remove its remote scope and local state.
 
 ## MCP endpoints
 

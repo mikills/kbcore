@@ -43,11 +43,17 @@ type Dependencies struct {
 	// DeferredPublish gates the ingest_sessions capability. A session pins a
 	// client to the instance holding its rows, so it is only offered where one
 	// writer owns the data directory.
-	DeferredPublish     bool
-	AppendSessionCommit func(context.Context, kb.SessionCommitPayload, string, string) (string, string, bool, error)
-	DeleteDocuments     func(context.Context, string, []string, kb.DeleteDocsOptions) error
-	FetchVectors        func(context.Context, string, []string) ([]kb.VectorRecord, error)
-	QueryVectors        func(context.Context, string, []float32, int, *search.FilterExpr) ([]kb.QueryResult, error)
+	DeferredPublish       bool
+	AppendSessionCommit   func(context.Context, kb.SessionCommitPayload, string, string) (string, string, bool, error)
+	DeleteDocuments       func(context.Context, string, []string, kb.DeleteDocsOptions) error
+	FetchVectors          func(context.Context, string, []string) ([]kb.VectorRecord, error)
+	QueryVectors          func(context.Context, string, []float32, int, *search.FilterExpr) ([]kb.QueryResult, error)
+	ReplaceScope          func(context.Context, string, string, []string, string) (kb.Scope, error)
+	GetScope              func(context.Context, string, string) (kb.Scope, error)
+	ListScopes            func(context.Context, string) ([]kb.Scope, error)
+	DeleteScope           func(context.Context, string, string) error
+	DeleteScopeIfRevision func(context.Context, string, string, string) error
+	ScheduleScopeGC       func(context.Context, string, []string) ([]string, error)
 
 	// Event-driven ingest.
 	AppendDocumentUpsert  func(context.Context, kb.DocumentUpsertPayload, string, string) (string, string, error)
@@ -75,6 +81,7 @@ func Register(e *echo.Echo, deps Dependencies) {
 	registerRagRoutes(e, deps, sessions)
 	registerMediaRoutes(e, deps)
 	registerVectorRoutes(e, deps, sessions)
+	registerScopeRoutes(e, deps)
 }
 
 func requestIDs(c echo.Context) (string, string) {
@@ -103,7 +110,9 @@ func WriteError(c echo.Context, err error, isBudgetExceeded func(error) bool) er
 		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: err.Error()})
 	}
 	// Another client holding the knowledge base, not this server failing.
-	if errors.Is(err, kb.ErrUnpublishedWrites) {
+	if errors.Is(err, kb.ErrUnpublishedWrites) || errors.Is(err, kb.ErrBlobVersionMismatch) ||
+		errors.Is(err, kb.ErrScopedDocuments) || errors.Is(err, kb.ErrScopeDocumentsMissing) ||
+		errors.Is(err, kb.ErrWriteLeaseConflict) {
 		return c.JSON(http.StatusConflict, map[string]any{errorResponseKey: err.Error()})
 	}
 	return c.JSON(http.StatusInternalServerError, map[string]any{errorResponseKey: err.Error()})

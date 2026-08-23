@@ -33,8 +33,8 @@ type Service struct {
 	ClearCache            func(context.Context) error
 	ForceCompaction       func(context.Context, string) (*kb.CompactionPublishResult, error)
 	DeleteKnowledgeBase   func(context.Context, string) error
-	FetchVectors func(context.Context, string, []string) ([]kb.VectorRecord, error)
-	QueryVectors func(context.Context, string, []float32, int, *search.FilterExpr) ([]kb.QueryResult, error)
+	FetchVectors          func(context.Context, string, []string) ([]kb.VectorRecord, error)
+	QueryVectors          func(context.Context, string, []float32, int, *search.FilterExpr) ([]kb.QueryResult, error)
 	IndexCodebase         func(context.Context, kb.CodeIndexOptions) (kb.CodeIndexResult, error)
 	CodeIndexStatus       func(context.Context, string) (kb.CodeIndexStatus, error)
 	SearchCode            func(context.Context, string, string, kb.CodeSearchOptions) ([]kb.CodeSearchResult, error)
@@ -45,6 +45,7 @@ type Service struct {
 
 type queryInput struct {
 	KBID       string          `json:"kb_id,omitempty"       jsonschema:"Knowledge base ID. Defaults to default."`
+	ScopeID    string          `json:"scope_id,omitempty"    jsonschema:"Optional opaque document scope."`
 	Query      string          `json:"query"                 jsonschema:"Natural language query."`
 	K          int             `json:"k"                     jsonschema:"Number of results to return."`
 	SearchMode string          `json:"search_mode,omitempty" jsonschema:"vector, graph, adaptive, bm25, or hybrid."`
@@ -90,7 +91,7 @@ func (s *Service) query(
 	if err != nil {
 		return nil, queryOutput{}, fmt.Errorf("invalid filter: %w", err)
 	}
-	results, err := s.Search(ctx, kbID, vec, &kb.SearchOptions{Mode: mode, TopK: in.K, Filter: filter, QueryText: in.Query})
+	results, err := s.Search(ctx, kbID, vec, &kb.SearchOptions{Mode: mode, TopK: in.K, Filter: filter, QueryText: in.Query, ScopeID: in.ScopeID})
 	if err != nil {
 		return nil, queryOutput{}, err
 	}
@@ -178,17 +179,28 @@ func (s *Service) indexCodebase(
 	if s.IndexCodebase == nil {
 		return nil, kb.CodeIndexResult{}, fmt.Errorf("code indexing is unavailable")
 	}
+	selection, err := kb.ResolveCodeIndexSelection(in.Root, in.IndexKey, strings.TrimSpace(in.KBID))
+	if err != nil {
+		return nil, kb.CodeIndexResult{}, err
+	}
+	if selection.ScopeID != "" {
+		return nil, kb.CodeIndexResult{}, fmt.Errorf("scope-managed indexes must be refreshed with codeindex")
+	}
+	description := strings.TrimSpace(in.Description)
+	if description == "" {
+		description = selection.Description
+	}
 	opts := kb.CodeIndexOptions{
-		KBID:             strings.TrimSpace(in.KBID),
-		IndexKey:         in.IndexKey,
-		Description:      in.Description,
-		Root:             strings.TrimSpace(in.Root),
+		KBID:             selection.KBID,
+		IndexKey:         selection.IndexKey,
+		Description:      description,
+		Root:             selection.Root,
 		Include:          append([]string(nil), s.Config.CodeIndex.Include...),
 		Exclude:          append([]string(nil), s.Config.CodeIndex.Exclude...),
 		MaxFileBytes:     s.Config.CodeIndex.MaxFileBytes,
 		ChunkSize:        s.Config.CodeIndex.ChunkSize,
 		ChunkOverlap:     s.Config.CodeIndex.ChunkOverlap,
-		IncludeUntracked: s.Config.CodeIndex.IncludeUntracked || in.IncludeUntracked,
+		IncludeUntracked: selection.IncludeUntracked || s.Config.CodeIndex.IncludeUntracked || in.IncludeUntracked,
 		EmbedBatchSize:   s.Config.CodeIndex.ResourcePolicy.EmbedBatchSize,
 		MaxBatchBytes:    s.Config.CodeIndex.ResourcePolicy.MaxBatchBytes,
 		Throttle:         s.Config.CodeIndex.ResourcePolicy.Throttle,
@@ -219,6 +231,9 @@ func (s *Service) codeIndexStatus(
 	if err != nil {
 		return nil, kb.CodeIndexStatus{}, err
 	}
+	if selection.ScopeID != "" {
+		return nil, kb.CodeIndexStatus{}, fmt.Errorf("scope-managed status is available through codeindex")
+	}
 	status, err := s.CodeIndexStatus(ctx, selection.KBID)
 	status.IndexKey = selection.IndexKey
 	status.Description = selection.Description
@@ -227,6 +242,7 @@ func (s *Service) codeIndexStatus(
 
 type codeSearchInput struct {
 	KBID     string `json:"kb_id,omitempty"`
+	ScopeID  string `json:"scope_id,omitempty" jsonschema:"Optional opaque document scope."`
 	IndexKey string `json:"index_key,omitempty"`
 	Root     string `json:"root,omitempty"`
 	Query    string `json:"query"`
@@ -260,11 +276,18 @@ func (s *Service) codeSearch(
 	if k > queryToolMaxK {
 		return nil, codeSearchOutput{}, fmt.Errorf("k must be <= %d", queryToolMaxK)
 	}
+	scopeID := strings.TrimSpace(in.ScopeID)
+	if scopeID == "" {
+		scopeID = selection.ScopeID
+	}
 	results, err := s.SearchCode(
 		ctx,
 		kbID,
 		in.Query,
-		kb.CodeSearchOptions{TopK: k, Path: in.Path, Language: in.Language},
+		kb.CodeSearchOptions{
+			TopK: k, Path: in.Path, Language: in.Language,
+			ScopeID: scopeID,
+		},
 	)
 	return nil, codeSearchOutput{KBID: kbID, Results: results}, err
 }
@@ -816,8 +839,8 @@ type queryVectorsInput struct {
 }
 
 type queryVectorsOutput struct {
-	KBID    string              `json:"kb_id"`
-	Results []vectorResultOut   `json:"results"`
+	KBID    string            `json:"kb_id"`
+	Results []vectorResultOut `json:"results"`
 }
 
 type vectorResultOut struct {
@@ -865,7 +888,7 @@ type fetchVectorsInput struct {
 }
 
 type fetchVectorsOutput struct {
-	KBID    string           `json:"kb_id"`
+	KBID    string            `json:"kb_id"`
 	Records []kb.VectorRecord `json:"records"`
 }
 

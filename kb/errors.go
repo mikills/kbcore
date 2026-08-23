@@ -31,6 +31,9 @@ var (
 	ErrArtifactFormatNotConfigured = errors.New("artifact format is not configured")
 	ErrFormatNotRegistered         = errors.New("artifact format not registered for this KB's format_kind")
 	ErrUnsupportedOperation        = errors.New("operation not supported by this artifact format")
+	ErrScopeNotFound               = errors.New("scope not found")
+	ErrScopedDocuments             = errors.New("documents are referenced by a scope")
+	ErrScopeDocumentsMissing       = errors.New("scope documents are not published")
 )
 
 func WrapEmbeddingDimensionMismatch(err error, operation string) error {

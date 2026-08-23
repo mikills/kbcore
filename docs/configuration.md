@@ -270,6 +270,7 @@ It is created or updated by `codeindex codebase` and maps stable keys to KBs:
   "codebase_indexes": {
     "default": {
       "kb_id": "my-project",
+      "scope_id": "opaque-scope-id",
       "root": ".",
       "description": "Default codebase index",
       "include_untracked": false
@@ -281,6 +282,8 @@ It is created or updated by `codeindex codebase` and maps stable keys to KBs:
 CLI and MCP code tools accept `index_key`; when `kb_id` is omitted, Minnow reads
 this registry and resolves the key to the right KB. If no entry exists,
 `default` maps to KB `default`, and other keys map to `code-<key>`.
+For a remote Minnow server without the client repository, pass both `kb_id` and
+`scope_id` to `minnow_code_search`.
 
 ### Codeindex client config
 
@@ -365,7 +368,8 @@ startup to prevent silent cross-store corruption.
 | `disabled_jobs`   | list[string] | `[]`    | Job IDs to skip registration for.       |
 
 Keeping the scheduler enabled is important for long-running local deployments:
-it bounds completed event and inbox retention and requeues interrupted work.
+it bounds completed event and inbox retention, requeues interrupted work, and
+deletes documents that remain outside every scope after the one-hour grace.
 
 ### `workers`
 

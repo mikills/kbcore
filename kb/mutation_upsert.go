@@ -1,6 +1,9 @@
 package kb
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 type DeleteDocsOptions struct {
 	HardDelete   bool
@@ -125,14 +128,22 @@ func (l *KB) publishPreparedStream(ctx context.Context, req PreparedStreamReques
 }
 
 func (l *KB) DeleteDocs(ctx context.Context, kbID string, docIDs []string, opts DeleteDocsOptions) error {
-	format, err := l.resolveFormat(ctx, kbID)
+	mutation, err := l.acquireScopeMutation(ctx, kbID)
 	if err != nil {
 		return err
 	}
+	mutationCtx := mutation.Context()
+	if err := l.ensureDocumentsUnscoped(mutationCtx, kbID, docIDs); err != nil {
+		return errors.Join(err, mutation.Close())
+	}
+	format, err := l.resolveFormat(mutationCtx, kbID)
+	if err != nil {
+		return errors.Join(err, mutation.Close())
+	}
 
-	_, err = format.Delete(ctx, IngestDeleteRequest{KBID: kbID, DocIDs: docIDs, Upload: false, Options: opts})
+	_, err = format.Delete(mutationCtx, IngestDeleteRequest{KBID: kbID, DocIDs: docIDs, Upload: false, Options: opts})
 
-	return err
+	return errors.Join(err, mutation.Close())
 }
 
 func (l *KB) DeleteDocsAndUpload(ctx context.Context, kbID string, docIDs []string, opts DeleteDocsOptions) error {
@@ -147,14 +158,22 @@ func (l *KB) DeleteDocsAndUploadWithRetry(
 	maxRetries int,
 ) error {
 	return runWithUploadRetry(ctx, "delete_docs_upload", maxRetries, l.RetryObserver, func() error {
-		format, err := l.resolveFormat(ctx, kbID)
+		mutation, err := l.acquireScopeMutation(ctx, kbID)
 		if err != nil {
 			return err
 		}
+		mutationCtx := mutation.Context()
+		if err := l.ensureDocumentsUnscoped(mutationCtx, kbID, docIDs); err != nil {
+			return errors.Join(err, mutation.Close())
+		}
+		format, err := l.resolveFormat(mutationCtx, kbID)
+		if err != nil {
+			return errors.Join(err, mutation.Close())
+		}
 
-		_, err = format.Delete(ctx, IngestDeleteRequest{
+		_, err = format.Delete(mutationCtx, IngestDeleteRequest{
 			KBID: kbID, DocIDs: docIDs, Upload: !opts.DeferPublish, Options: opts,
 		})
-		return err
+		return errors.Join(err, mutation.Close())
 	})
 }

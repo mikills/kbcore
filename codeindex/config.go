@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	minnowcode "github.com/mikills/minnow/codeindex/indexer"
+	minnowcode "github.com/mikills/minnow/kb/codeindex"
 	"gopkg.in/yaml.v3"
 )
 

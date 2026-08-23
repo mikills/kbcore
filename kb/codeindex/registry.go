@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,23 +21,170 @@ func ResolveSelection(root, indexKey, kbID string) (Options, error) {
 	if err != nil {
 		return Options{}, err
 	}
+	implicitIndex := strings.TrimSpace(indexKey) == ""
+	if implicitIndex {
+		indexKey = currentIndexKey(registryRoot, requestedRoot)
+	}
 	opts := normalizeOptions(Options{Root: requestedRoot, IndexKey: indexKey, KBID: kbID})
 	registry, err := loadRegistry(registryRoot)
 	if err != nil {
 		return Options{}, err
 	}
-	if entry, ok := registry.Indexes[opts.IndexKey]; ok {
+	entry, registered := registry.Indexes[opts.IndexKey]
+	if registered {
 		if strings.TrimSpace(opts.KBID) == "" {
 			opts.KBID = entry.KBID
 		}
 		opts.Root = RootFromEntry(registryRoot, entry)
 		opts.Description = entry.Description
 		opts.IncludeUntracked = entry.IncludeUntracked
+		opts.ScopeID = entry.ScopeID
+	}
+	if implicitIndex && !registered {
+		derivedKBID, scopeID := defaultScopedSelection(registryRoot, requestedRoot)
+		opts.ScopeID = scopeID
+		if strings.TrimSpace(opts.KBID) == "" {
+			opts.KBID = derivedKBID
+		}
 	}
 	if strings.TrimSpace(opts.KBID) == "" {
 		opts.KBID = DefaultKBIDForIndexKey(opts.IndexKey)
 	}
 	return opts, nil
+}
+
+func currentIndexKey(repoRoot, root string) string {
+	ref := currentRef(repoRoot)
+	if ref == "" {
+		return "default"
+	}
+	key := SanitizeKey(ref) + "-" + shortIdentity(ref)
+	if scope := RelativeRoot(repoRoot, root); scope != "." {
+		key += "-" + shortIdentity(scope)
+	}
+	return key
+}
+
+func currentRef(repoRoot string) string {
+	if ref := gitValue(repoRoot, "branch", "--show-current"); ref != "" {
+		return ref
+	}
+	if sha := gitValue(repoRoot, "rev-parse", "HEAD"); sha != "" {
+		return "detached-" + sha
+	}
+	return ""
+}
+
+func defaultScopedSelection(repoRoot, root string) (string, string) {
+	ref := currentRef(repoRoot)
+	if ref == "" {
+		return "", ""
+	}
+	identity, name := cliRepository(repoRoot)
+	repoID := shortIdentity(identity)
+	scope := RelativeRoot(repoRoot, root)
+	kbID := SanitizeKey("code-" + name + "-repository-" + repoID + "-" + shortIdentity(scope))
+	return kbID, "codeindex-" + identityHash(ref+"\x00"+scope)
+}
+
+func cliRepository(root string) (string, string) {
+	if remote := gitValue(root, "config", "--get", "remote.origin.url"); remote != "" {
+		return remote, repositoryName(remote, filepath.Base(root))
+	}
+	identity := primaryWorktreeRoot(root)
+	return identity, filepath.Base(identity)
+}
+
+func primaryWorktreeRoot(root string) string {
+	if saved := loadRepositoryRoot(root); saved != "" {
+		return saved
+	}
+	if top := gitValue(root, "rev-parse", "--show-toplevel"); top != "" && isPrimaryWorktree(root) {
+		if resolved, err := filepath.EvalSymlinks(top); err == nil {
+			top = resolved
+		}
+		return filepath.Clean(top)
+	}
+	if output := gitValue(root, "worktree", "list", "--porcelain"); output != "" {
+		for _, line := range strings.Split(output, "\n") {
+			if candidate, found := strings.CutPrefix(line, "worktree "); found {
+				if resolved, err := filepath.EvalSymlinks(candidate); err == nil {
+					candidate = resolved
+				}
+				return filepath.Clean(candidate)
+			}
+		}
+	}
+	return root
+}
+
+func loadRepositoryRoot(root string) string {
+	common := gitValue(root, "rev-parse", "--git-common-dir")
+	if common == "" {
+		return ""
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(root, common)
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Clean(common), "minnow", "codeindex", "repository-root"))
+	if err != nil {
+		return ""
+	}
+	saved := strings.TrimSpace(string(data))
+	resolved, err := filepath.EvalSymlinks(saved)
+	if err != nil {
+		return ""
+	}
+	return filepath.Clean(resolved)
+}
+
+func isPrimaryWorktree(root string) bool {
+	gitDir := gitValue(root, "rev-parse", "--absolute-git-dir")
+	common := gitValue(root, "rev-parse", "--git-common-dir")
+	if gitDir == "" || common == "" {
+		return false
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(root, common)
+	}
+	return filepath.Clean(gitDir) == filepath.Clean(common)
+}
+
+func repositoryName(remote, fallback string) string {
+	trimmed := strings.TrimSuffix(strings.TrimSpace(remote), ".git")
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.Path != "" {
+		if name := filepath.Base(parsed.Path); name != "." && name != "/" {
+			return SanitizeKey(name)
+		}
+	}
+	if colon := strings.LastIndex(trimmed, ":"); colon >= 0 {
+		trimmed = trimmed[colon+1:]
+	}
+	if slash := strings.LastIndex(trimmed, "/"); slash >= 0 {
+		trimmed = trimmed[slash+1:]
+	}
+	if trimmed == "" {
+		trimmed = fallback
+	}
+	return SanitizeKey(trimmed)
+}
+
+func gitValue(root string, args ...string) string {
+	out, err := exec.Command("git", append([]string{"-C", root}, args...)...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func shortIdentity(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:4])
+}
+
+func identityHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:8])
 }
 
 func LoadRegistry(root string) (Registry, error) {
@@ -203,11 +351,12 @@ func codeRepoID(root string) string {
 	if out, err := exec.Command("git", "-C", root, "config", "--get", "remote.origin.url").Output(); err == nil {
 		if remote := strings.TrimSpace(string(out)); remote != "" {
 			sum := sha256.Sum256([]byte(remote))
-			return hex.EncodeToString(sum[:8])
+			return hex.EncodeToString(sum[:4])
 		}
 	}
-	sum := sha256.Sum256([]byte(filepath.Clean(root)))
-	return hex.EncodeToString(sum[:8])
+	identity := primaryWorktreeRoot(filepath.Clean(root))
+	sum := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(sum[:4])
 }
 
 func normalizeOptions(opts Options) Options {

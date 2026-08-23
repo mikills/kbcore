@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	indexer "github.com/mikills/minnow/codeindex/indexer"
+	indexer "github.com/mikills/minnow/kb/codeindex"
 )
 
 type recordingIngester struct {

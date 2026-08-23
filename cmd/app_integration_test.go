@@ -139,6 +139,22 @@ func TestAppRAG(t *testing.T) {
 	t.Run("query_fields_graph", testAppQueryFieldsGraph)
 }
 
+func TestFetchUninitializedKB(t *testing.T) {
+	baseURL := setupAppTest(t, appKeywordEmbedder{}, "kb-fetch-empty")
+	resp, err := http.Post(
+		baseURL+"/v1/vectors/fetch", "application/json",
+		strings.NewReader(`{"kb_id":"kb-fetch-empty","ids":["missing"]}`),
+	)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var result struct {
+		Records []kb.VectorRecord `json:"records"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.Empty(t, result.Records)
+}
+
 func testAppMultipartFileIngestPartialSuccess(t *testing.T) {
 	baseURL := setupAppTestWithOptions(
 		t,

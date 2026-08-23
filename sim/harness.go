@@ -168,6 +168,8 @@ func (h *Harness) close() {
 // failure messages so a reviewer can reproduce the run.
 func (h *Harness) Seed() int64 { return h.seed }
 
+func (h *Harness) Context() context.Context { return h.ctx }
+
 // Clock exposes the FakeClock so scenarios can advance time directly.
 func (h *Harness) Clock() *kb.FakeClock { return h.clock }
 

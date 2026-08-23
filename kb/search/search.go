@@ -417,6 +417,8 @@ type Options struct {
 	QueryText      string // raw text for BM25/hybrid modes
 	Expansion      *ExpansionOptions
 	AdaptiveMinSim float64
+	ScopeID        string
+	DocumentIDs    []string
 }
 
 type EdgeRow struct {

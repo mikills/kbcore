@@ -229,7 +229,9 @@ func (f *DuckDBArtifactFormat) QueryRag(ctx context.Context, req kb.RagQueryRequ
 		return nil, err
 	}
 
-	results, err := f.searchTopK(ctx, req.KBID, req.QueryVec, req.Options.TopK, req.Options.Filter)
+	results, err := f.searchTopK(
+		ctx, req.KBID, req.QueryVec, req.Options.TopK, req.Options.Filter, req.Options.DocumentIDs,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +246,9 @@ func (f *DuckDBArtifactFormat) QueryBM25(ctx context.Context, req kb.BM25QueryRe
 	if strings.TrimSpace(req.QueryText) == "" {
 		return nil, fmt.Errorf("query text is required")
 	}
-	results, err := f.searchBM25AllShards(ctx, req.KBID, req.QueryText, req.Options.TopK, req.Options.Filter)
+	results, err := f.searchBM25AllShards(
+		ctx, req.KBID, req.QueryText, req.Options.TopK, req.Options.Filter, req.Options.DocumentIDs,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +256,13 @@ func (f *DuckDBArtifactFormat) QueryBM25(ctx context.Context, req kb.BM25QueryRe
 	return filterExpandedByMaxDistance(expanded, req.Options.MaxDistance), nil
 }
 
-func (f *DuckDBArtifactFormat) searchBM25AllShards(ctx context.Context, kbID, queryText string, k int, filter *search.FilterExpr) ([]kb.QueryResult, error) {
+func (f *DuckDBArtifactFormat) searchBM25AllShards(
+	ctx context.Context,
+	kbID, queryText string,
+	k int,
+	filter *search.FilterExpr,
+	documentIDs []string,
+) ([]kb.QueryResult, error) {
 	doc, err := f.deps.ManifestStore.Get(ctx, kbID)
 	if err != nil {
 		if errors.Is(err, kb.ErrManifestNotFound) {
@@ -274,7 +284,7 @@ func (f *DuckDBArtifactFormat) searchBM25AllShards(ctx context.Context, kbID, qu
 		if err != nil {
 			return nil, fmt.Errorf("open shard %s for bm25: %w", shard.ShardID, err)
 		}
-		rows, err := queryBM25WithDB(ctx, conn.db, queryText, k, filter)
+		rows, err := queryBM25WithDB(ctx, conn.db, queryText, k, filter, documentIDs)
 		conn.mu.Unlock()
 		if err != nil {
 			return nil, fmt.Errorf("bm25 shard %s: %w", shard.ShardID, err)
@@ -312,7 +322,9 @@ func (f *DuckDBArtifactFormat) QueryGraph(ctx context.Context, req kb.GraphQuery
 
 	options := kb.NormalizeExpansionOptions(req.Options.TopK, req.Options.Expansion)
 	options.OfflineExt = f.deps.OfflineExt
-	selection, err := f.resolveVectorQuerySelection(ctx, req.KBID, req.QueryVec)
+	selection, err := f.resolveVectorQuerySelection(
+		ctx, req.KBID, req.QueryVec, req.Options.DocumentIDs != nil,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("select vector query path: %w", err)
 	}
@@ -443,7 +455,9 @@ func (f *DuckDBArtifactFormat) queryGraphSingleShard(
 	}
 	defer conn.mu.Unlock()
 
-	return searchExpandedWithDB(ctx, conn.db, req.QueryVec, req.Options.TopK, options)
+	return searchExpandedWithDB(
+		ctx, conn.db, req.QueryVec, req.Options.TopK, options, req.Options.DocumentIDs,
+	)
 }
 
 func filterExpandedByMaxDistance(results []kb.ExpandedResult, maxDistance *float64) []kb.ExpandedResult {

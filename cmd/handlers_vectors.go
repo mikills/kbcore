@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -168,6 +169,9 @@ func handleVectorFetch(c echo.Context, deps Dependencies) error {
 		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: errKBUnavailable})
 	}
 	records, err := deps.FetchVectors(c.Request().Context(), req.KBID, req.IDs)
+	if errors.Is(err, kb.ErrManifestNotFound) || errors.Is(err, kb.ErrKBUninitialized) {
+		records, err = []kb.VectorRecord{}, nil
+	}
 	if err != nil {
 		return WriteError(c, err, deps.IsBudgetExceeded)
 	}

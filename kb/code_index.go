@@ -67,6 +67,9 @@ func (k *KB) IndexCodebase(ctx context.Context, opts CodeIndexOptions) (CodeInde
 	if err != nil {
 		return CodeIndexResult{}, err
 	}
+	if version != "" && manifest.RepoID != "" {
+		target.RepoID = manifest.RepoID
+	}
 	scanned, skipped, err := codeindex.Scan(ctx, target.Root, target.Options, codeindex.DefaultExcludePatterns)
 	if err != nil {
 		return CodeIndexResult{}, err
@@ -602,11 +605,29 @@ func (k *KB) SearchCode(ctx context.Context, kbID, query string, opts CodeSearch
 	if err != nil {
 		return nil, err
 	}
-	results, err := k.Search(ctx, kbID, vec, &SearchOptions{TopK: codeSearchFanout(opts.TopK)})
+	results, err := k.Search(ctx, kbID, vec, &SearchOptions{TopK: codeSearchFanout(opts.TopK), ScopeID: opts.ScopeID})
 	if err != nil {
 		return nil, err
 	}
 	return filterCodeSearchResultsWithMetadata(results, manifest, opts), nil
+}
+
+func filterCodeSearchResultsWithScope(
+	results []ExpandedResult,
+	manifest codeIndexManifest,
+	opts CodeSearchOptions,
+	members map[string]struct{},
+) []CodeSearchResult {
+	if members == nil {
+		return filterCodeSearchResultsWithMetadata(results, manifest, opts)
+	}
+	filtered := results[:0]
+	for _, result := range results {
+		if _, ok := members[result.ID]; ok {
+			filtered = append(filtered, result)
+		}
+	}
+	return filterCodeSearchResultsWithMetadata(filtered, manifest, opts)
 }
 
 func filterCodeSearchResultsWithMetadata(
