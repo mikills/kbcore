@@ -33,17 +33,21 @@ func queryTopKRefsWithDB(
 		return nil, err
 	}
 	vecStr := FormatVectorForSQL(queryVec)
-	whereClause, err := buildWhereClause(opts.filter)
+	whereClause, err := buildWhereClause(opts.filter, opts.documentIDs != nil)
 	if err != nil {
 		return nil, err
 	}
-	// ORDER BY must use the expression directly — see queryTopKWithDB.
+	distanceExpr := fmt.Sprintf("array_distance(embedding, %s::FLOAT[%d])", vecStr, len(queryVec))
+	orderExpr := distanceExpr
+	if opts.documentIDs != nil {
+		orderExpr = "(" + distanceExpr + " + 0.0)"
+	}
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, array_distance(embedding, %s::FLOAT[%d]) as distance
+		SELECT id, %s as distance
 		FROM docs%s
-		ORDER BY array_distance(embedding, %s::FLOAT[%d])
+		ORDER BY %s
 		LIMIT %d
-	`, vecStr, len(queryVec), whereClause, vecStr, len(queryVec), k))
+	`, distanceExpr, whereClause, orderExpr, k), documentScopeArgs(opts.documentIDs)...)
 	if err != nil {
 		return nil, kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("query refs failed: %w", err),

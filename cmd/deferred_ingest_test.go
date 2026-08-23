@@ -12,6 +12,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	kb "github.com/mikills/minnow/kb"
+	"github.com/stretchr/testify/require"
 )
 
 func newDeferredServer(t *testing.T, deps Dependencies) (*echo.Echo, *kb.IngestSessions) {
@@ -69,6 +70,27 @@ func TestDeferredIngest(t *testing.T) {
 			`"session_id":` + strconv.Quote(session) + `,` +
 			`"documents":[{"id":"d1","text":"hello"}]}`
 	}
+
+	t.Run("GC precedes admission", func(t *testing.T) {
+		var order []string
+		deps := Dependencies{
+			ScheduleScopeGC: func(_ context.Context, _ string, ids []string) ([]string, error) {
+				order = append(order, "gc")
+				return ids, nil
+			},
+			AppendDocumentUpsert: func(
+				_ context.Context, _ kb.DocumentUpsertPayload, idem, _ string,
+			) (string, string, error) {
+				order = append(order, "append")
+				return "evt-1", idem, nil
+			},
+		}
+		e, _ := newDeferredServer(t, deps)
+		body := strings.Replace(batch(""), `"defer_publish":true`, `"defer_publish":true,"gc_unscoped":true`, 1)
+		rec := post(t, e, http.MethodPost, "/rag/ingest", body)
+		require.Equal(t, http.StatusAccepted, rec.Code)
+		require.Equal(t, []string{"gc", "append"}, order)
+	})
 
 	t.Run("the first batch is issued a handle the next one carries", func(t *testing.T) {
 		var seen []kb.UpsertDocsOptions

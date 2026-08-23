@@ -30,9 +30,6 @@ jobs:
       - name: Build codeindex
         run: go build -o /tmp/minnow-codeindex ./codeindex
 
-      - name: Check the duplicated codeindex packages match
-        run: diff -r codeindex/indexer kb/codeindex
-
       - name: Validate deployment configuration
         run: |
           OPENAI_API_KEY=test go run . config validate deploy/docker/minnow.yaml

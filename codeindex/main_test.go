@@ -10,11 +10,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	indexer "github.com/mikills/minnow/codeindex/indexer"
+	indexer "github.com/mikills/minnow/kb/codeindex"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIndexCLIOptions(t *testing.T) {
@@ -140,7 +142,7 @@ func TestLongRunningLiveIndexLockIsNotDeclaredStale(t *testing.T) {
 	}
 }
 
-func TestRefreshUsesBranchSpecificIndexAndSkipsUnchangedFiles(t *testing.T) {
+func TestBranchReuse(t *testing.T) {
 	root := t.TempDir()
 	runTestGit(t, root, "init", "-b", "main")
 	runTestGit(t, root, "config", "user.email", "codeindex@example.com")
@@ -181,20 +183,22 @@ func TestRefreshUsesBranchSpecificIndexAndSkipsUnchangedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reconfigured.ChunksIndexed == 0 || reconfigured.UnchangedFiles != 0 {
+	if reconfigured.IndexedFiles == 0 || reconfigured.UnchangedFiles != 0 || reconfigured.ChunksIndexed != 0 {
 		t.Fatalf("pipeline change did not force reindex: %+v", reconfigured)
 	}
-	server.assertIngestCount(t, 2)
+	server.assertIngestCount(t, 1)
 
 	runTestGit(t, root, "checkout", "-b", "feature/client")
 	third, err := refreshIndex(context.Background(), cfg, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if third.KBID == first.KBID || third.IndexKey == first.IndexKey {
-		t.Fatalf("branch did not select an isolated index: main=%+v feature=%+v", first, third)
-	}
-	server.assertIngestCount(t, 3)
+	require.Equal(t, first.KBID, third.KBID)
+	require.NotEqual(t, first.ScopeID, third.ScopeID)
+	require.NotEqual(t, first.IndexKey, third.IndexKey)
+	require.Zero(t, third.ChunksIndexed)
+	require.Equal(t, 2, third.ChunksReused)
+	server.assertIngestCount(t, 1)
 
 	runTestGit(t, root, "checkout", "main")
 	returned, err := refreshIndex(context.Background(), cfg, opts)
@@ -204,7 +208,7 @@ func TestRefreshUsesBranchSpecificIndexAndSkipsUnchangedFiles(t *testing.T) {
 	if returned.KBID != first.KBID || returned.ChunksIndexed != 0 || returned.UnchangedFiles != 2 {
 		t.Fatalf("returning to main did not reuse incremental state: first=%+v returned=%+v", first, returned)
 	}
-	server.assertIngestCount(t, 3)
+	server.assertIngestCount(t, 1)
 
 	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\nfunc Main() { println(\"changed\") }\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -213,12 +217,12 @@ func TestRefreshUsesBranchSpecificIndexAndSkipsUnchangedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changed.IndexedFiles != 1 || changed.UnchangedFiles != 1 || changed.ChunksDeleted == 0 {
+	if changed.IndexedFiles != 1 || changed.UnchangedFiles != 1 || changed.ChunksScheduled != 0 {
 		t.Fatalf("changed-file refresh was not incremental: %+v", changed)
 	}
 	// The commit is queued and then awaited, so the run ends on the publish the
 	// server reports for it rather than on the request that asked for it.
-	server.assertLastMutationOrder(t, "ingest", "publish", "delete", "commit", "publish")
+	server.assertLastMutationOrder(t, "ingest", "publish", "commit", "publish")
 
 	if err := os.WriteFile(filepath.Join(root, "new.go"), []byte("package main\nfunc New() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -228,7 +232,7 @@ func TestRefreshUsesBranchSpecificIndexAndSkipsUnchangedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if withNewFile.IndexedFiles != 1 || withNewFile.UnchangedFiles != 2 || withNewFile.ChunksDeleted != 0 {
+	if withNewFile.IndexedFiles != 1 || withNewFile.UnchangedFiles != 2 || withNewFile.ChunksScheduled != 0 {
 		t.Fatalf("new-file refresh was not incremental: %+v", withNewFile)
 	}
 	server.assertLastMutationOrder(t, "ingest", "publish", "commit", "publish")
@@ -240,10 +244,10 @@ func TestRefreshUsesBranchSpecificIndexAndSkipsUnchangedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if withDeletedFile.DeletedFiles != 1 || withDeletedFile.UnchangedFiles != 2 || withDeletedFile.ChunksDeleted == 0 {
+	if withDeletedFile.DeletedFiles != 1 || withDeletedFile.UnchangedFiles != 2 || withDeletedFile.ChunksScheduled != 0 {
 		t.Fatalf("deleted-file refresh did not remove stale chunks: %+v", withDeletedFile)
 	}
-	server.assertLastMutationOrder(t, "delete", "commit", "publish")
+	server.assertLastMutationOrder(t, "commit", "publish")
 }
 
 func TestPipelineVersionForcesReindex(t *testing.T) {
@@ -253,7 +257,7 @@ func TestPipelineVersionForcesReindex(t *testing.T) {
 	}
 }
 
-func TestMissingStateStartsNewKBGeneration(t *testing.T) {
+func TestMissingStateReusesScope(t *testing.T) {
 	root := t.TempDir()
 	runTestGit(t, root, "init", "-b", "main")
 	runTestGit(t, root, "config", "user.email", "codeindex@example.com")
@@ -283,12 +287,14 @@ func TestMissingStateStartsNewKBGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.KBID == first.KBID || second.ChunksIndexed == 0 {
-		t.Fatalf("missing state reused stale remote KB: first=%+v second=%+v", first, second)
-	}
+	require.Equal(t, first.KBID, second.KBID)
+	require.Positive(t, second.IndexedFiles)
+	require.Zero(t, second.ChunksIndexed)
+	require.Positive(t, second.ChunksReused)
+	server.assertIngestCount(t, 1)
 }
 
-func TestExplicitIdentityOverridesRemainBranchIsolated(t *testing.T) {
+func TestExplicitBranchScope(t *testing.T) {
 	root := t.TempDir()
 	runTestGit(t, root, "init", "-b", "main")
 	runTestGit(t, root, "config", "user.email", "codeindex@example.com")
@@ -318,13 +324,265 @@ func TestExplicitIdentityOverridesRemainBranchIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mainResult.IndexKey == featureResult.IndexKey || mainResult.KBID == featureResult.KBID {
-		t.Fatalf("explicit overrides collapsed branches: main=%+v feature=%+v", mainResult, featureResult)
-	}
+	require.NotEqual(t, mainResult.IndexKey, featureResult.IndexKey)
+	require.Equal(t, mainResult.KBID, featureResult.KBID)
+	require.NotEqual(t, mainResult.ScopeID, featureResult.ScopeID)
 	if mainResult.StatePath == featureResult.StatePath {
 		t.Fatalf("explicit branch refreshes shared state path %q", mainResult.StatePath)
 	}
-	server.assertIngestCount(t, 2)
+	server.assertIngestCount(t, 1)
+}
+
+func TestWorktreeIdentity(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init", "-b", "main")
+	runTestGit(t, root, "config", "user.email", "codeindex@example.com")
+	runTestGit(t, root, "config", "user.name", "Code Index")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o644))
+	runTestGit(t, root, "add", ".")
+	runTestGit(t, root, "commit", "-m", "initial")
+	worktree := filepath.Join(t.TempDir(), "feature")
+	runTestGit(t, root, "worktree", "add", "-b", "feature", worktree)
+
+	mainTarget, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+	mainTarget, err = assignIndexGeneration(mainTarget, indexState{}, false)
+	require.NoError(t, err)
+	saveReservedKBID(mainTarget)
+
+	featureTarget, err := resolveTarget(indexCLIOptions{root: worktree})
+	require.NoError(t, err)
+	featureTarget, err = assignIndexGeneration(featureTarget, indexState{}, false)
+	require.NoError(t, err)
+	require.Equal(t, mainTarget.RepoID, featureTarget.RepoID)
+	require.Equal(t, mainTarget.KBID, featureTarget.KBID)
+	require.NotEqual(t, mainTarget.ScopeID, featureTarget.ScopeID)
+	release, err := acquireRefreshLocks(mainTarget, time.Hour)
+	require.NoError(t, err)
+	defer release()
+	_, err = acquireRefreshLocks(featureTarget, time.Hour)
+	require.Error(t, err)
+}
+
+func TestRemove(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init", "-b", "main")
+	runTestGit(t, root, "config", "user.email", "codeindex@example.com")
+	runTestGit(t, root, "config", "user.name", "Code Index")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o644))
+	runTestGit(t, root, "add", ".")
+	runTestGit(t, root, "commit", "-m", "initial")
+	server := newTestMinnowServer(t)
+	defer server.Close()
+	cfg := defaultConfig()
+	cfg.Minnow.URL = server.URL
+	cfg.CodeIndex.PollInterval = "1ms"
+	cfg.CodeIndex.OperationTimeout = "1s"
+	requireConfirm := false
+	cfg.CodeIndex.RequireConfirm = &requireConfirm
+	opts := indexCLIOptions{root: root, yes: true}
+	indexed, err := refreshIndex(context.Background(), cfg, opts)
+	require.NoError(t, err)
+	target, err := resolveTarget(opts)
+	require.NoError(t, err)
+	target.KBID = indexed.KBID
+	require.NoError(t, os.Mkdir(uploadJournalPath(target), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(uploadJournalPath(target), "blocked"), []byte("x"), 0o600))
+	_, err = removeIndex(context.Background(), cfg, opts)
+	require.Error(t, err)
+	_, err = os.Stat(indexed.StatePath)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(filepath.Join(uploadJournalPath(target), "blocked")))
+	require.NoError(t, os.Remove(uploadJournalPath(target)))
+
+	removed, err := removeIndex(context.Background(), cfg, opts)
+	require.NoError(t, err)
+	require.Equal(t, indexed.ScopeID, removed.ScopeID)
+	server.mu.Lock()
+	_, exists := server.scopes[indexed.ScopeID]
+	server.mu.Unlock()
+	require.False(t, exists)
+	require.Positive(t, removed.Scheduled)
+	_, err = os.Stat(indexed.StatePath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestRemoveLegacy(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init", "-b", "main")
+	target, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+	state := emptyIndexState(target)
+	state.SchemaVersion = "codeindex.state/v1"
+	state.KBID = target.LegacyKBID + "-1111111111111111"
+	require.NoError(t, writeIndexStateFile(indexStatePath(target), state))
+
+	_, err = removeIndex(context.Background(), defaultConfig(), indexCLIOptions{root: root})
+	require.ErrorContains(t, err, "refresh")
+	_, err = os.Stat(indexStatePath(target))
+	require.NoError(t, err)
+}
+
+func TestRemoveInterrupted(t *testing.T) {
+	setup := func(t *testing.T) (indexTarget, Config, indexCLIOptions, *testMinnowServer) {
+		root := t.TempDir()
+		runTestGit(t, root, "init", "-b", "main")
+		target, err := resolveTarget(indexCLIOptions{root: root})
+		require.NoError(t, err)
+		server := newTestMinnowServer(t)
+		t.Cleanup(server.Close)
+		cfg := defaultConfig()
+		cfg.Minnow.URL = server.URL
+		return target, cfg, indexCLIOptions{root: root}, server
+	}
+
+	t.Run("first run", func(t *testing.T) {
+		target, cfg, opts, server := setup(t)
+		journal, _, err := startUploadJournal(uploadJournalPath(target), target)
+		require.NoError(t, err)
+		require.NoError(t, journal.record([]string{"partial"}))
+		require.NoError(t, journal.confirm([]string{"partial"}))
+		require.NoError(t, journal.close())
+		server.published["partial"] = struct{}{}
+
+		removed, err := removeIndex(context.Background(), cfg, opts)
+		require.NoError(t, err)
+		require.Equal(t, 1, removed.Scheduled)
+		_, err = os.Stat(uploadJournalPath(target))
+		require.ErrorIs(t, err, os.ErrNotExist)
+	})
+
+	t.Run("incremental run", func(t *testing.T) {
+		target, cfg, opts, server := setup(t)
+		state := emptyIndexState(target)
+		state.Files["main.go"] = stateFile{ChunkIDs: []string{"existing"}}
+		_, err := saveIndexState(target, state)
+		require.NoError(t, err)
+		journal, _, err := startUploadJournal(uploadJournalPath(target), target)
+		require.NoError(t, err)
+		require.NoError(t, journal.record([]string{"new"}))
+		require.NoError(t, journal.confirm([]string{"new"}))
+		require.NoError(t, journal.close())
+		server.scopes[target.ScopeID] = []string{"existing"}
+		server.published["existing"] = struct{}{}
+		server.published["new"] = struct{}{}
+
+		removed, err := removeIndex(context.Background(), cfg, opts)
+		require.NoError(t, err)
+		require.Equal(t, 2, removed.Scheduled)
+	})
+
+	t.Run("remote drift", func(t *testing.T) {
+		target, cfg, opts, server := setup(t)
+		state := emptyIndexState(target)
+		state.Files["main.go"] = stateFile{ChunkIDs: []string{"local"}}
+		_, err := saveIndexState(target, state)
+		require.NoError(t, err)
+		server.scopes[target.ScopeID] = []string{"local", "remote"}
+		server.published["local"] = struct{}{}
+		server.published["remote"] = struct{}{}
+
+		removed, err := removeIndex(context.Background(), cfg, opts)
+		require.NoError(t, err)
+		require.Equal(t, 2, removed.Scheduled)
+	})
+
+	t.Run("scope race", func(t *testing.T) {
+		target, cfg, opts, server := setup(t)
+		state := emptyIndexState(target)
+		state.Files["main.go"] = stateFile{ChunkIDs: []string{"local"}}
+		path, err := saveIndexState(target, state)
+		require.NoError(t, err)
+		server.scopes[target.ScopeID] = []string{"local"}
+		server.scopeDeleteStatus = http.StatusConflict
+
+		_, err = removeIndex(context.Background(), cfg, opts)
+		require.Error(t, err)
+		_, err = os.Stat(path)
+		require.NoError(t, err)
+		require.Contains(t, server.scopes, target.ScopeID)
+	})
+
+	t.Run("schedule retry", func(t *testing.T) {
+		target, cfg, opts, server := setup(t)
+		state := emptyIndexState(target)
+		state.Files["main.go"] = stateFile{ChunkIDs: []string{"local"}}
+		path, err := saveIndexState(target, state)
+		require.NoError(t, err)
+		server.scopes[target.ScopeID] = []string{"local", "remote"}
+		server.published["local"] = struct{}{}
+		server.published["remote"] = struct{}{}
+		server.gcStatus = http.StatusInternalServerError
+
+		_, err = removeIndex(context.Background(), cfg, opts)
+		require.Error(t, err)
+		_, err = os.Stat(path)
+		require.NoError(t, err)
+		require.NotContains(t, server.scopes, target.ScopeID)
+
+		server.gcStatus = 0
+		removed, err := removeIndex(context.Background(), cfg, opts)
+		require.NoError(t, err)
+		require.Equal(t, 2, removed.Scheduled)
+	})
+}
+
+func TestLegacyState(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init", "-b", "main")
+	remote := "https://example.com/acme/repo.git"
+	runTestGit(t, root, "remote", "add", "origin", remote)
+	target, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+	require.Equal(t, shortHash(remote), target.RepoID)
+	legacyKBID := target.LegacyKBID + "-0123456789abcdef"
+	state := indexState{
+		SchemaVersion: "codeindex.state/v1", KBID: legacyKBID, RepoID: target.RepoID,
+		Ref: target.Ref, Root: target.Root, Files: map[string]stateFile{},
+	}
+	require.NoError(t, writeIndexStateFile(indexStatePath(target), state))
+	loaded, _, exists, err := loadIndexState(target)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, legacyKBID, loaded.KBID)
+}
+
+func TestLocalLegacy(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init", "-b", "main")
+	target, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+	require.Equal(t, shortHash(target.Root), target.RepoID)
+	legacyKBID := target.LegacyKBID + "-0123456789abcdef"
+	state := indexState{
+		SchemaVersion: "codeindex.state/v1", KBID: legacyKBID, RepoID: shortHash(target.Root),
+		Ref: target.Ref, Root: target.Root, Files: map[string]stateFile{},
+	}
+	require.NoError(t, writeIndexStateFile(indexStatePath(target), state))
+	loaded, _, exists, err := loadIndexState(target)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, legacyKBID, loaded.KBID)
+}
+
+func TestSeparateGit(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "primary")
+	metadata := filepath.Join(base, "metadata")
+	runTestGit(t, base, "init", "-b", "main", "--separate-git-dir", metadata, root)
+	runTestGit(t, root, "config", "user.email", "codeindex@example.com")
+	runTestGit(t, root, "config", "user.name", "Code Index")
+	runTestGit(t, root, "commit", "--allow-empty", "-m", "initial")
+	worktree := filepath.Join(base, "feature-name")
+	runTestGit(t, root, "worktree", "add", "-b", "feature", worktree)
+
+	main, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+	saveRepositoryRoot(main)
+	feature, err := resolveTarget(indexCLIOptions{root: worktree})
+	require.NoError(t, err)
+	require.Equal(t, main.RepoID, feature.RepoID)
+	require.Equal(t, shortHash(main.Root), main.RepoID)
 }
 
 func TestLegacyExplicitKBStateMigratesInPlace(t *testing.T) {
@@ -499,11 +757,18 @@ type testMinnowServer struct {
 	deletes   [][]string
 	mutations []string
 	commits   []string
+	gc        [][]string
+	scopes    map[string][]string
+	scopePuts int
+	published map[string]struct{}
 	polls     int
 	session   string
 	// commitStatus, when set, is the status /rag/commit answers with instead of
 	// accepting the publish.
-	commitStatus int
+	commitStatus      int
+	scopeStatus       int
+	scopeDeleteStatus int
+	gcStatus          int
 }
 
 // refuses mirrors the server: once a session is open, a request that does not
@@ -525,11 +790,11 @@ func (s *testMinnowServer) issueSession(presented string) string {
 
 func newTestMinnowServer(t *testing.T) *testMinnowServer {
 	t.Helper()
-	server := &testMinnowServer{}
+	server := &testMinnowServer{scopes: make(map[string][]string), published: make(map[string]struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "ok", "capabilities": []string{"ingest_sessions"},
+			"status": "ok", "capabilities": []string{"ingest_sessions", "document_scopes"},
 		})
 	})
 	mux.HandleFunc("/rag/ingest", func(w http.ResponseWriter, r *http.Request) {
@@ -549,6 +814,13 @@ func newTestMinnowServer(t *testing.T) *testMinnowServer {
 			return
 		}
 		server.ingests = append(server.ingests, request)
+		if request.GCUnscoped {
+			ids := make([]string, 0, len(request.Documents))
+			for _, doc := range request.Documents {
+				ids = append(ids, doc.ID)
+			}
+			server.gc = append(server.gc, ids)
+		}
 		server.mutations = append(server.mutations, "ingest")
 		issued := server.issueSession(request.SessionID)
 		server.mu.Unlock()
@@ -573,6 +845,11 @@ func newTestMinnowServer(t *testing.T) *testMinnowServer {
 		}
 		server.commits = append(server.commits, request.SessionID)
 		server.mutations = append(server.mutations, "commit")
+		for _, ingest := range server.ingests {
+			for _, doc := range ingest.Documents {
+				server.published[doc.ID] = struct{}{}
+			}
+		}
 		// The publish releases the session, so the next run opens its own.
 		server.session = ""
 		server.mu.Unlock()
@@ -630,6 +907,136 @@ func newTestMinnowServer(t *testing.T) *testMinnowServer {
 		server.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"ids": request.IDs, "session_id": issued})
 	})
+	mux.HandleFunc("/v1/scopes", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			server.mu.Lock()
+			scopes := make([]map[string]any, 0, len(server.scopes))
+			for scopeID, ids := range server.scopes {
+				scopes = append(scopes, map[string]any{
+					"scope_id": scopeID, "document_ids": ids, "revision": "rev-" + scopeID,
+				})
+			}
+			server.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"scopes": scopes})
+		case http.MethodPut:
+			var request struct {
+				ScopeID     string   `json:"scope_id"`
+				DocumentIDs []string `json:"document_ids"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			server.mu.Lock()
+			if status := server.scopeStatus; status != 0 {
+				server.mu.Unlock()
+				http.Error(w, "scope failed", status)
+				return
+			}
+			server.scopePuts++
+			server.scopes[request.ScopeID] = append([]string(nil), request.DocumentIDs...)
+			server.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"scope_id": request.ScopeID, "document_ids": request.DocumentIDs,
+				"revision": "rev-" + request.ScopeID,
+			})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/v1/scopes/documents", func(w http.ResponseWriter, _ *http.Request) {
+		server.mu.Lock()
+		set := make(map[string]struct{})
+		for _, ids := range server.scopes {
+			for _, id := range ids {
+				set[id] = struct{}{}
+			}
+		}
+		ids := make([]string, 0, len(set))
+		for id := range set {
+			ids = append(ids, id)
+		}
+		server.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"document_ids": ids})
+	})
+	mux.HandleFunc("/v1/scopes/gc", func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			DocumentIDs []string `json:"document_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		server.mu.Lock()
+		if status := server.gcStatus; status != 0 {
+			server.mu.Unlock()
+			http.Error(w, "scope GC failed", status)
+			return
+		}
+		server.gc = append(server.gc, append([]string(nil), request.DocumentIDs...))
+		referenced := make(map[string]struct{})
+		for _, ids := range server.scopes {
+			for _, id := range ids {
+				referenced[id] = struct{}{}
+			}
+		}
+		scheduled := make([]string, 0, len(request.DocumentIDs))
+		for _, id := range request.DocumentIDs {
+			if _, ok := referenced[id]; !ok {
+				scheduled = append(scheduled, id)
+			}
+		}
+		server.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"scheduled_ids": scheduled})
+	})
+	mux.HandleFunc("/v1/scopes/", func(w http.ResponseWriter, r *http.Request) {
+		scopeID := strings.TrimPrefix(r.URL.Path, "/v1/scopes/")
+		server.mu.Lock()
+		ids, ok := server.scopes[scopeID]
+		if r.Method == http.MethodDelete {
+			if status := server.scopeDeleteStatus; status != 0 {
+				server.mu.Unlock()
+				http.Error(w, "scope delete failed", status)
+				return
+			}
+			if revision := r.URL.Query().Get("revision"); revision != "" && revision != "rev-"+scopeID {
+				server.mu.Unlock()
+				http.Error(w, "scope changed", http.StatusConflict)
+				return
+			}
+			delete(server.scopes, scopeID)
+			server.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		server.mu.Unlock()
+		if !ok {
+			http.Error(w, "scope not found", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"scope_id": scopeID, "document_ids": ids, "revision": "rev-" + scopeID,
+		})
+	})
+	mux.HandleFunc("/v1/vectors/fetch", func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			IDs []string `json:"ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		server.mu.Lock()
+		records := make([]map[string]any, 0, len(request.IDs))
+		for _, id := range request.IDs {
+			if _, ok := server.published[id]; ok {
+				records = append(records, map[string]any{"id": id})
+			}
+		}
+		server.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"records": records})
+	})
 	server.Server = httptest.NewServer(mux)
 	return server
 }
@@ -662,6 +1069,40 @@ func TestPollOperationRetriesRateLimits(t *testing.T) {
 	if requests != 2 {
 		t.Fatalf("expected retry, got %d requests", requests)
 	}
+}
+
+func TestEmptyScope(t *testing.T) {
+	server := newTestMinnowServer(t)
+	defer server.Close()
+	cfg := defaultConfig()
+	cfg.Minnow.URL = server.URL
+	client, err := newMinnowClient(cfg)
+	require.NoError(t, err)
+	require.NoError(t, client.check(context.Background()))
+	_, err = client.scopeMembers(context.Background(), "kb", "empty")
+	require.NoError(t, err)
+	require.NoError(t, client.replaceScope(context.Background(), "kb", "empty", []string{}))
+	server.mu.Lock()
+	_, exists := server.scopes["empty"]
+	server.mu.Unlock()
+	require.True(t, exists)
+}
+
+func TestScopeRefresh(t *testing.T) {
+	server := newTestMinnowServer(t)
+	defer server.Close()
+	server.scopes["branch"] = []string{"a"}
+	cfg := defaultConfig()
+	cfg.Minnow.URL = server.URL
+	client, err := newMinnowClient(cfg)
+	require.NoError(t, err)
+	require.NoError(t, client.check(context.Background()))
+	_, err = client.scopeMembers(context.Background(), "kb", "branch")
+	require.NoError(t, err)
+	require.NoError(t, client.replaceScope(context.Background(), "kb", "branch", []string{"a"}))
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	require.Equal(t, 1, server.scopePuts)
 }
 
 func TestMinnowMutationsRetryTransientFailures(t *testing.T) {

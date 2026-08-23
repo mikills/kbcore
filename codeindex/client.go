@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -18,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	minnowcode "github.com/mikills/minnow/codeindex/indexer"
+	minnowcode "github.com/mikills/minnow/kb/codeindex"
 )
 
 type minnowClient struct {
@@ -33,9 +34,13 @@ type minnowClient struct {
 	sessionKB       string
 	runID           string
 	canDeferPublish bool
-	onSession       func(string)
+	canScope        bool
+	onSession       func(string) error
 	onWait          func(time.Duration)
 	conflictBudget  time.Duration
+	scopeRevision   string
+	scopeIDs        []string
+	scopeExists     bool
 }
 
 type jsonCall struct {
@@ -60,6 +65,7 @@ type ingestRequest struct {
 	GraphEnabled bool             `json:"graph_enabled"`
 	PreChunked   bool             `json:"pre_chunked"`
 	DeferPublish bool             `json:"defer_publish,omitempty"`
+	GCUnscoped   bool             `json:"gc_unscoped,omitempty"`
 	SessionID    string           `json:"session_id,omitempty"`
 	Documents    []ingestDocument `json:"documents"`
 }
@@ -122,6 +128,7 @@ func (c *minnowClient) check(ctx context.Context) error {
 		return err
 	}
 	c.canDeferPublish = slices.Contains(out.Capabilities, capabilityIngestSessions)
+	c.canScope = slices.Contains(out.Capabilities, capabilityDocumentScopes)
 	return nil
 }
 
@@ -132,7 +139,8 @@ func (c *minnowClient) ingest(ctx context.Context, kbID string, docs []minnowcod
 	}
 	request := ingestRequest{
 		KBID: kbID, GraphEnabled: false, PreChunked: true,
-		DeferPublish: c.defers(kbID), SessionID: c.sessionID, Documents: wireDocs,
+		DeferPublish: c.defers(kbID), GCUnscoped: c.canScope && c.defers(kbID),
+		SessionID: c.sessionID, Documents: wireDocs,
 	}
 	var accepted acceptedOperation
 	if err := c.doJSONWithRetry(ctx, http.MethodPost, "/rag/ingest", request, c.idempotencyKey(kbID, docs), &accepted); err != nil {
@@ -141,7 +149,9 @@ func (c *minnowClient) ingest(ctx context.Context, kbID string, docs []minnowcod
 	if accepted.EventID == "" {
 		return fmt.Errorf("Minnow ingest response did not include event_id")
 	}
-	c.adoptSession(kbID, accepted.SessionID)
+	if err := c.adoptSession(kbID, accepted.SessionID); err != nil {
+		return err
+	}
 	return c.waitForOperation(ctx, accepted.EventID)
 }
 
@@ -179,8 +189,126 @@ func (c *minnowClient) delete(ctx context.Context, kbID string, ids []string) er
 	if err := c.doJSONWithRetry(ctx, http.MethodDelete, "/v1/vectors", body, "", &ack); err != nil {
 		return err
 	}
-	c.adoptSession(kbID, ack.SessionID)
+	return c.adoptSession(kbID, ack.SessionID)
+}
+
+func (c *minnowClient) replaceScope(ctx context.Context, kbID, scopeID string, ids []string) error {
+	if !c.canScope {
+		return fmt.Errorf("Minnow does not support document scopes")
+	}
+	body := map[string]any{
+		"kb_id": kbID, "scope_id": scopeID, "document_ids": ids,
+		"revision": c.scopeRevision,
+	}
+	var scope struct {
+		Revision string `json:"revision"`
+	}
+	if err := c.doJSONWithRetry(ctx, http.MethodPut, "/v1/scopes", body, "", &scope); err != nil {
+		if isHTTPConflict(err) {
+			currentIDs, revision, exists, getErr := c.getScope(ctx, kbID, scopeID)
+			if getErr == nil && exists && slices.Equal(currentIDs, ids) {
+				c.scopeRevision = revision
+				c.scopeIDs = currentIDs
+				c.scopeExists = true
+				return nil
+			}
+		}
+		return err
+	}
+	c.scopeRevision = scope.Revision
+	c.scopeIDs = append(c.scopeIDs[:0], ids...)
+	c.scopeExists = true
 	return nil
+}
+
+func (c *minnowClient) scheduleGC(ctx context.Context, kbID string, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return []string{}, nil
+	}
+	body := map[string]any{"kb_id": kbID, "document_ids": ids}
+	var out struct {
+		ScheduledIDs []string `json:"scheduled_ids"`
+	}
+	key := "codeindex-scope-gc-" + shortHash(strings.Join(ids, "\x00"))
+	if err := c.doJSONWithRetry(ctx, http.MethodPost, "/v1/scopes/gc", body, key, &out); err != nil {
+		return nil, err
+	}
+	return out.ScheduledIDs, nil
+}
+
+func (c *minnowClient) deleteScope(ctx context.Context, kbID, scopeID, revision string) error {
+	query := url.Values{"kb_id": []string{kbID}}
+	if revision != "" {
+		query.Set("revision", revision)
+	}
+	path := "/v1/scopes/" + url.PathEscape(scopeID) + "?" + query.Encode()
+	return c.doJSONWithRetry(ctx, http.MethodDelete, path, nil, "", nil)
+}
+
+func (c *minnowClient) scopeMembers(ctx context.Context, kbID, scopeID string) (map[string]struct{}, error) {
+	if !c.canScope {
+		return map[string]struct{}{}, nil
+	}
+	path := "/v1/scopes/documents?kb_id=" + url.QueryEscape(kbID)
+	var out struct {
+		DocumentIDs []string `json:"document_ids"`
+	}
+	if err := c.doJSONWithRetry(ctx, http.MethodGet, path, nil, "", &out); err != nil {
+		return nil, err
+	}
+	members := make(map[string]struct{}, len(out.DocumentIDs))
+	for _, id := range out.DocumentIDs {
+		members[id] = struct{}{}
+	}
+	currentIDs, revision, exists, err := c.getScope(ctx, kbID, scopeID)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		c.scopeRevision = revision
+		c.scopeIDs = currentIDs
+		c.scopeExists = true
+	}
+	return members, nil
+}
+
+func (c *minnowClient) getScope(ctx context.Context, kbID, scopeID string) ([]string, string, bool, error) {
+	var current struct {
+		DocumentIDs []string `json:"document_ids"`
+		Revision    string   `json:"revision"`
+	}
+	path := "/v1/scopes/" + url.PathEscape(scopeID) + "?kb_id=" + url.QueryEscape(kbID)
+	if err := c.doJSONWithRetry(ctx, http.MethodGet, path, nil, "", &current); err != nil {
+		if isHTTPStatus(err, http.StatusNotFound) {
+			return nil, "", false, nil
+		}
+		return nil, "", false, err
+	}
+	ids := append([]string(nil), current.DocumentIDs...)
+	slices.Sort(ids)
+	return ids, current.Revision, true, nil
+}
+
+func (c *minnowClient) published(ctx context.Context, kbID string, ids []string) (map[string]struct{}, error) {
+	found := make(map[string]struct{})
+	for len(ids) > 0 {
+		end := min(len(ids), 200)
+		body := map[string]any{"kb_id": kbID, "ids": ids[:end]}
+		var out struct {
+			Records []struct {
+				ID string `json:"id"`
+			} `json:"records"`
+		}
+		key := "codeindex-fetch-" + shortHash(strings.Join(ids[:end], "\x00"))
+		if err := c.doJSONWithRetry(ctx, http.MethodPost, "/v1/vectors/fetch", body, key, &out); err != nil {
+			return nil, err
+		}
+		for _, record := range out.Records {
+			found[record.ID] = struct{}{}
+		}
+		ids = ids[end:]
+	}
+	return found, nil
 }
 
 // defers excludes knowledge bases from earlier runs, whose rows would strand
@@ -191,14 +319,34 @@ func (c *minnowClient) defers(kbID string) bool {
 
 // adoptSession records the handle the server issued, so a run that loses its
 // own resumes under that one rather than opening a second.
-func (c *minnowClient) adoptSession(kbID, id string) {
+func (c *minnowClient) adoptSession(kbID, id string) error {
 	if id == "" || id == c.sessionID || kbID != c.sessionKB {
-		return
+		return nil
+	}
+	if c.onSession != nil {
+		if err := c.onSession(id); err != nil {
+			return fmt.Errorf("record ingest session: %w", err)
+		}
 	}
 	c.sessionID = id
-	if c.onSession != nil {
-		c.onSession(id)
-	}
+	return nil
+}
+
+type minnowHTTPError struct {
+	status int
+	err    error
+}
+
+func (e *minnowHTTPError) Error() string { return e.err.Error() }
+func (e *minnowHTTPError) Unwrap() error { return e.err }
+
+func isHTTPConflict(err error) bool {
+	return isHTTPStatus(err, http.StatusConflict)
+}
+
+func isHTTPStatus(err error, status int) bool {
+	var response *minnowHTTPError
+	return errors.As(err, &response) && response.status == status
 }
 
 func (c *minnowClient) waitForOperation(ctx context.Context, eventID string) error {
@@ -337,7 +485,12 @@ func (c *minnowClient) doJSONAttempt(ctx context.Context, call jsonCall) (retryD
 		}
 		reader = bytes.NewReader(data)
 	}
-	endpoint := c.baseURL.JoinPath(strings.TrimPrefix(path, "/"))
+	relative, err := url.Parse(path)
+	if err != nil {
+		return retryDecision{}, err
+	}
+	endpoint := c.baseURL.JoinPath(strings.TrimPrefix(relative.Path, "/"))
+	endpoint.RawQuery = relative.RawQuery
 	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), reader)
 	if err != nil {
 		return retryDecision{}, err
@@ -356,13 +509,14 @@ func (c *minnowClient) doJSONAttempt(ctx context.Context, call jsonCall) (retryD
 		return retryDecision{retry: canReplay, after: c.pollEvery}, fmt.Errorf("%s %s: %w", method, endpoint, err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return retryDecision{retry: canReplay, after: c.pollEvery}, fmt.Errorf("read Minnow response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		decision := c.responseRetryDecision(resp.StatusCode, resp.Header.Get("Retry-After"), canReplay)
-		return decision, fmt.Errorf("Minnow %s %s: %s", method, path, responseError(data, resp.Status))
+		failure := fmt.Errorf("Minnow %s %s: %s", method, path, responseError(data, resp.Status))
+		return decision, &minnowHTTPError{status: resp.StatusCode, err: failure}
 	}
 	if out != nil {
 		if err := decodeJSONResponse(data, out); err != nil {
@@ -472,7 +626,9 @@ func (c *minnowClient) idempotencyKey(kbID string, docs []minnowcode.Document) s
 
 const (
 	capabilityIngestSessions = "ingest_sessions"
+	capabilityDocumentScopes = "document_scopes"
 	commitTimeout            = 30 * time.Minute
+	maxResponseBytes         = 64 << 20
 
 	// Outlasts a server side session lease.
 	sessionConflictBudget = 11 * time.Minute

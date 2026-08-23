@@ -4,10 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // A run writes its state only after it commits, so an interrupted first index
@@ -31,9 +32,6 @@ func TestKBIDReservation(t *testing.T) {
 	t.Run("an interrupted first index resumes into the same knowledge base", func(t *testing.T) {
 		target := newTarget(t.TempDir())
 		first := reserve(t, target)
-		if first.KBID == target.KBID {
-			t.Fatal("no generation was assigned")
-		}
 		second, err := assignIndexGeneration(target, indexState{}, false)
 		if err != nil {
 			t.Fatal(err)
@@ -55,15 +53,15 @@ func TestKBIDReservation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.HasPrefix(assigned.KBID, "code-repo-chosen-by-flag-") {
+		if assigned.KBID != "code-repo-chosen-by-flag" {
 			t.Fatalf("a stale reservation overrode the requested knowledge base: %q", assigned.KBID)
 		}
 	})
 
 	t.Run("a truncated reservation is not indexed into", func(t *testing.T) {
 		target := newTarget(t.TempDir())
-		assigned := reserve(t, target)
-		truncated := assigned.KBID[:len(target.KBID)+3]
+		reserve(t, target)
+		truncated := target.KBID + "-bad"
 		if err := os.WriteFile(reservedKBIDPath(target), []byte(truncated), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -76,44 +74,36 @@ func TestKBIDReservation(t *testing.T) {
 		}
 	})
 
-	t.Run("recorded state wins over the reservation", func(t *testing.T) {
+	t.Run("repository mapping wins over branch state", func(t *testing.T) {
 		target := newTarget(t.TempDir())
-		reserve(t, target)
+		reserved := reserve(t, target)
 		resumed, err := assignIndexGeneration(target, indexState{KBID: "code-repo-from-state"}, true)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if resumed.KBID != "code-repo-from-state" {
-			t.Fatalf("state was ignored in favour of the reservation: %q", resumed.KBID)
-		}
+		require.Equal(t, reserved.KBID, resumed.KBID)
 	})
 
-	t.Run("clearing the reservation forces a fresh knowledge base", func(t *testing.T) {
+	t.Run("completed indexes retain the repository generation", func(t *testing.T) {
 		target := newTarget(t.TempDir())
 		first := reserve(t, target)
 		// Deleting the state file must still mean "index this from scratch".
-		clearReservedKBID(target)
 		second, err := assignIndexGeneration(target, indexState{}, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if second.KBID == first.KBID {
-			t.Fatal("a cleared reservation still pinned the old knowledge base")
-		}
+		require.Equal(t, first.KBID, second.KBID)
 	})
 
-	t.Run("two indexes in one checkout reserve separately", func(t *testing.T) {
+	t.Run("branches share the repository generation", func(t *testing.T) {
 		root := t.TempDir()
 		main := newTarget(root)
 		branch := newTarget(root)
 		branch.IndexKey = "feature-xyz"
-		branch.KBID = "code-repo-feature-xyz"
 
 		mainKB := reserve(t, main)
 		branchKB := reserve(t, branch)
-		if mainKB.KBID == branchKB.KBID {
-			t.Fatal("two indexes shared one reservation")
-		}
+		require.Equal(t, mainKB.KBID, branchKB.KBID)
 	})
 
 	t.Run("an unwritable state directory still indexes", func(t *testing.T) {
@@ -128,6 +118,154 @@ func TestKBIDReservation(t *testing.T) {
 			t.Fatalf("an unwritable reservation failed the run: %v", err)
 		}
 	})
+}
+
+func TestCloneIdentity(t *testing.T) {
+	base := t.TempDir()
+	remote := filepath.Join(base, "repo.git")
+	runTestGit(t, base, "init", "--bare", remote)
+	seed := filepath.Join(base, "seed")
+	runTestGit(t, base, "init", "-b", "main", seed)
+	runTestGit(t, seed, "config", "user.email", "codeindex@example.com")
+	runTestGit(t, seed, "config", "user.name", "Code Index")
+	require.NoError(t, os.WriteFile(filepath.Join(seed, "main.go"), []byte("package main\n"), 0o644))
+	runTestGit(t, seed, "add", ".")
+	runTestGit(t, seed, "commit", "-m", "initial")
+	runTestGit(t, seed, "remote", "add", "origin", remote)
+	runTestGit(t, seed, "push", "-u", "origin", "main")
+	runTestGit(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	firstRoot := filepath.Join(base, "first")
+	secondRoot := filepath.Join(base, "second")
+	runTestGit(t, base, "clone", remote, firstRoot)
+	runTestGit(t, base, "clone", remote, secondRoot)
+	first, err := resolveTarget(indexCLIOptions{root: firstRoot})
+	require.NoError(t, err)
+	second, err := resolveTarget(indexCLIOptions{root: secondRoot})
+	require.NoError(t, err)
+	first, err = assignIndexGeneration(first, indexState{}, false)
+	require.NoError(t, err)
+	second, err = assignIndexGeneration(second, indexState{}, false)
+	require.NoError(t, err)
+	require.Equal(t, first.KBID, second.KBID)
+	require.Equal(t, first.ScopeID, second.ScopeID)
+	require.Equal(t, shortHash(remote), first.RepoID)
+	require.Equal(t, shortHash(remote), second.RepoID)
+}
+
+func TestLegacySelection(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init", "-b", "main")
+	runTestGit(t, root, "config", "user.email", "codeindex@example.com")
+	runTestGit(t, root, "config", "user.name", "Code Index")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o644))
+	runTestGit(t, root, "add", ".")
+	runTestGit(t, root, "commit", "-m", "initial")
+	sibling := filepath.Join(t.TempDir(), "feature")
+	runTestGit(t, root, "worktree", "add", "-b", "feature", sibling)
+	target, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+	dir := filepath.Dir(indexStatePath(target))
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	current := target.LegacyKBID + "-1111111111111111"
+	feature, err := resolveTarget(indexCLIOptions{root: sibling})
+	require.NoError(t, err)
+	featureDir := filepath.Dir(indexStatePath(feature))
+	require.NoError(t, os.MkdirAll(featureDir, 0o755))
+	canonical := feature.LegacyKBID + "-2222222222222222"
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "current.journal"), []byte("kb "+current+"\ni a\n"), 0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(featureDir, "canonical.journal"), []byte("kb "+canonical+"\ni a\ni b\ni c\n"), 0o600,
+	))
+
+	assigned, err := assignIndexGeneration(target, indexState{}, false)
+	require.NoError(t, err)
+	require.Equal(t, canonical, assigned.KBID)
+	require.Equal(t, []string{"a", "b", "c"}, assigned.MigrationIDs)
+	require.Equal(t, featureDir, assigned.MigrationDir)
+
+	retried, err := assignIndexGeneration(target, indexState{KBID: current, Legacy: true}, true)
+	require.NoError(t, err)
+	require.Equal(t, canonical, retried.KBID)
+	require.Equal(t, assigned.MigrationIDs, retried.MigrationIDs)
+	require.Equal(t, assigned.MigrationDir, retried.MigrationDir)
+}
+
+func TestLegacyExplicitIsolation(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init", "-b", "main")
+	target, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+	explicit, err := resolveTarget(indexCLIOptions{root: root, indexKey: "other"})
+	require.NoError(t, err)
+	dir := filepath.Dir(indexStatePath(target))
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	defaultKB := target.LegacyKBID + "-1111111111111111"
+	explicitKB := explicit.LegacyKBID + "-2222222222222222"
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "default.journal"), []byte("kb "+defaultKB+"\ni a\n"), 0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "explicit.journal"), []byte("kb "+explicitKB+"\ni a\ni b\n"), 0o600,
+	))
+
+	assigned, err := assignIndexGeneration(target, indexState{}, false)
+	require.NoError(t, err)
+	require.Equal(t, defaultKB, assigned.KBID)
+}
+
+func TestHistoricalLegacy(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init", "-b", "main")
+	runTestGit(t, root, "config", "user.email", "codeindex@example.com")
+	runTestGit(t, root, "config", "user.name", "Code Index")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o644))
+	runTestGit(t, root, "add", ".")
+	runTestGit(t, root, "commit", "-m", "initial")
+	main, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+	runTestGit(t, root, "checkout", "-b", "feature")
+	feature, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+	dir := filepath.Dir(indexStatePath(feature))
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	mainKB := main.LegacyKBID + "-1111111111111111"
+	featureKB := feature.LegacyKBID + "-2222222222222222"
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "main.journal"), []byte("kb "+mainKB+"\ni a\ni b\ni c\n"), 0o600,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "feature.journal"), []byte("kb "+featureKB+"\ni a\n"), 0o600,
+	))
+
+	assigned, err := assignIndexGeneration(feature, indexState{}, false)
+	require.NoError(t, err)
+	require.Equal(t, mainKB, assigned.KBID)
+	require.Equal(t, []string{"a", "b", "c"}, assigned.MigrationIDs)
+}
+
+func TestDetachedLegacy(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init", "-b", "main")
+	runTestGit(t, root, "config", "user.email", "codeindex@example.com")
+	runTestGit(t, root, "config", "user.name", "Code Index")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o644))
+	runTestGit(t, root, "add", ".")
+	runTestGit(t, root, "commit", "-m", "initial")
+	runTestGit(t, root, "checkout", "--detach")
+	target, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+	dir := filepath.Dir(indexStatePath(target))
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	legacyKB := target.LegacyKBID + "-1111111111111111"
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, "detached.journal"), []byte("kb "+legacyKB+"\ni a\n"), 0o600,
+	))
+
+	assigned, err := assignIndexGeneration(target, indexState{}, false)
+	require.NoError(t, err)
+	require.Equal(t, legacyKB, assigned.KBID)
 }
 
 // Go kills a process on SIGINT by default, so without a handler an interrupted
@@ -157,7 +295,7 @@ func TestInterruptContextStopIsIndependent(t *testing.T) {
 	}
 }
 
-func TestReservationOnlyPinsAMintedKnowledgeBase(t *testing.T) {
+func TestRepositoryGeneration(t *testing.T) {
 	root := t.TempDir()
 	runTestGit(t, root, "init", "-b", "main")
 	runTestGit(t, root, "config", "user.email", "codeindex@example.com")
@@ -186,15 +324,13 @@ func TestReservationOnlyPinsAMintedKnowledgeBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A second run reads its id from state, so there is nothing to reserve.
+	// The repository reservation remains the branch-independent KB identity.
 	broken := cfg
 	broken.Minnow.URL = "http://127.0.0.1:1"
 	if _, err := refreshIndex(context.Background(), broken, opts); err == nil {
 		t.Fatal("a run against a dead server reported success")
 	}
-	if reserved := loadReservedKBID(target); reserved != "" {
-		t.Fatalf("a failed run that read its id from state reserved %q", reserved)
-	}
+	require.Equal(t, first.KBID, loadReservedKBID(target))
 
 	if err := os.Remove(indexStatePath(target)); err != nil {
 		t.Fatal(err)
@@ -203,7 +339,5 @@ func TestReservationOnlyPinsAMintedKnowledgeBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if third.KBID == first.KBID {
-		t.Fatalf("deleting the state file reused knowledge base %s", third.KBID)
-	}
+	require.Equal(t, first.KBID, third.KBID)
 }

@@ -7,6 +7,7 @@ import (
 
 type Options struct {
 	KBID             string
+	ScopeID          string
 	IndexKey         string
 	Description      string
 	Root             string
@@ -59,6 +60,7 @@ type SearchOptions struct {
 	TopK     int
 	Path     string
 	Language string
+	ScopeID  string
 }
 
 type SearchResult struct {
@@ -80,6 +82,7 @@ type Registry struct {
 
 type RegistryEntry struct {
 	KBID             string `json:"kb_id"`
+	ScopeID          string `json:"scope_id,omitempty"`
 	Root             string `json:"root"`
 	Description      string `json:"description,omitempty"`
 	IncludeUntracked bool   `json:"include_untracked"`

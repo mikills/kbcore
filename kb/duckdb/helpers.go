@@ -45,6 +45,7 @@ func tableExists(ctx context.Context, q interface {
 type vectorQueryOpts struct {
 	validateDimension bool // shard-level callers set false; dimension is validated upstream
 	filter            *search.FilterExpr
+	documentIDs       []string
 }
 
 func QueryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int) ([]kb.QueryResult, error) {
@@ -70,17 +71,21 @@ func queryTopKWithDB(
 	if err != nil {
 		return nil, err
 	}
-	whereClause, err := buildWhereClause(opts.filter)
+	whereClause, err := buildWhereClause(opts.filter, opts.documentIDs != nil)
 	if err != nil {
 		return nil, err
 	}
-	// ORDER BY must use the expression directly, not an alias — the VSS optimizer only fires HNSW_INDEX_SCAN on array_distance(...).
+	distanceExpr := fmt.Sprintf("array_distance(embedding, %s::FLOAT[%d])", vecStr, len(queryVec))
+	orderExpr := distanceExpr
+	if opts.documentIDs != nil {
+		orderExpr = "(" + distanceExpr + " + 0.0)"
+	}
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance, media_refs, %s
+		SELECT id, content, %s as distance, media_refs, %s
 		FROM docs%s
-		ORDER BY array_distance(embedding, %s::FLOAT[%d])
+		ORDER BY %s
 		LIMIT %d
-	`, vecStr, len(queryVec), metadataExpr, whereClause, vecStr, len(queryVec), k))
+	`, distanceExpr, metadataExpr, whereClause, orderExpr, k), documentScopeArgs(opts.documentIDs)...)
 	if err != nil {
 		return nil, kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("query failed: %w", err),
@@ -358,10 +363,18 @@ func CheckpointAndCloseDB(ctx context.Context, db *sql.DB, closeContext string) 
 	return nil
 }
 
-func buildWhereClause(filter *search.FilterExpr) (string, error) {
+func buildWhereClause(filter *search.FilterExpr, scoped bool) (string, error) {
 	clause, err := search.BuildFilterSQL(filter)
 	if err != nil {
 		return "", fmt.Errorf("invalid filter: %w", err)
+	}
+	if scoped {
+		idClause := "id IN (SELECT unnest FROM unnest(?::VARCHAR[]))"
+		if clause == "" {
+			clause = idClause
+		} else {
+			clause = "(" + clause + ") AND " + idClause
+		}
 	}
 	if clause == "" {
 		return "", nil
@@ -369,9 +382,23 @@ func buildWhereClause(filter *search.FilterExpr) (string, error) {
 	return " WHERE " + clause, nil
 }
 
+func documentScopeArgs(ids []string) []any {
+	if ids == nil {
+		return nil
+	}
+	return []any{ids}
+}
+
 // queryBM25WithDB returns BM25-ranked results for the given query text.
 // Results are ordered by BM25 score descending; at most k rows are returned.
-func queryBM25WithDB(ctx context.Context, db *sql.DB, queryText string, k int, filter *search.FilterExpr) ([]kb.QueryResult, error) {
+func queryBM25WithDB(
+	ctx context.Context,
+	db *sql.DB,
+	queryText string,
+	k int,
+	filter *search.FilterExpr,
+	documentIDs []string,
+) ([]kb.QueryResult, error) {
 	if k <= 0 {
 		return []kb.QueryResult{}, nil
 	}
@@ -382,7 +409,7 @@ func queryBM25WithDB(ctx context.Context, db *sql.DB, queryText string, k int, f
 	if err != nil {
 		return nil, err
 	}
-	whereClause, err := buildWhereClause(filter)
+	whereClause, err := buildWhereClause(filter, documentIDs != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +426,7 @@ func queryBM25WithDB(ctx context.Context, db *sql.DB, queryText string, k int, f
 		FROM docs%s
 		ORDER BY bm25_score DESC
 		LIMIT %d
-	`, escapedQuery, metadataExpr, whereClause, k))
+	`, escapedQuery, metadataExpr, whereClause, k), documentScopeArgs(documentIDs)...)
 	if err != nil {
 		return nil, fmt.Errorf("bm25 query failed: %w", err)
 	}
@@ -410,4 +437,3 @@ func queryBM25WithDB(ctx context.Context, db *sql.DB, queryText string, k int, f
 func quoteSQLStringLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
-

@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	minnowcode "github.com/mikills/minnow/codeindex/indexer"
+	minnowcode "github.com/mikills/minnow/kb/codeindex"
 )
 
 func main() {
@@ -60,6 +60,8 @@ func run(ctx context.Context, args []string) int {
 		return runRefresh(ctx, args[1:])
 	case "status":
 		return runStatus(args[1:])
+	case "remove":
+		return runRemove(ctx, args[1:])
 	case "hooks":
 		return runHooks(ctx, args[1:])
 	case "--version", "version":
@@ -75,8 +77,30 @@ func run(ctx context.Context, args []string) int {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, "usage: codeindex <setup|codebase|refresh|status|hooks>")
+	fmt.Fprintln(os.Stderr, "usage: codeindex <setup|codebase|refresh|status|remove|hooks>")
 	fmt.Fprintln(os.Stderr, "       codeindex --version")
+}
+
+func runRemove(ctx context.Context, args []string) int {
+	opts, err := parseIndexCLIOptions(args)
+	if err != nil {
+		return writeCommandError(err, 2)
+	}
+	cfg, err := loadConfig(opts.configPath)
+	if err != nil {
+		return writeCommandError(err, 1)
+	}
+	applyConnectionOverrides(&cfg, opts)
+	result, err := removeIndex(ctx, cfg, opts)
+	if err != nil {
+		return writeCommandError(fmt.Errorf("remove codebase index: %w", err), 1)
+	}
+	if !opts.quiet {
+		if err := writeJSON(result); err != nil {
+			return writeCommandError(fmt.Errorf("write json: %w", err), 1)
+		}
+	}
+	return 0
 }
 
 // A codeindex/vX.Y.Z tag for installed binaries, a pseudo-version for builds

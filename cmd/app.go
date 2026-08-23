@@ -305,6 +305,12 @@ func buildKBDeps(loader *kb.KB, logger *slog.Logger) Dependencies {
 		deps.AppendSessionCommit = loader.AppendSessionCommit
 	}
 	deps.FetchVectors = loader.FetchVectors
+	deps.ReplaceScope = loader.ReplaceScope
+	deps.GetScope = loader.GetScope
+	deps.ListScopes = loader.ListScopes
+	deps.DeleteScope = loader.DeleteScope
+	deps.DeleteScopeIfRevision = loader.DeleteScopeIfRevision
+	deps.ScheduleScopeGC = loader.ScheduleScopeGC
 	deps.QueryVectors = func(ctx context.Context, kbID string, vec []float32, k int, filter *search.FilterExpr) ([]kb.QueryResult, error) {
 		return loader.SearchRaw(ctx, kbID, vec, k, filter)
 	}

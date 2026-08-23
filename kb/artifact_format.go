@@ -11,6 +11,7 @@ type RagQueryOptions struct {
 	TopK        int
 	MaxDistance *float64
 	Filter      *search.FilterExpr
+	DocumentIDs []string
 }
 
 type RagQueryRequest struct {
@@ -24,6 +25,7 @@ type GraphQueryOptions struct {
 	MaxDistance *float64
 	Filter      *search.FilterExpr
 	Expansion   *ExpansionOptions
+	DocumentIDs []string
 }
 
 type GraphQueryRequest struct {

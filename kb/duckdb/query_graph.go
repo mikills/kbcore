@@ -15,12 +15,15 @@ func searchExpandedWithDB(
 	queryVec []float32,
 	topK int,
 	options kb.ExpansionOptions,
+	documentIDs []string,
 ) ([]kb.ExpandedResult, error) {
 	if err := ensureGraphQueryReady(ctx, db); err != nil {
 		return nil, err
 	}
 
-	seeds, err := queryTopKWithDB(ctx, db, queryVec, options.SeedK, vectorQueryOpts{})
+	seeds, err := queryTopKWithDB(
+		ctx, db, queryVec, options.SeedK, vectorQueryOpts{documentIDs: documentIDs},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -51,6 +54,7 @@ func searchExpandedWithDB(
 			seeds:        seeds,
 			entityScores: entityScores,
 			alpha:        options.Alpha,
+			documentIDs:  documentIDs,
 		},
 	)
 }
@@ -141,6 +145,7 @@ type expandedResultInput struct {
 	seeds        []kb.QueryResult
 	entityScores map[string]float64
 	alpha        float64
+	documentIDs  []string
 }
 
 func buildExpandedResults(ctx context.Context, db *sql.DB, input expandedResultInput) ([]kb.ExpandedResult, error) {
@@ -150,6 +155,24 @@ func buildExpandedResults(ctx context.Context, db *sql.DB, input expandedResultI
 	}
 
 	candidateIDs := graph.CandidateIDs(input.seeds, docGraphScore)
+	if input.documentIDs != nil {
+		allowed := make(map[string]struct{}, len(input.documentIDs))
+		for _, id := range input.documentIDs {
+			allowed[id] = struct{}{}
+		}
+		filtered := candidateIDs[:0]
+		for _, id := range candidateIDs {
+			if _, ok := allowed[id]; ok {
+				filtered = append(filtered, id)
+			}
+		}
+		candidateIDs = filtered
+		for id := range docGraphScore {
+			if _, ok := allowed[id]; !ok {
+				delete(docGraphScore, id)
+			}
+		}
+	}
 	if twoPhaseMaterializationEnabled {
 		docMatches, err := queryDocDistancesForIDs(ctx, db, input.queryVec, candidateIDs, false)
 		if err != nil {

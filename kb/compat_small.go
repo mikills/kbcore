@@ -610,8 +610,9 @@ func (l *KB) RegisterDefaultJobs(s *Scheduler) error {
 func (l *KB) runScheduledJob(ctx context.Context, jobID string) error {
 	switch jobID {
 	case ShardGCJobID:
-		_, err := l.SweepDelayedShardGC(ctx, time.Time{})
-		return err
+		_, shardErr := l.SweepDelayedShardGC(ctx, time.Time{})
+		_, scopeErr := l.SweepScopeGC(ctx, time.Time{})
+		return errors.Join(shardErr, scopeErr)
 	case EventReaperJobID:
 		_, err := l.EventStore.Requeue(ctx, l.Clock.Now())
 		return err

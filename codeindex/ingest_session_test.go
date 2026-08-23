@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestIngestSession(t *testing.T) {
@@ -310,7 +312,7 @@ func TestSessionConflictIsWaitedOut(t *testing.T) {
 	})
 }
 
-func TestAFailedCommitLeavesTheRunResumable(t *testing.T) {
+func TestCommitResume(t *testing.T) {
 	root := t.TempDir()
 	runTestGit(t, root, "init", "-b", "main")
 	runTestGit(t, root, "config", "user.email", "codeindex@example.com")
@@ -360,6 +362,20 @@ func TestAFailedCommitLeavesTheRunResumable(t *testing.T) {
 	if loadSession(uploaded) == "" {
 		t.Fatal("the run's session handle was not kept for the retry")
 	}
+	journal, err := loadUploadJournal(uploadJournalPath(uploaded))
+	require.NoError(t, err)
+	require.NotEmpty(t, journal.sessionID)
+	server.mu.Lock()
+	uploads := len(server.ingests)
+	server.commitStatus = 0
+	server.mu.Unlock()
+	result, err := refreshIndex(context.Background(), cfg, opts)
+	require.NoError(t, err)
+	server.mu.Lock()
+	resumedUploads := len(server.ingests)
+	server.mu.Unlock()
+	require.Equal(t, uploads, resumedUploads)
+	require.NotEmpty(t, result.StatePath)
 }
 
 func TestSessionsDoNotCrossKnowledgeBases(t *testing.T) {

@@ -328,6 +328,25 @@ func testKBSearchExpandedBasic(t *testing.T) {
 	requireResultContainsID(t, results, "c")
 }
 
+func TestScopedGraph(t *testing.T) {
+	ctx := context.Background()
+	var request GraphQueryRequest
+	format := &mockArtifactFormat{queryGraphFn: func(_ context.Context, req GraphQueryRequest) ([]ExpandedResult, error) {
+		request = req
+		return nil, nil
+	}}
+	loader := newMockKBWithManifest(t, "kb", format)
+	_, err := loader.ReplaceScope(ctx, "kb", "branch", []string{"doc"}, "")
+	require.NoError(t, err)
+	_, err = loader.Search(ctx, "kb", []float32{1}, &SearchOptions{
+		Mode: SearchModeGraph, TopK: 1, ScopeID: "branch",
+		Expansion: &ExpansionOptions{Hops: 3},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 0, request.Options.Expansion.Hops)
+	require.Equal(t, []string{"doc"}, request.Options.DocumentIDs)
+}
+
 func testKBGraphModeUnavailableScenarios(t *testing.T) {
 	ctx := context.Background()
 	tests := []struct {
@@ -971,8 +990,12 @@ func (m *mockArtifactFormat) QueryGraph(ctx context.Context, req GraphQueryReque
 func (m *mockArtifactFormat) QueryBM25(context.Context, BM25QueryRequest) ([]ExpandedResult, error) {
 	return nil, nil
 }
-func (m *mockArtifactFormat) FetchVectors(context.Context, string, []string) ([]VectorRecord, error) {
-	return nil, nil
+func (m *mockArtifactFormat) FetchVectors(_ context.Context, _ string, ids []string) ([]VectorRecord, error) {
+	records := make([]VectorRecord, len(ids))
+	for i, id := range ids {
+		records[i].ID = id
+	}
+	return records, nil
 }
 func (m *mockArtifactFormat) Ingest(ctx context.Context, req IngestUpsertRequest) (IngestResult, error) {
 	if m.ingestFn != nil {

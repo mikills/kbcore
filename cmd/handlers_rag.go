@@ -32,6 +32,7 @@ type ragIngestRequest struct {
 	GraphEnabled *bool            `json:"graph_enabled"`
 	PreChunked   bool             `json:"pre_chunked,omitempty"`
 	DeferPublish bool             `json:"defer_publish,omitempty"`
+	GCUnscoped   bool             `json:"gc_unscoped,omitempty"`
 	SessionID    string           `json:"session_id,omitempty"`
 	Documents    []ragIngestDocIn `json:"documents"`
 }
@@ -51,6 +52,7 @@ type ragIngestDocIn struct {
 
 type ragQueryRequest struct {
 	KBID       string             `json:"kb_id"`
+	ScopeID    string             `json:"scope_id,omitempty"`
 	Query      string             `json:"query"`
 	K          int                `json:"k"`
 	SearchMode string             `json:"search_mode,omitempty"`
@@ -210,6 +212,20 @@ func handleRagIngest(c echo.Context, deps Dependencies, sessions *kb.IngestSessi
 	if err != nil {
 		return writeIngestSessionError(c, deps, sessions, req.KBID, err)
 	}
+	if req.GCUnscoped {
+		if !req.DeferPublish {
+			releaseIngestSession(c.Request().Context(), sessions, req.KBID, req.SessionID, sessionID)
+			return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "gc_unscoped requires defer_publish"})
+		}
+		if deps.ScheduleScopeGC == nil {
+			releaseIngestSession(c.Request().Context(), sessions, req.KBID, req.SessionID, sessionID)
+			return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: errKBUnavailable})
+		}
+		if _, err := deps.ScheduleScopeGC(c.Request().Context(), req.KBID, docIDs); err != nil {
+			releaseIngestSession(c.Request().Context(), sessions, req.KBID, req.SessionID, sessionID)
+			return WriteError(c, err, deps.IsBudgetExceeded)
+		}
+	}
 	evtID, effectiveIdem, err := appendRagIngestEvent(c, deps, req, docs, opts)
 	if err != nil {
 		releaseIngestSession(c.Request().Context(), sessions, req.KBID, req.SessionID, sessionID)
@@ -339,7 +355,7 @@ func handleRagQuery(c echo.Context, deps Dependencies) error {
 		logger.ErrorContext(c.Request().Context(), "rag query failed", kbIDContextKey, req.KBID, errorResponseKey, err)
 		return WriteError(c, err, deps.IsBudgetExceeded)
 	}
-	results, err := deps.Search(c.Request().Context(), req.KBID, vec, &kb.SearchOptions{Mode: mode, TopK: req.K, Filter: req.Filter, QueryText: req.Query})
+	results, err := deps.Search(c.Request().Context(), req.KBID, vec, &kb.SearchOptions{Mode: mode, TopK: req.K, Filter: req.Filter, QueryText: req.Query, ScopeID: req.ScopeID})
 	if err != nil {
 		return handleRagSearchError(
 			ragSearchErrorContext{c: c, deps: deps, logger: logger, metrics: metrics, start: start, req: req, err: err},

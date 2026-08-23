@@ -72,18 +72,31 @@ func (k *KB) Search(
 		return nil, fmt.Errorf("%w: top_k must be > 0", ErrInvalidQueryRequest)
 	}
 
+	if options.ScopeID != "" {
+		scope, err := k.GetScope(ctx, kbID, options.ScopeID)
+		if err != nil {
+			return nil, err
+		}
+		options.DocumentIDs = scope.DocumentIDs
+		expansion := search.NormalizeExpansionOptions(options.TopK, options.Expansion)
+		expansion.Hops = 0
+		options.Expansion = &expansion
+	}
+
+	var results []ExpandedResult
 	switch options.Mode {
 	case SearchModeGraph:
-		return queryGraphSearch(ctx, format, kbID, queryVec, options)
+		results, err = queryGraphSearch(ctx, format, kbID, queryVec, options)
 	case SearchModeAdaptive:
-		return queryAdaptiveSearch(ctx, format, kbID, queryVec, options)
+		results, err = queryAdaptiveSearch(ctx, format, kbID, queryVec, options)
 	case SearchModeBM25:
-		return queryBM25Search(ctx, format, kbID, options)
+		results, err = queryBM25Search(ctx, format, kbID, options)
 	case SearchModeHybrid:
-		return queryHybridSearch(ctx, format, kbID, queryVec, options)
+		results, err = queryHybridSearch(ctx, format, kbID, queryVec, options)
 	default:
-		return queryVectorSearch(ctx, format, kbID, queryVec, options)
+		results, err = queryVectorSearch(ctx, format, kbID, queryVec, options)
 	}
+	return results, err
 }
 
 func queryGraphSearch(
@@ -127,7 +140,10 @@ func queryVectorSearch(
 	ragReq := RagQueryRequest{
 		KBID:     kbID,
 		QueryVec: queryVec,
-		Options:  RagQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance, Filter: options.Filter},
+		Options: RagQueryOptions{
+			TopK: options.TopK, MaxDistance: options.MaxDistance, Filter: options.Filter,
+			DocumentIDs: options.DocumentIDs,
+		},
 	}
 	if err := ValidateRagQueryRequest(ragReq); err != nil {
 		return nil, err
@@ -139,7 +155,10 @@ func graphQueryRequest(kbID string, queryVec []float32, options SearchOptions) G
 	return GraphQueryRequest{
 		KBID:     kbID,
 		QueryVec: queryVec,
-		Options:  GraphQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance, Filter: options.Filter, Expansion: options.Expansion},
+		Options: GraphQueryOptions{
+			TopK: options.TopK, MaxDistance: options.MaxDistance, Filter: options.Filter,
+			Expansion: options.Expansion, DocumentIDs: options.DocumentIDs,
+		},
 	}
 }
 
@@ -155,7 +174,10 @@ func queryBM25Search(
 	return format.QueryBM25(ctx, BM25QueryRequest{
 		KBID:      kbID,
 		QueryText: options.QueryText,
-		Options:   RagQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance, Filter: options.Filter},
+		Options: RagQueryOptions{
+			TopK: options.TopK, MaxDistance: options.MaxDistance, Filter: options.Filter,
+			DocumentIDs: options.DocumentIDs,
+		},
 	})
 }
 

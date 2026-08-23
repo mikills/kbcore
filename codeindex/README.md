@@ -49,20 +49,29 @@ codeindex status
 codeindex hooks install
 ```
 
-For Git repositories, the repository identity and current branch derive the
-default index key and `kb_id`. Switching branches selects a separate index. In a
-non-Git directory, codeindex derives identity from the absolute directory. A new
-local state generation receives a unique KB suffix, so a fresh clone or deleted
-state cannot accidentally reuse stale remote chunks from an older index.
+For Git repositories, one `kb_id` holds the repository vectors and each branch
+has an opaque document scope. Switching branches reuses unchanged chunks while
+keeping searches branch-aware. Git worktrees share the same repository identity.
+In a non-Git directory, codeindex derives identity from the absolute directory.
 
 The first run writes branch-specific state under `.minnow/codeindex/` and adds
 `/.minnow/` to Git's repository-local exclude file (`.git/info/exclude`). If an
 older setup already committed that directory, untrack it first with
 `git rm -r --cached .minnow`. A refresh
-hashes the current files, uploads changed chunks, waits for Minnow to publish
-them, deletes stale chunk IDs, and then atomically saves the new state.
+hashes the current files, uploads missing chunks, publishes the branch scope,
+and then atomically saves the new state. A journal records acknowledged batches
+so an interrupted run resumes without uploading them again.
+Refreshes do not delete unscoped vectors inline; this avoids racing another
+clone that is publishing a scope. `codeindex remove` deletes the current branch
+scope, schedules unused chunks for delayed cleanup, and deletes its local state.
+Normal refreshes use the same delayed cleanup. Minnow reclaims candidates after
+one hour when its scheduler is enabled.
 `codeindex status` reads only this repository-local state, so it remains usable
 without a valid connection config or a running Minnow service.
+
+Repositories upgraded from v0.4 reuse legacy data found by the original clone
+or its worktrees. A clean clone cannot discover that branch-specific legacy KB;
+use the same explicit `--kb` when clones must share during migration.
 
 Useful overrides:
 
@@ -72,9 +81,8 @@ codeindex codebase --low-resource --yes
 codeindex codebase --kb explicit-kb --index-key explicit-key
 ```
 
-Inside Git, explicit `--index-key` and `--kb` values are stable prefixes: the
-repository, current branch, indexed subdirectory, and local generation are used
-to prevent incompatible state or cross-repository data from sharing one KB.
+Inside Git, explicit `--index-key` and `--kb` values are stable prefixes. The
+repository and indexed subdirectory select the KB; the branch selects its scope.
 Hooks resolve the invoking worktree and repository-local settings each time they
 run. Hook failures do not block Git operations; diagnostics are appended to
 Git's `minnow-codeindex-hook.log` path.
