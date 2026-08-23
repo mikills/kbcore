@@ -40,6 +40,7 @@ func planFor(
 	}
 	plan, err := buildIndexPlan(
 		context.Background(), target, opts, pipelineFingerprint(opts), previous, files, 0, emit,
+		planRecovery{},
 	)
 	require.NoError(t, err)
 	return plan, emitted
@@ -124,4 +125,31 @@ func TestIndexPlanFileRace(t *testing.T) {
 		require.Contains(t, plan.stalePaths, "a.go")
 		require.NotEmpty(t, emitted)
 	})
+}
+
+func TestIndexPlanRecovery(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "a.go")
+	require.NoError(t, os.WriteFile(path, []byte("package a\n\nfunc A() int { return 1 }\n"), 0o600))
+	opts := minnowcode.NormalizeOptions(minnowcode.Options{})
+	files, _, err := minnowcode.Scan(context.Background(), root, opts, minnowcode.DefaultExcludePatterns)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	target := indexTarget{Root: root, RepoID: "repo", KBID: "kb", ScopeID: "main", IndexKey: "key"}
+	first, docs := planFor(t, root, indexState{}, files)
+	require.NotEmpty(t, docs)
+
+	emitted := false
+	recovered, err := buildIndexPlan(
+		context.Background(), target, opts, pipelineFingerprint(opts), indexState{}, files, 0,
+		func(context.Context, []minnowcode.Document) error {
+			emitted = true
+			return nil
+		},
+		planRecovery{files: first.state.Files},
+	)
+	require.NoError(t, err)
+	require.False(t, emitted)
+	require.Equal(t, len(docs), recovered.result.ChunksReused)
+	require.Equal(t, first.state.Files, recovered.state.Files)
 }

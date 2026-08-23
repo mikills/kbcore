@@ -12,6 +12,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	kb "github.com/mikills/minnow/kb"
+	"github.com/stretchr/testify/require"
 )
 
 type commitRecorder struct {
@@ -19,6 +20,16 @@ type commitRecorder struct {
 	eventID  string
 	failWith error
 	dedupe   bool
+}
+
+type releaseContextManager struct {
+	*kb.InMemoryWriteLeaseManager
+	canceled bool
+}
+
+func (m *releaseContextManager) Release(ctx context.Context, lease *kb.WriteLease) error {
+	m.canceled = ctx.Err() != nil
+	return m.InMemoryWriteLeaseManager.Release(ctx, lease)
 }
 
 func (r *commitRecorder) append(
@@ -82,7 +93,7 @@ func TestHandleRagCommit(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		rec := postCommit(t, e, `{"kb_id":"kb","session_id":`+strconv.Quote(handle)+`}`)
+		rec := postCommit(t, e, `{"kb_id":"kb","session_id":`+strconv.Quote(handle)+`,"scope":{"scope_id":"main","document_ids":["b","a"]}}`)
 		if rec.Code != http.StatusAccepted {
 			t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 		}
@@ -102,6 +113,9 @@ func TestHandleRagCommit(t *testing.T) {
 		}
 		if len(recorder.calls) != 1 || recorder.calls[0].KBID != "kb" {
 			t.Fatalf("commit was queued as %+v", recorder.calls)
+		}
+		if recorder.calls[0].Scope == nil || recorder.calls[0].Scope.ScopeID != "main" {
+			t.Fatalf("scope was not queued with the commit: %+v", recorder.calls[0].Scope)
 		}
 		// The session outlives the request: the worker releases it once the
 		// rows are durable, so a late batch cannot land behind the publish.
@@ -222,6 +236,27 @@ func TestHandleRagCommit(t *testing.T) {
 		}
 	})
 
+	t.Run("scope finalization holds a session", func(t *testing.T) {
+		recorder := &commitRecorder{}
+		e, sessions, _ := newCommitServer(t, Dependencies{AppendSessionCommit: recorder.append})
+		rec := postCommit(t, e, `{"kb_id":"kb","scope":{"scope_id":"feature","document_ids":["a"]}}`)
+		require.Equal(t, http.StatusAccepted, rec.Code)
+		require.Len(t, recorder.calls, 1)
+		require.NotEmpty(t, recorder.calls[0].SessionID)
+		require.Equal(t, "feature", recorder.calls[0].Scope.ScopeID)
+		_, err := sessions.Hold(context.Background(), "kb", "")
+		require.Error(t, err)
+	})
+
+	t.Run("a deduplicated scope releases its new session", func(t *testing.T) {
+		recorder := &commitRecorder{dedupe: true}
+		e, sessions, _ := newCommitServer(t, Dependencies{AppendSessionCommit: recorder.append})
+		rec := postCommit(t, e, `{"kb_id":"kb","scope":{"scope_id":"feature","document_ids":["a"]}}`)
+		require.Equal(t, http.StatusAccepted, rec.Code)
+		_, err := sessions.Hold(context.Background(), "kb", "")
+		require.NoError(t, err)
+	})
+
 	t.Run("a server with deferred publishing off refuses to commit", func(t *testing.T) {
 		recorder := &commitRecorder{}
 		deps := Dependencies{AppendSessionCommit: recorder.append}
@@ -237,4 +272,18 @@ func TestHandleRagCommit(t *testing.T) {
 			t.Fatalf("status %d, want 400", rec.Code)
 		}
 	})
+}
+
+func TestDetachedSessionRelease(t *testing.T) {
+	manager := &releaseContextManager{InMemoryWriteLeaseManager: kb.NewInMemoryWriteLeaseManager()}
+	sessions := kb.NewIngestSessions(manager, t.TempDir())
+	handle, err := sessions.Hold(context.Background(), "kb", "")
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, releaseHeldSession(ctx, sessions, "kb", handle))
+	require.False(t, manager.canceled)
+	_, err = sessions.Hold(context.Background(), "kb", "")
+	require.NoError(t, err)
 }

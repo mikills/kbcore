@@ -10,7 +10,7 @@ prefixed and the `name` field matches.
 | --- | --- |
 | [`codeindex-setup`](skills/codeindex-setup/SKILL.md) | Installing the CLI and pointing it at a Minnow service |
 | [`codeindex-index`](skills/codeindex-index/SKILL.md) | Indexing a repository, what gets indexed, branches and worktrees |
-| [`codeindex-search`](skills/codeindex-search/SKILL.md) | Searching an index through Minnow's MCP tools |
+| [`codeindex-search`](skills/codeindex-search/SKILL.md) | Branch-aware search through codeindex's read-only MCP tools |
 | [`codeindex-troubleshoot`](skills/codeindex-troubleshoot/SKILL.md) | Killed, hung, or silent runs, stale locks, missing files |
 
 ## Using them

@@ -106,44 +106,41 @@ The minimal config enables MCP for local coding-agent workflows:
 - Streamable HTTP: `http://127.0.0.1:8080/mcp` (override `http.address` in the YAML)
 - Stdio (for editor registration): `go run . mcp stdio`
 
-On a different computer, install `codeindex` to publish local repository changes,
-then register the hosted Minnow MCP endpoint with the coding client that should
-search it. Minnow itself runs only on the host:
+For branch-aware code search, register the local read-only codeindex MCP. It
+resolves the current Git branch and calls hosted Minnow over HTTP:
 
 ```bash
 # Codex CLI
-codex mcp add minnow \
-  --url https://minnow.example.com/mcp \
-  --bearer-token-env-var MINNOW_TOKEN
+codex mcp add codeindex -- codeindex mcp --root /path/to/repository
 
-# Claude Code (the JSON keeps token lookup in the environment)
-claude mcp add-json --scope user minnow \
-  '{"type":"http","url":"https://minnow.example.com/mcp","headers":{"Authorization":"Bearer ${MINNOW_TOKEN}"}}'
+# Claude Code
+claude mcp add --scope project codeindex -- \
+  codeindex mcp --root /path/to/repository
 ```
 
-For OpenCode, add this to `~/.config/opencode/opencode.json` or
-`opencode.jsonc`:
+If indexing used `--kb` or `--index-key`, pass the same flags to `codeindex mcp`.
+
+For direct access to non-code Minnow tools, register the hosted `/mcp` endpoint
+separately. Codeindex exposes only `codeindex_search` and `codeindex_status`.
+
+For OpenCode code search, add this to `opencode.jsonc`:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "minnow": {
-      "type": "remote",
-      "url": "https://minnow.example.com/mcp",
-      "enabled": true,
-      "headers": {
-        "Authorization": "Bearer {env:MINNOW_TOKEN}"
-      }
+    "codeindex": {
+      "type": "local",
+      "command": ["codeindex", "mcp", "--root", "/path/to/repository"],
+      "enabled": true
     }
   }
 }
 ```
 
-Check registration with `codex mcp get minnow --json`, `claude mcp get minnow`,
-or `opencode mcp list`. Omit the token option/header for an unauthenticated
-endpoint. Minnow does not yet validate bearer tokens itself, so the authenticated
-examples require an HTTPS reverse proxy or API gateway that does.
+Check registration with `codex mcp get codeindex --json`,
+`claude mcp get codeindex`, or `opencode mcp list`. The local process reads the
+hosted URL and token from the normal codeindex configuration.
 
 For the full MCP tool and gate reference, see the `mcp` section of
 [configuration.md](configuration.md).

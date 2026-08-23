@@ -38,15 +38,16 @@ codeindex codebase                               # indexes the current branch
 codeindex hooks install                          # refreshes after Git changes
 ```
 
-The command output includes `kb_id` and `scope_id`; use both with
-`POST /rag/query`, or use the `minnow_code_search` MCP tool. Git branches share
-repository vectors and use separate document scopes, so unchanged chunks are
-reused while searches remain branch-aware. Outside Git, identity is derived
-from the absolute directory.
+Register `codeindex mcp` with a coding agent for read-only, branch-aware search.
+It resolves the local repository and branch, then calls hosted Minnow over
+HTTP. Git branches share repository vectors and use separate document scopes,
+so unchanged chunks are reused while searches remain branch-aware. Outside Git,
+identity is derived from the absolute directory.
 
 Codeindex stores its connection at the user config path and branch state under
 `.minnow/codeindex/`, which it adds to Git's repository-local excludes.
-Acknowledged batches are journaled so an interrupted refresh can continue.
+Completed files and acknowledged batches are journaled so an interrupted
+refresh can continue without repeating confirmed work.
 Override discovery with `CODEINDEX_CONFIG`, the endpoint
 with `CODEINDEX_MINNOW_URL`, or either identity with `--kb`/`--index-key`.
 

@@ -52,6 +52,8 @@ type indexStatus struct {
 	FileCount   int        `json:"file_count"`
 	ChunkCount  int        `json:"chunk_count"`
 	StatePath   string     `json:"state_path"`
+	Phase       string     `json:"phase,omitempty"`
+	Recoverable bool       `json:"recoverable,omitempty"`
 }
 
 func loadIndexState(target indexTarget) (indexState, string, bool, error) {
@@ -81,6 +83,9 @@ func loadIndexState(target indexTarget) (indexState, string, bool, error) {
 	state.Legacy = state.SchemaVersion == "codeindex.state/v1"
 	if !kbIDMatchesTarget(state.KBID, target) || state.RepoID != target.RepoID || state.Ref != target.Ref || state.Root != target.Root {
 		return indexState{}, path, false, fmt.Errorf("state identity does not match the selected index")
+	}
+	if state.ScopeID != "" && state.ScopeID != target.ScopeID {
+		return indexState{}, path, false, fmt.Errorf("state scope does not match the selected index")
 	}
 	if state.Files == nil {
 		state.Files = map[string]stateFile{}
@@ -316,14 +321,14 @@ func statusFromState(target indexTarget, minnowURL, path string, state indexStat
 		MinnowURL: minnowURL, Root: target.Root, RepoID: target.RepoID, Ref: target.Ref,
 		StatePath: path,
 	}
+	status.FileCount = len(state.Files)
+	for _, file := range state.Files {
+		status.ChunkCount += len(file.ChunkIDs)
+	}
 	if state.UpdatedAt.IsZero() {
 		return status
 	}
 	status.Indexed = true
 	status.UpdatedAt = &state.UpdatedAt
-	status.FileCount = len(state.Files)
-	for _, file := range state.Files {
-		status.ChunkCount += len(file.ChunkIDs)
-	}
 	return status
 }

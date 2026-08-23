@@ -61,6 +61,17 @@ func TestHealthzCapabilities(t *testing.T) {
 		}
 	})
 
+	t.Run("atomic scope commit requires both capabilities", func(t *testing.T) {
+		got := capabilitiesOf(t, Dependencies{
+			AppendSessionCommit: commit, DeferredPublish: true,
+			ReplaceScope: replace, GetScope: get, ListScopes: list, ScheduleScopeGC: schedule,
+		})
+		require.Contains(t, got, capabilitySessionCommitScope)
+		require.NotContains(t, capabilitiesOf(t, Dependencies{
+			AppendSessionCommit: commit, DeferredPublish: true,
+		}), capabilitySessionCommitScope)
+	})
+
 	t.Run("a deployment that may have several writers advertises nothing", func(t *testing.T) {
 		got := capabilitiesOf(t, Dependencies{AppendSessionCommit: commit, DeferredPublish: false})
 		if slices.Contains(got, "ingest_sessions") {

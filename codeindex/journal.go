@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,8 @@ const (
 	journalChunkPfx   = "i "
 	journalConfirmPfx = "c "
 	journalSessionPfx = "session "
+	journalFilePfx    = "file "
+	journalScopeBase  = "scope-base "
 	journalPublished  = "published"
 	journalPermission = 0o600
 )
@@ -25,6 +28,17 @@ type uploadRecorder interface {
 }
 
 type uploadConfirmer interface{ confirm([]string) error }
+
+type journalFile struct {
+	Path     string    `json:"path"`
+	Pipeline string    `json:"pipeline"`
+	State    stateFile `json:"state"`
+}
+
+type journalScope struct {
+	Revision string `json:"revision,omitempty"`
+	Exists   bool   `json:"exists"`
+}
 
 type uploadJournal struct {
 	path string
@@ -83,6 +97,28 @@ func (j *uploadJournal) recordSession(id string) error {
 	return j.write(journalSessionPfx, []string{id})
 }
 
+func (j *uploadJournal) recordFile(path, pipeline string, state stateFile) error {
+	data, err := json.Marshal(journalFile{Path: path, Pipeline: pipeline, State: state})
+	if err != nil {
+		return err
+	}
+	if _, err := j.file.WriteString(journalFilePfx + string(data) + "\n"); err != nil {
+		return err
+	}
+	return j.file.Sync()
+}
+
+func (j *uploadJournal) recordScope(revision string, exists bool) error {
+	data, err := json.Marshal(journalScope{Revision: revision, Exists: exists})
+	if err != nil {
+		return err
+	}
+	if _, err := j.file.WriteString(journalScopeBase + string(data) + "\n"); err != nil {
+		return err
+	}
+	return j.file.Sync()
+}
+
 func (j *uploadJournal) markPublished() error {
 	if _, err := j.file.WriteString(journalPublished + "\n"); err != nil {
 		return err
@@ -129,6 +165,10 @@ type journalContents struct {
 	confirmed          []string
 	publishedConfirmed []string
 	pendingConfirmed   []string
+	files              map[string]journalFile
+	scopeRevision      string
+	scopeExists        bool
+	scopeRecorded      bool
 	sessionID          string
 	published          bool
 }
@@ -144,6 +184,7 @@ func loadUploadJournal(path string) (journalContents, error) {
 	defer file.Close()
 	var contents journalContents
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		switch {
@@ -164,9 +205,31 @@ func loadUploadJournal(path string) (journalContents, error) {
 		case strings.HasPrefix(line, journalSessionPfx):
 			contents.sessionID = strings.TrimSpace(strings.TrimPrefix(line, journalSessionPfx))
 			contents.published = false
+		case strings.HasPrefix(line, journalFilePfx):
+			var file journalFile
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, journalFilePfx)), &file); err != nil {
+				return journalContents{}, fmt.Errorf("decode journal file checkpoint: %w", err)
+			}
+			if file.Path != "" {
+				if contents.files == nil {
+					contents.files = make(map[string]journalFile)
+				}
+				contents.files[file.Path] = file
+			}
+		case strings.HasPrefix(line, journalScopeBase):
+			var scope journalScope
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, journalScopeBase)), &scope); err != nil {
+				return journalContents{}, fmt.Errorf("decode journal scope checkpoint: %w", err)
+			}
+			contents.scopeRevision = scope.Revision
+			contents.scopeExists = scope.Exists
+			contents.scopeRecorded = true
 		case line == journalPublished:
 			contents.published = true
 			contents.sessionID = ""
+			contents.scopeRevision = ""
+			contents.scopeExists = false
+			contents.scopeRecorded = false
 			contents.publishedConfirmed = append(contents.publishedConfirmed[:0], contents.confirmed...)
 			contents.pendingConfirmed = nil
 		}

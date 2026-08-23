@@ -98,6 +98,24 @@ func TestScopes(t *testing.T) {
 	require.Equal(t, []string{"b", "c"}, feature.DocumentIDs)
 }
 
+func TestFinalizeSessionScope(t *testing.T) {
+	ctx := context.Background()
+	loader := newScopeKB(t)
+	desired := SessionCommitScope{ScopeID: "main", DocumentIDs: []string{"b", "a"}}
+
+	require.NoError(t, loader.FinalizeSessionScope(ctx, "kb", desired))
+	require.NoError(t, loader.FinalizeSessionScope(ctx, "kb", desired))
+
+	scope, err := loader.GetScope(ctx, "kb", "main")
+	require.NoError(t, err)
+	require.Equal(t, []string{"a", "b"}, scope.DocumentIDs)
+
+	err = loader.FinalizeSessionScope(ctx, "kb", SessionCommitScope{
+		ScopeID: "main", DocumentIDs: []string{"c"},
+	})
+	require.ErrorIs(t, err, ErrBlobVersionMismatch)
+}
+
 func TestScopeCleanup(t *testing.T) {
 	ctx := context.Background()
 	loader := newScopeKB(t)

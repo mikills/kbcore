@@ -88,29 +88,19 @@ fail later during upload. See the `codeindex-troubleshoot` skill.
 
 ## Searching the index
 
-Indexing and searching are separate. `codeindex` writes the index; Minnow's MCP
-server reads it. Register that server with whichever agent will search, using
-its own MCP configuration. Minnow serves streamable HTTP at `/mcp`.
-
-Claude Code, for example:
+Register codeindex's read-only local MCP so the agent automatically uses the
+current branch scope:
 
 ```bash
-claude mcp add --transport http minnow https://minnow.example.com/mcp \
-  --header "Authorization: Bearer ${MINNOW_TOKEN}"
+codex mcp add codeindex -- codeindex mcp --root /path/to/repository
+claude mcp add --scope project codeindex -- \
+  codeindex mcp --root /path/to/repository
 ```
 
-Agents configured by file usually want the equivalent entry:
+If indexing used `--kb` or `--index-key`, pass the same flags to `codeindex mcp`.
 
-```json
-{
-  "type": "http",
-  "url": "https://minnow.example.com/mcp",
-  "headers": { "Authorization": "Bearer ..." }
-}
-```
-
-A local Minnow on loopback needs no header. Minnow itself does not validate
-bearer tokens; the deployment examples put a reverse proxy in front to do that,
-so a self-hosted Minnow exposed without one is unprotected.
+The MCP process reads the hosted Minnow URL and token from the normal codeindex
+configuration. It exposes search and status only; `codeindex hooks install`
+keeps the index current after Git changes.
 
 Once registered, see the `codeindex-search` skill for querying the index.

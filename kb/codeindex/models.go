@@ -75,6 +75,20 @@ type SearchResult struct {
 	EndLine   int     `json:"end_line,omitempty"`
 }
 
+type SearchRequest struct {
+	KBID     string `json:"kb_id"`
+	ScopeID  string `json:"scope_id,omitempty"`
+	Query    string `json:"query"`
+	K        int    `json:"k,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Language string `json:"language,omitempty"`
+}
+
+type SearchResponse struct {
+	KBID    string         `json:"kb_id"`
+	Results []SearchResult `json:"results"`
+}
+
 type Registry struct {
 	SchemaVersion string                   `json:"schema_version"`
 	Indexes       map[string]RegistryEntry `json:"codebase_indexes"`

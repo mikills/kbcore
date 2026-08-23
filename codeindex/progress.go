@@ -9,6 +9,7 @@ import (
 )
 
 const progressInterval = 2 * time.Second
+const phaseProgressInterval = 10 * time.Second
 
 // Progress goes to stderr so it never mixes with the JSON result on stdout.
 type progressReporter struct {
@@ -17,6 +18,7 @@ type progressReporter struct {
 	now        func() time.Time
 	started    time.Time
 	last       time.Time
+	phaseLast  time.Time
 	totalFiles int
 	files      int
 	chunks     int
@@ -66,6 +68,26 @@ func (p *progressReporter) recoveryDeferred(journalPath string, err error) {
 		return
 	}
 	p.logf("left %s for a later run: %v", filepath.Base(journalPath), err)
+}
+
+func (p *progressReporter) phase(name string) {
+	if p == nil {
+		return
+	}
+	p.logf("%s, elapsed %s", name, p.now().Sub(p.started).Round(time.Second))
+	p.phaseLast = p.now()
+}
+
+func (p *progressReporter) phaseHeartbeat(name string) {
+	if p == nil {
+		return
+	}
+	now := p.now()
+	if now.Sub(p.phaseLast) < phaseProgressInterval {
+		return
+	}
+	p.phaseLast = now
+	p.logf("%s, elapsed %s", name, now.Sub(p.started).Round(time.Second))
 }
 
 func (p *progressReporter) fileChunked(chunks int) {

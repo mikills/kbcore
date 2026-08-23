@@ -33,9 +33,10 @@ The threshold is `large_repo_files` in the config, or `--large-repo-files`, and
 `require_confirm: false` turns the prompt off entirely.
 
 `codebase` and `refresh` are the same command. A run hashes the current files,
-uploads changed chunks, waits for Minnow to publish them, deletes stale chunk
-IDs, and saves the new state atomically. Re-running after edits uploads only
-what changed.
+uploads changed chunks, submits hosted publication and scope finalization, and
+saves the new state atomically. Re-running after edits uploads only what
+changed. If the process stops, the hosted finalization continues and the next
+invocation skips files and chunks already confirmed by its journal.
 
 The JSON result on stdout carries the `kb_id`, which is what searching needs.
 
@@ -55,10 +56,9 @@ when no new file has been chunked. `--quiet` suppresses both the progress and th
 its flag description mentioning only JSON.
 
 Work happens between the `scanned` line and the first `chunked` line: a health
-check against Minnow, retried up to five times at a flat poll interval, and
-recovery of any journal left by an interrupted run, which deletes orphaned
-chunks in batches. A pause there is normal. A long one is diagnosed in the
-`codeindex-troubleshoot` skill.
+check against Minnow and recovery of any interrupted checkpoint. Publication
+and scope finalization have their own elapsed-time progress. A long pause is
+diagnosed in the `codeindex-troubleshoot` skill.
 
 ## Check state
 

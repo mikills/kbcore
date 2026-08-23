@@ -38,8 +38,9 @@ type ragIngestRequest struct {
 }
 
 type ragCommitRequest struct {
-	KBID      string `json:"kb_id"`
-	SessionID string `json:"session_id"`
+	KBID      string                 `json:"kb_id"`
+	SessionID string                 `json:"session_id"`
+	Scope     *kb.SessionCommitScope `json:"scope,omitempty"`
 }
 
 type ragIngestDocIn struct {
@@ -137,7 +138,13 @@ func releaseIngestSession(ctx context.Context, sessions *kb.IngestSessions, kbID
 	if sessionID == "" || sessionID == strings.TrimSpace(priorID) {
 		return
 	}
-	_ = sessions.Release(ctx, kbID, sessionID)
+	_ = releaseHeldSession(ctx, sessions, kbID, sessionID)
+}
+
+func releaseHeldSession(ctx context.Context, sessions *kb.IngestSessions, kbID, sessionID string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return sessions.Release(cleanupCtx, kbID, sessionID)
 }
 
 func handleRagCommit(c echo.Context, deps Dependencies, sessions *kb.IngestSessions) error {
@@ -155,25 +162,52 @@ func handleRagCommit(c echo.Context, deps Dependencies, sessions *kb.IngestSessi
 			map[string]any{errorResponseKey: errDeferredPublishDisabled},
 		)
 	}
-	if strings.TrimSpace(req.SessionID) == "" {
-		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "session_id is required"})
+	if req.Scope != nil && strings.TrimSpace(req.Scope.ScopeID) == "" {
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "scope_id is required"})
 	}
-	// Renew rather than Hold, so a lapsed or invented handle cannot publish
-	// whatever the knowledge base happens to be holding.
-	sessionID, err := sessions.Renew(c.Request().Context(), req.KBID, req.SessionID)
-	if err != nil {
-		return writeIngestSessionError(c, deps, sessions, req.KBID, err)
+	if strings.TrimSpace(req.SessionID) == "" && req.Scope == nil {
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "session_id or scope is required"})
+	}
+	openedScopeSession := strings.TrimSpace(req.SessionID) == ""
+	var sessionID string
+	if openedScopeSession {
+		var err error
+		sessionID, err = sessions.Hold(c.Request().Context(), req.KBID, "")
+		if err != nil {
+			return writeIngestSessionError(c, deps, sessions, req.KBID, err)
+		}
+	} else {
+		// Renew rather than Hold, so a lapsed or invented handle cannot publish
+		// whatever the knowledge base happens to be holding.
+		var err error
+		sessionID, err = sessions.Renew(c.Request().Context(), req.KBID, req.SessionID)
+		if err != nil {
+			return writeIngestSessionError(c, deps, sessions, req.KBID, err)
+		}
 	}
 	// Queued, because a full publish outlives any proxy's read timeout.
 	idemKey, correlationID := requestIDs(c)
-	evtID, effectiveIdem, _, err := deps.AppendSessionCommit(
+	evtID, effectiveIdem, created, err := deps.AppendSessionCommit(
 		c.Request().Context(),
-		kb.SessionCommitPayload{KBID: req.KBID, SessionID: sessionID},
+		kb.SessionCommitPayload{
+			KBID: req.KBID, SessionID: sessionID, Scope: req.Scope, ScopeOnly: openedScopeSession,
+		},
 		idemKey,
 		correlationID,
 	)
 	if err != nil {
+		if openedScopeSession {
+			if releaseErr := releaseHeldSession(c.Request().Context(), sessions, req.KBID, sessionID); releaseErr != nil {
+				err = errors.Join(err, fmt.Errorf("release scope session: %w", releaseErr))
+			}
+		}
 		return WriteError(c, err, deps.IsBudgetExceeded)
+	}
+	if openedScopeSession && !created {
+		if err := releaseHeldSession(c.Request().Context(), sessions, req.KBID, sessionID); err != nil {
+			return WriteError(c, fmt.Errorf("release duplicate scope session: %w", err), deps.IsBudgetExceeded)
+		}
+		sessionID = ""
 	}
 	deps.Logger.InfoContext(c.Request().Context(), "rag commit accepted",
 		kbIDContextKey, req.KBID, eventIDResponseKey, evtID)
