@@ -87,6 +87,7 @@ because that is the platform covered by the bundled DuckDB extensions.
 ## Documentation
 
 - [Getting started](docs/getting-started.md) - install, configure, first request.
+- [MCP](docs/mcp.md) - code search, hosted access, client setup, and tool permissions.
 - [Architecture](docs/architecture.md) - components, concurrency, graph extraction.
 - [Data and pipeline](docs/data-lifecycle.md) - storage model, write pipeline, event model, query path.
 - [Configuration reference](docs/configuration.md) - every YAML knob.

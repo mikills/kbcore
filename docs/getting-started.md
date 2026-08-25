@@ -142,8 +142,9 @@ Check registration with `codex mcp get codeindex --json`,
 `claude mcp get codeindex`, or `opencode mcp list`. The local process reads the
 hosted URL and token from the normal codeindex configuration.
 
-For the full MCP tool and gate reference, see the `mcp` section of
-[configuration.md](configuration.md).
+For the full setup, tool permissions, and troubleshooting steps, see
+[MCP](mcp.md). The configuration fields are documented in the [`mcp` section
+of the configuration reference](configuration.md#mcp).
 
 ## Validate a config
 
