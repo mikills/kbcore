@@ -380,6 +380,10 @@ func (s *Store) Seed(ctx context.Context, object journal.Object) (journal.Object
 // SeedBatch inventories remote objects in one bbolt transaction so startup
 // does not fsync once per object. Existing local catalog entries always win.
 func (s *Store) SeedBatch(ctx context.Context, input []journal.Object) error {
+	// bbolt fsyncs on every commit, so an empty batch must not open one.
+	if len(input) == 0 {
+		return ctx.Err()
+	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 	if err := ctx.Err(); err != nil {

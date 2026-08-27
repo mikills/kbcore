@@ -51,6 +51,18 @@ func TestNewDocumentWorkflowScenarios(t *testing.T) {
 		h.AssertInvariants()
 	})
 
+	t.Run("orphaned_shard_gc", func(t *testing.T) {
+		h := sim.New(t, sim.WithSeed(37), sim.WithInvariants(invariants...))
+		OrphanedShardGC(h)
+		h.AssertInvariants()
+	})
+
+	t.Run("scheduled_shard_gc", func(t *testing.T) {
+		h := sim.New(t, sim.WithSeed(41), sim.WithInvariants(invariants...))
+		ScheduledShardGC(h)
+		h.AssertInvariants()
+	})
+
 	t.Run("deferred_commit_under_blob_faults", func(t *testing.T) {
 		h := sim.New(t, sim.WithSeed(31), sim.WithInvariants(invariants...))
 		DeferredCommitUnderBlobFaults(h)

@@ -1,6 +1,6 @@
 module github.com/mikills/minnow
 
-go 1.24.0
+go 1.27.0
 
 require (
 	github.com/alicebob/miniredis/v2 v2.36.1

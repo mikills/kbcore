@@ -1,6 +1,11 @@
 package duckdb
 
-import kb "github.com/mikills/minnow/kb"
+import (
+	"context"
+	"time"
+
+	kb "github.com/mikills/minnow/kb"
+)
 
 // DepOption configures DuckDB-specific fields on DuckDBArtifactDeps.
 type DepOption func(*DuckDBArtifactDeps)
@@ -38,7 +43,10 @@ func NewDepsFromKB(k *kb.KB, opts ...DepOption) DuckDBArtifactDeps {
 		LockFor:                    k.LockFor,
 		AcquireWriteLease:          k.AcquireWriteLease,
 		EnqueueReplacedShardsForGC: k.EnqueueReplacedShardsForGC,
-		Metrics:                    k,
+		ReconcileShardBlobs: func(ctx context.Context, kbID string, active []kb.SnapshotShardMetadata) error {
+			return k.EnqueueOrphanedShardBlobs(ctx, kbID, active, time.Time{})
+		},
+		Metrics: k,
 	}
 	for _, opt := range opts {
 		opt(&deps)

@@ -21,6 +21,7 @@ type ShardStats struct {
 	CompactionFailuresTotal uint64
 	CompactionDurationTotal time.Duration
 	ManifestCASConflicts    uint64
+	ReconcileFailuresTotal  uint64
 	ShardCacheHitsTotal     uint64
 	ShardCacheMissesTotal   uint64
 }
@@ -123,6 +124,18 @@ func (r *ShardRegistry) RecordManifestCASConflict(kbID string) {
 	r.byKB[kbID] = m
 }
 
+func (r *ShardRegistry) RecordShardReconcileFailure(kbID string) {
+	if r == nil || strings.TrimSpace(kbID) == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	kbID = boundedMetricsKey(r.byKB, kbID)
+	m := r.byKB[kbID]
+	m.ReconcileFailuresTotal++
+	r.byKB[kbID] = m
+}
+
 func (r *ShardRegistry) RecordCacheAccess(kbID string, hit bool) {
 	if r == nil || strings.TrimSpace(kbID) == "" {
 		return
@@ -170,6 +183,7 @@ func (r *ShardRegistry) OpenMetricsText() string {
 		"# TYPE minnow_compaction_failures_total counter",
 		"# TYPE minnow_compaction_duration_seconds_sum counter",
 		"# TYPE minnow_manifest_cas_conflicts_total counter",
+		"# TYPE minnow_shard_reconcile_failures_total counter",
 		"# TYPE minnow_shard_cache_hits_total counter",
 		"# TYPE minnow_shard_cache_misses_total counter",
 	}
@@ -191,6 +205,10 @@ func (r *ShardRegistry) OpenMetricsText() string {
 			fmt.Sprintf("minnow_compaction_duration_seconds_sum%s %.6f", labels, m.CompactionDurationTotal.Seconds()),
 		)
 		lines = append(lines, fmt.Sprintf("minnow_manifest_cas_conflicts_total%s %d", labels, m.ManifestCASConflicts))
+		lines = append(
+			lines,
+			fmt.Sprintf("minnow_shard_reconcile_failures_total%s %d", labels, m.ReconcileFailuresTotal),
+		)
 		lines = append(lines, fmt.Sprintf("minnow_shard_cache_hits_total%s %d", labels, m.ShardCacheHitsTotal))
 		lines = append(lines, fmt.Sprintf("minnow_shard_cache_misses_total%s %d", labels, m.ShardCacheMissesTotal))
 	}

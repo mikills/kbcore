@@ -109,6 +109,9 @@ func kbIDMatchesTarget(kbID string, target indexTarget) bool {
 	if kbID == "" || target.KBID == "" {
 		return false
 	}
+	if reserved, mapped := loadReservedMapping(target); mapped && kbID == reserved {
+		return true
+	}
 	return (target.LegacyKBID != "" && (kbID == target.LegacyKBID || validGeneratedKBID(kbID, target.LegacyKBID))) ||
 		kbID == target.KBID || validGeneratedKBID(kbID, target.KBID)
 }
