@@ -16,6 +16,7 @@ type mcpService struct {
 	root     string
 	kbID     string
 	indexKey string
+	startErr error
 }
 
 type mcpCLIOptions struct {
@@ -37,13 +38,24 @@ type mcpSearchInput struct {
 type mcpStatusInput struct{}
 
 func runMCP(ctx context.Context, args []string) int {
+	server := newMCPServer(newMCPService(args))
+	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
+		return writeCommandError(fmt.Errorf("serve codeindex MCP: %w", err), 1)
+	}
+	return 0
+}
+
+// newMCPService keeps a startup failure instead of exiting on it. Clients do
+// not show a server's stderr, so exiting here surfaces only "connection closed"
+// during the handshake, with nothing naming the cause.
+func newMCPService(args []string) *mcpService {
 	opts, err := parseMCPCLIOptions(args)
 	if err != nil {
-		return writeCommandError(err, 2)
+		return &mcpService{startErr: err}
 	}
 	cfg, err := loadConfig(opts.configPath)
 	if err != nil {
-		return writeCommandError(err, 1)
+		return &mcpService{startErr: err}
 	}
 	if strings.TrimSpace(opts.minnowURL) != "" {
 		cfg.Minnow.URL = strings.TrimSpace(opts.minnowURL)
@@ -51,14 +63,20 @@ func runMCP(ctx context.Context, args []string) int {
 	if opts.token != "" {
 		cfg.Minnow.Token = opts.token
 	}
-	service := &mcpService{
-		cfg: cfg, root: opts.root, kbID: opts.kbID, indexKey: opts.indexKey,
+	return &mcpService{cfg: cfg, root: opts.root, kbID: opts.kbID, indexKey: opts.indexKey}
+}
+
+func (s *mcpService) ready() error {
+	if s.startErr == nil {
+		return nil
 	}
-	server := newMCPServer(service)
-	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
-		return writeCommandError(fmt.Errorf("serve codeindex MCP: %w", err), 1)
-	}
-	return 0
+	return fmt.Errorf(
+		"codeindex mcp did not start: %w\n"+
+			"An MCP server does not inherit your shell environment. Forward the "+
+			"variable in the client's server entry: Codex uses env_vars in "+
+			"~/.codex/config.toml, Claude Code uses --env, OpenCode uses environment.",
+		s.startErr,
+	)
 }
 
 func parseMCPCLIOptions(args []string) (mcpCLIOptions, error) {
@@ -106,6 +124,9 @@ func (s *mcpService) search(
 	_ *mcp.CallToolRequest,
 	in mcpSearchInput,
 ) (*mcp.CallToolResult, codeSearchResponse, error) {
+	if err := s.ready(); err != nil {
+		return nil, codeSearchResponse{}, err
+	}
 	in.Query = strings.TrimSpace(in.Query)
 	if in.Query == "" {
 		return nil, codeSearchResponse{}, fmt.Errorf("query is required")
@@ -159,6 +180,9 @@ func (s *mcpService) status(
 	_ *mcp.CallToolRequest,
 	in mcpStatusInput,
 ) (*mcp.CallToolResult, indexStatus, error) {
+	if err := s.ready(); err != nil {
+		return nil, indexStatus{}, err
+	}
 	target, state, checkpoint, err := s.selection()
 	if err != nil {
 		return nil, indexStatus{}, err

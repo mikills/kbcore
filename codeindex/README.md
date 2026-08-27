@@ -99,6 +99,12 @@ codex mcp add codeindex -- codeindex mcp --root /path/to/repository
 claude mcp add --scope project codeindex -- codeindex mcp --root /path/to/repository
 ```
 
+The client launches the server as its own process, so a token referenced as
+`${MINNOW_TOKEN}` has to be forwarded in the server entry. Codex names it in
+`env_vars`, Claude Code takes `-e MINNOW_TOKEN="$MINNOW_TOKEN"`. Without it the
+server answers every tool call with the variable it could not read. See
+[docs/mcp.md](../docs/mcp.md).
+
 It exposes `codeindex_search` and `codeindex_status`. It cannot refresh or
 remove an index. Switching branches changes the selected scope without changing
 the MCP configuration. If indexing used `--kb` or `--index-key`, pass the same

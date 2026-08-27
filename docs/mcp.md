@@ -36,7 +36,10 @@ The hooks refresh the index after commits, checkouts, merges, and rebases. An
 interrupted run records acknowledged batches and continues from them when the
 command runs again.
 
-Register the read-only MCP server with the same repository root:
+Register the read-only MCP server with the same repository root. A client starts
+the server as its own process, which does not inherit the environment of the
+shell you register from, so a config using `${MINNOW_TOKEN}` needs that variable
+forwarded explicitly:
 
 ```bash
 # Codex
@@ -44,6 +47,24 @@ codex mcp add codeindex -- codeindex mcp --root /path/to/repository
 
 # Claude Code
 claude mcp add --scope local codeindex -- \
+  codeindex mcp --root /path/to/repository
+```
+
+Then name the variable in the server entry. Codex forwards by name through
+`env_vars` in `~/.codex/config.toml`, which keeps the token out of the file:
+
+```toml
+[mcp_servers.codeindex]
+command = "codeindex"
+args = ["mcp", "--root", "/path/to/repository"]
+env_vars = ["MINNOW_TOKEN"]
+```
+
+Claude Code takes `KEY=VALUE` pairs, so pass the variable through the shell
+rather than pasting the token:
+
+```bash
+claude mcp add --scope local -e MINNOW_TOKEN="$MINNOW_TOKEN" codeindex -- \
   codeindex mcp --root /path/to/repository
 ```
 
@@ -56,11 +77,16 @@ For OpenCode, add this to `opencode.jsonc`:
     "codeindex": {
       "type": "local",
       "command": ["codeindex", "mcp", "--root", "/path/to/repository"],
+      "environment": { "MINNOW_TOKEN": "{env:MINNOW_TOKEN}" },
       "enabled": true
     }
   }
 }
 ```
+
+Forwarding only names the variable. Export `MINNOW_TOKEN` in the environment the
+client itself starts from, and note that `-e KEY=VALUE` stores whatever the
+shell expanded, so re-run it after rotating the token.
 
 Restart the client after registration. The server provides two tools:
 
@@ -75,6 +101,12 @@ the installed Git hooks.
 If the index used `--kb` or `--index-key`, pass the same flag to
 `codeindex mcp`. Register a separate MCP server name for each checkout that an
 agent needs to search.
+
+A server that cannot read its config still completes the handshake and reports
+the reason from the first tool call, because clients do not show a server's
+standard error. If `codeindex_search` answers with a missing environment
+variable, the token is not reaching the server and the registration needs the
+forwarding above.
 
 ## Connect to hosted Minnow
 
