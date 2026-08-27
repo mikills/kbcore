@@ -561,6 +561,26 @@ func TestStateScope(t *testing.T) {
 	require.ErrorContains(t, err, "state scope does not match")
 }
 
+func TestReservedState(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init", "-b", "main")
+	target, err := resolveTarget(indexCLIOptions{root: root})
+	require.NoError(t, err)
+
+	reserved := target
+	reserved.KBID = "code-repo-previous-identity"
+	saveReservedKBID(reserved)
+	state := emptyIndexState(target)
+	state.KBID = reserved.KBID
+	_, err = saveIndexState(target, state)
+	require.NoError(t, err)
+
+	loaded, _, exists, err := loadIndexState(target)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, reserved.KBID, loaded.KBID)
+}
+
 func TestLocalLegacy(t *testing.T) {
 	root := t.TempDir()
 	runTestGit(t, root, "init", "-b", "main")

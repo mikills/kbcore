@@ -794,7 +794,16 @@ func (f *DuckDBArtifactFormat) publishMutationSnapshotAttempt(
 		return "", 0, err
 	}
 	newVersion, err := f.publishMutationManifest(ctx, kbID, artifacts, expectedManifestVersion)
-	return newVersion, len(artifacts), err
+	if err != nil {
+		return "", 0, err
+	}
+	if f.deps.ReconcileShardBlobs != nil {
+		if gcErr := f.deps.ReconcileShardBlobs(ctx, kbID, artifacts); gcErr != nil {
+			slog.Default().WarnContext(ctx, "orphaned shard reconcile failed",
+				logKeyKBID, kbID, logKeyError, gcErr)
+		}
+	}
+	return newVersion, len(artifacts), nil
 }
 
 func (f *DuckDBArtifactFormat) auditStagedShardBlobs(ctx context.Context, artifacts []kb.SnapshotShardMetadata) error {

@@ -265,6 +265,10 @@ func (l *KB) recordShardExecution(kbID string, shardCount int) {
 
 func (l *KB) recordShardExecutionFailure(kbID string) { l.shardMetrics.RecordExecutionFailure(kbID) }
 
+func (l *KB) recordShardReconcileFailure(kbID string) {
+	l.shardMetrics.RecordShardReconcileFailure(kbID)
+}
+
 func (l *KB) recordCompactionResult(kbID string, duration time.Duration, result *CompactionPublishResult, err error) {
 	l.shardMetrics.RecordCompaction(kbID, duration, result != nil && result.Performed, err)
 }
@@ -610,9 +614,12 @@ func (l *KB) RegisterDefaultJobs(s *Scheduler) error {
 func (l *KB) runScheduledJob(ctx context.Context, jobID string) error {
 	switch jobID {
 	case ShardGCJobID:
+		// Reconcile runs last: it is the expensive step and the job's context
+		// is capped at the scheduler lease, so it must not starve the sweeps.
 		_, shardErr := l.SweepDelayedShardGC(ctx, time.Time{})
 		_, scopeErr := l.SweepScopeGC(ctx, time.Time{})
-		return errors.Join(shardErr, scopeErr)
+		reconcileErr := l.ReconcileShardBlobsForAllKBs(ctx, time.Time{})
+		return errors.Join(shardErr, scopeErr, reconcileErr)
 	case EventReaperJobID:
 		_, err := l.EventStore.Requeue(ctx, l.Clock.Now())
 		return err

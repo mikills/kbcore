@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/mikills/minnow/kb/manifest"
 )
@@ -77,6 +78,9 @@ func (l *KB) UploadSnapshotShardedIfMatch(
 	}
 
 	l.recordShardCount(kbID, len(artifacts))
+	if err := l.EnqueueOrphanedShardBlobs(ctx, kbID, artifacts, time.Time{}); err != nil {
+		slog.Default().WarnContext(ctx, "orphaned shard scan failed", logKeyKBID, kbID, logKeyError, err)
+	}
 	return &BlobObjectInfo{Key: ShardManifestKey(kbID), Version: newVersion}, nil
 }
 

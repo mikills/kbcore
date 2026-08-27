@@ -460,11 +460,12 @@ func (s *Store) List(ctx context.Context, prefix string) ([]blobstore.ObjectInfo
 		return nil, err
 	}
 	merged := make(map[string]blobstore.ObjectInfo, len(remoteObjects))
+	seeds := make([]journal.Object, 0, len(remoteObjects))
 	for _, remote := range remoteObjects {
 		if s.reservedKey(remote.Key) {
 			continue
 		}
-		_, seedErr := s.journal.Seed(ctx, journal.Object{
+		seeds = append(seeds, journal.Object{
 			Key:           remote.Key,
 			Version:       remote.Version,
 			RemoteVersion: remote.Version,
@@ -472,10 +473,10 @@ func (s *Store) List(ctx context.Context, prefix string) ([]blobstore.ObjectInfo
 			Size:          remote.Size,
 			Replicated:    true,
 		})
-		if seedErr != nil {
-			return nil, mapJournalError(seedErr)
-		}
 		merged[remote.Key] = remote
+	}
+	if err := s.journal.SeedBatch(ctx, seeds); err != nil {
+		return nil, mapJournalError(err)
 	}
 	overlay, err := s.journal.Scan(ctx, prefix)
 	if err != nil {

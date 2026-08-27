@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math/rand"
 	"sync"
+	"time"
 
 	kb "github.com/mikills/minnow/kb"
 )
@@ -31,6 +32,8 @@ type FaultableBlobStore struct {
 	mu     sync.Mutex
 	faults BlobFaults
 	rng    *rand.Rand
+	clock  kb.Clock
+	writes map[string]time.Time
 }
 
 // NewFaultableBlobStore wraps inner with seeded fault injection.
@@ -38,7 +41,42 @@ func NewFaultableBlobStore(inner kb.BlobStore, faults BlobFaults, rng *rand.Rand
 	if rng == nil {
 		rng = rand.New(rand.NewSource(1))
 	}
-	return &FaultableBlobStore{inner: inner, faults: faults, rng: rng}
+	return &FaultableBlobStore{inner: inner, faults: faults, rng: rng, writes: map[string]time.Time{}}
+}
+
+// UseClock takes object write times from the simulated clock. Real mtimes race
+// the harness clock and make age-sensitive behaviour non-deterministic.
+func (s *FaultableBlobStore) UseClock(clock kb.Clock) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clock = clock
+}
+
+func (s *FaultableBlobStore) recordWrite(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.clock == nil {
+		return
+	}
+	s.writes[key] = s.clock.Now()
+}
+
+func (s *FaultableBlobStore) forgetWrite(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.writes, key)
+}
+
+func (s *FaultableBlobStore) stamp(info *kb.BlobObjectInfo) *kb.BlobObjectInfo {
+	if info == nil {
+		return info
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if written, ok := s.writes[info.Key]; ok {
+		info.UpdatedAt = written
+	}
+	return info
 }
 
 // SetFaults replaces the active fault configuration mid-run.
@@ -65,7 +103,14 @@ func (s *FaultableBlobStore) Head(ctx context.Context, key string) (*kb.BlobObje
 	if s.rollFault(func(f BlobFaults) float64 { return f.HeadFailRate }) {
 		return nil, ErrInjected
 	}
-	return s.inner.Head(ctx, key)
+	info, err := s.inner.Head(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if info != nil && info.Key == "" {
+		info.Key = key
+	}
+	return s.stamp(info), nil
 }
 
 func (s *FaultableBlobStore) DownloadBytes(ctx context.Context, key string) ([]byte, error) {
@@ -91,7 +136,12 @@ func (s *FaultableBlobStore) UploadBytesIfMatch(
 	if s.rollFault(func(f BlobFaults) float64 { return f.UploadFailRate }) {
 		return nil, ErrInjected
 	}
-	return s.inner.UploadBytesIfMatch(ctx, key, data, expectedVersion)
+	info, err := s.inner.UploadBytesIfMatch(ctx, key, data, expectedVersion)
+	if err != nil {
+		return nil, err
+	}
+	s.recordWrite(key)
+	return info, nil
 }
 
 func (s *FaultableBlobStore) UploadIfMatch(
@@ -103,7 +153,12 @@ func (s *FaultableBlobStore) UploadIfMatch(
 	if s.rollFault(func(f BlobFaults) float64 { return f.UploadFailRate }) {
 		return nil, ErrInjected
 	}
-	return s.inner.UploadIfMatch(ctx, key, src, expectedVersion)
+	info, err := s.inner.UploadIfMatch(ctx, key, src, expectedVersion)
+	if err != nil {
+		return nil, err
+	}
+	s.recordWrite(key)
+	return info, nil
 }
 
 func (s *FaultableBlobStore) UploadIfNotExists(
@@ -120,19 +175,35 @@ func (s *FaultableBlobStore) UploadIfNotExists(
 	if !ok {
 		return nil, errors.New("create-only upload unsupported")
 	}
-	return store.UploadIfNotExists(ctx, key, src)
+	info, err := store.UploadIfNotExists(ctx, key, src)
+	if err != nil {
+		return nil, err
+	}
+	s.recordWrite(key)
+	return info, nil
 }
 
 func (s *FaultableBlobStore) Delete(ctx context.Context, key string) error {
 	if s.rollFault(func(f BlobFaults) float64 { return f.DeleteFailRate }) {
 		return ErrInjected
 	}
-	return s.inner.Delete(ctx, key)
+	if err := s.inner.Delete(ctx, key); err != nil {
+		return err
+	}
+	s.forgetWrite(key)
+	return nil
 }
 
 func (s *FaultableBlobStore) List(ctx context.Context, prefix string) ([]kb.BlobObjectInfo, error) {
 	if s.rollFault(func(f BlobFaults) float64 { return f.ListFailRate }) {
 		return nil, ErrInjected
 	}
-	return s.inner.List(ctx, prefix)
+	objects, err := s.inner.List(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	for i := range objects {
+		s.stamp(&objects[i])
+	}
+	return objects, nil
 }

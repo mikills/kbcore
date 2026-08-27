@@ -46,6 +46,7 @@ type DuckDBArtifactDeps struct {
 	LockFor                    func(string) *sync.Mutex
 	AcquireWriteLease          func(ctx context.Context, kbID string) (kb.WriteLeaseManager, *kb.WriteLease, error)
 	EnqueueReplacedShardsForGC func(kbID string, shards []kb.SnapshotShardMetadata, now time.Time)
+	ReconcileShardBlobs        func(ctx context.Context, kbID string, active []kb.SnapshotShardMetadata) error
 	Metrics                    kb.ShardMetricsObserver
 }
 
@@ -591,19 +592,18 @@ func selectShardsForWarm(shards []kb.SnapshotShardMetadata, n int) []kb.Snapshot
 }
 
 func kbIDsFromManifestObjects(objects []kb.BlobObjectInfo) []string {
-	const suffix = ".duckdb.manifest.json"
 	seen := make(map[string]struct{})
 	ids := make([]string, 0)
 	for _, obj := range objects {
-		if strings.HasSuffix(obj.Key, suffix) {
-			id := strings.TrimSuffix(obj.Key, suffix)
-			if id != "" {
-				if _, ok := seen[id]; !ok {
-					seen[id] = struct{}{}
-					ids = append(ids, id)
-				}
-			}
+		id, ok := kb.KBIDFromManifestKey(obj.Key)
+		if !ok {
+			continue
 		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
 	}
 	return ids
 }

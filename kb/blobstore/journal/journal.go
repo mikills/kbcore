@@ -134,6 +134,9 @@ type Store interface {
 	// Seed records an already-remote object only if the key has no local
 	// catalog record. It never overwrites a local mutation or tombstone.
 	Seed(ctx context.Context, object Object) (Object, error)
+	// SeedBatch applies Seed in one transaction, so a listing does not fsync
+	// once per key.
+	SeedBatch(ctx context.Context, objects []Object) error
 	// ReconcileRemote atomically applies a complete remote namespace snapshot:
 	// replicated records are replaced or removed to match the snapshot, while
 	// unreplicated current objects and their pending chains are retained.

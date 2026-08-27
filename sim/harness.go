@@ -94,6 +94,7 @@ func New(t *testing.T, opts ...Option) *Harness {
 
 	inner := &kb.LocalBlobStore{Root: blobRoot}
 	blobs := NewFaultableBlobStore(inner, cfg.faults, rand.New(rand.NewSource(cfg.seed)))
+	blobs.UseClock(clock)
 
 	manifest := &kb.BlobManifestStore{Store: blobs}
 
@@ -128,7 +129,10 @@ func New(t *testing.T, opts ...Option) *Harness {
 		LockFor:                    loader.LockFor,
 		AcquireWriteLease:          loader.AcquireWriteLease,
 		EnqueueReplacedShardsForGC: loader.EnqueueReplacedShardsForGC,
-		Metrics:                    loader,
+		ReconcileShardBlobs: func(ctx context.Context, kbID string, active []kb.SnapshotShardMetadata) error {
+			return loader.EnqueueOrphanedShardBlobs(ctx, kbID, active, time.Time{})
+		},
+		Metrics: loader,
 	})
 	require.NoError(t, err)
 	require.NoError(t, loader.RegisterFormat(format))
