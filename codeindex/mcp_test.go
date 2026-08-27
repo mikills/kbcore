@@ -207,3 +207,28 @@ func TestMCPIdentityOverrides(t *testing.T) {
 		})
 	}
 }
+
+// Clients hide a server's stderr, so exiting on a bad config shows only a
+// closed connection during the handshake.
+func TestMCPStartupFailure(t *testing.T) {
+	t.Run("serves_despite_missing_config", func(t *testing.T) {
+		service := newMCPService([]string{"--config", filepath.Join(t.TempDir(), "absent.yaml")})
+		require.Error(t, service.ready())
+
+		_, _, err := service.status(context.Background(), nil, mcpStatusInput{})
+		require.ErrorContains(t, err, "codeindex mcp did not start")
+		require.ErrorContains(t, err, "env_vars")
+	})
+
+	t.Run("reports_from_search_too", func(t *testing.T) {
+		service := newMCPService([]string{"--root", ""})
+		_, _, err := service.search(context.Background(), nil, mcpSearchInput{Query: "anything"})
+		require.ErrorContains(t, err, "codeindex mcp did not start")
+	})
+
+	t.Run("ready_when_config_loads", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("minnow:\n  url: https://example.com\n"), 0o644))
+		require.NoError(t, newMCPService([]string{"--config", path, "--root", "."}).ready())
+	})
+}
