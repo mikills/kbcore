@@ -262,3 +262,32 @@ func TestScopeGCScale(t *testing.T) {
 	}
 	require.Less(t, bytes, int64(12<<20))
 }
+
+// Close cancels the mutation context, and a renew tick racing that must not
+// fail a mutation that already finished.
+func TestScopeMutationRenewIgnoresShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mutation := &scopeMutation{
+		ctx: ctx, cancel: cancel, ttl: 3 * time.Millisecond,
+		lease: &WriteLease{}, done: make(chan struct{}),
+	}
+	mutation.manager = cancelDuringRenew{cancel: cancel}
+
+	mutation.wg.Add(1)
+	mutation.renew()
+
+	require.NoError(t, mutation.err)
+}
+
+// cancelDuringRenew cancels the mutation from inside Renew, reproducing a tick
+// that wins the select and only then observes the shutdown.
+type cancelDuringRenew struct {
+	WriteLeaseManager
+	cancel context.CancelFunc
+}
+
+func (c cancelDuringRenew) Renew(context.Context, *WriteLease, time.Duration) (*WriteLease, error) {
+	c.cancel()
+	return nil, context.Canceled
+}

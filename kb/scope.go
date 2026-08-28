@@ -160,6 +160,11 @@ func (m *scopeMutation) renew() {
 		case <-ticker.C:
 			renewed, err := m.manager.Renew(m.ctx, m.lease, m.ttl)
 			if err != nil {
+				// Close cancels this context, and a tick racing it would
+				// otherwise fail a mutation that already succeeded.
+				if m.ctx.Err() != nil {
+					return
+				}
 				m.errMu.Lock()
 				m.err = fmt.Errorf("renew scope mutation lease: %w", err)
 				m.errMu.Unlock()
