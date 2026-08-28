@@ -95,6 +95,9 @@ func (s *mcpService) ready() error {
 
 func writeMCPUsage() int {
 	opts := defaultMCPCLIOptions()
+	// PrintDefaults would otherwise put the value of CODEINDEX_TOKEN into
+	// terminal scrollback, CI logs, and pasted bug reports.
+	opts.token = ""
 	fs := newMCPFlagSet(&opts)
 	fs.SetOutput(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Usage: codeindex mcp [flags]")

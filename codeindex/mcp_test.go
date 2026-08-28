@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -253,6 +254,32 @@ func TestMCPStartupFailure(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, []byte("minnow:\n  url: https://example.com\n"), 0o644))
 		require.NoError(t, newMCPService(mcpCLIOptions{configPath: path, root: "."}).ready())
 	})
+}
+
+func TestMCPUsageOutput(t *testing.T) {
+	t.Setenv("CODEINDEX_TOKEN", "super-secret-value")
+	t.Setenv("CODEINDEX_REPO_ROOT", "")
+
+	usage := captureStderr(t, func() { require.Equal(t, 2, writeMCPUsage()) })
+
+	require.Contains(t, usage, "Usage: codeindex mcp")
+	require.Contains(t, usage, `(default ".")`)
+	require.NotContains(t, usage, "super-secret-value")
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	read, write, err := os.Pipe()
+	require.NoError(t, err)
+	original := os.Stderr
+	os.Stderr = write
+	defer func() { os.Stderr = original }()
+
+	fn()
+	require.NoError(t, write.Close())
+	out, err := io.ReadAll(read)
+	require.NoError(t, err)
+	return string(out)
 }
 
 // A wrong command line is visible to whoever typed it, so it must not start a
