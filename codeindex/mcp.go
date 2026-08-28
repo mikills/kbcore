@@ -107,8 +107,6 @@ func writeMCPUsage() int {
 	return 2
 }
 
-// withoutURLCredentials strips userinfo, which net/http would otherwise send as
-// a Basic-auth header, making it as much a secret as the bearer token.
 // withoutURLCredentials strips userinfo, which net/http sends as a Basic-auth
 // header, making it as much a secret as the bearer token. Anything else holding
 // an @ is redacted whole: a separator inside the userinfo can truncate the
