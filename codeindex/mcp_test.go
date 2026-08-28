@@ -258,12 +258,15 @@ func TestMCPStartupFailure(t *testing.T) {
 
 func TestMCPUsageOutput(t *testing.T) {
 	t.Setenv("CODEINDEX_TOKEN", "super-secret-value")
+	t.Setenv("CODEINDEX_MINNOW_URL", "https://user:super-secret-value@minnow.example.com")
 	t.Setenv("CODEINDEX_REPO_ROOT", "")
+	t.Setenv("MINNOW_REPO_ROOT", "")
 
 	usage := captureStderr(t, func() { require.Equal(t, 2, writeMCPUsage()) })
 
 	require.Contains(t, usage, "Usage: codeindex mcp")
 	require.Contains(t, usage, `(default ".")`)
+	require.Contains(t, usage, "https://minnow.example.com")
 	require.NotContains(t, usage, "super-secret-value")
 }
 

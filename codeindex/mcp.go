@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 
@@ -95,14 +96,26 @@ func (s *mcpService) ready() error {
 
 func writeMCPUsage() int {
 	opts := defaultMCPCLIOptions()
-	// PrintDefaults would otherwise put the value of CODEINDEX_TOKEN into
-	// terminal scrollback, CI logs, and pasted bug reports.
+	// PrintDefaults would otherwise put a credential into terminal scrollback,
+	// CI logs, and pasted bug reports.
 	opts.token = ""
+	opts.minnowURL = withoutURLCredentials(opts.minnowURL)
 	fs := newMCPFlagSet(&opts)
 	fs.SetOutput(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Usage: codeindex mcp [flags]")
 	fs.PrintDefaults()
 	return 2
+}
+
+// withoutURLCredentials strips userinfo, which net/http would otherwise send as
+// a Basic-auth header, making it as much a secret as the bearer token.
+func withoutURLCredentials(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.User == nil {
+		return raw
+	}
+	parsed.User = nil
+	return parsed.String()
 }
 
 func defaultMCPCLIOptions() mcpCLIOptions {
