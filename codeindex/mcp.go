@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -38,23 +39,34 @@ type mcpSearchInput struct {
 type mcpStatusInput struct{}
 
 func runMCP(ctx context.Context, args []string) int {
-	server := newMCPServer(newMCPService(args))
-	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
+	// A usage or flag error means the command line is wrong, which the person
+	// running it can see. Only a config failure needs to reach the client.
+	opts, err := parseMCPCLIOptions(args)
+	if errors.Is(err, flag.ErrHelp) {
+		return writeMCPUsage()
+	}
+	if err != nil {
+		return writeCommandError(err, 2)
+	}
+	service := newMCPService(opts)
+	if err := server(service).Run(ctx, &mcp.StdioTransport{}); err != nil {
 		return writeCommandError(fmt.Errorf("serve codeindex MCP: %w", err), 1)
+	}
+	if service.startErr != nil {
+		return 1
 	}
 	return 0
 }
 
-// newMCPService keeps a startup failure instead of exiting on it. Clients do
-// not show a server's stderr, so exiting here surfaces only "connection closed"
+func server(service *mcpService) *mcp.Server { return newMCPServer(service) }
+
+// newMCPService keeps a config failure instead of exiting on it. Clients do not
+// show a server's stderr, so exiting here surfaces only "connection closed"
 // during the handshake, with nothing naming the cause.
-func newMCPService(args []string) *mcpService {
-	opts, err := parseMCPCLIOptions(args)
-	if err != nil {
-		return &mcpService{startErr: err}
-	}
+func newMCPService(opts mcpCLIOptions) *mcpService {
 	cfg, err := loadConfig(opts.configPath)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return &mcpService{startErr: err}
 	}
 	if strings.TrimSpace(opts.minnowURL) != "" {
@@ -70,13 +82,26 @@ func (s *mcpService) ready() error {
 	if s.startErr == nil {
 		return nil
 	}
+	if !errors.Is(s.startErr, errMissingConfigEnv) {
+		return fmt.Errorf("codeindex mcp did not start: %w", s.startErr)
+	}
 	return fmt.Errorf(
 		"codeindex mcp did not start: %w\n"+
 			"An MCP server does not inherit your shell environment. Forward the "+
-			"variable in the client's server entry: Codex uses env_vars in "+
-			"~/.codex/config.toml, Claude Code uses --env, OpenCode uses environment.",
+			"variable in the client's server entry: Codex names it in env_vars in "+
+			"~/.codex/config.toml, Claude Code takes -e NAME=value, OpenCode uses "+
+			"an environment map.",
 		s.startErr,
 	)
+}
+
+func writeMCPUsage() int {
+	var opts mcpCLIOptions
+	fs := newMCPFlagSet(&opts)
+	fs.SetOutput(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Usage: codeindex mcp [flags]")
+	fs.PrintDefaults()
+	return 2
 }
 
 func parseMCPCLIOptions(args []string) (mcpCLIOptions, error) {
@@ -86,14 +111,8 @@ func parseMCPCLIOptions(args []string) (mcpCLIOptions, error) {
 		token:      os.Getenv("CODEINDEX_TOKEN"),
 		root:       firstNonEmpty(os.Getenv("CODEINDEX_REPO_ROOT"), os.Getenv("MINNOW_REPO_ROOT"), "."),
 	}
-	fs := flag.NewFlagSet("codeindex mcp", flag.ContinueOnError)
+	fs := newMCPFlagSet(&opts)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&opts.configPath, "config", opts.configPath, "codeindex config path")
-	fs.StringVar(&opts.minnowURL, "minnow-url", opts.minnowURL, "Minnow HTTP base URL")
-	fs.StringVar(&opts.token, "token", opts.token, "Minnow bearer token")
-	fs.StringVar(&opts.root, "root", opts.root, "repository or directory root")
-	fs.StringVar(&opts.kbID, "kb", "", "knowledge base identity override")
-	fs.StringVar(&opts.indexKey, "index-key", "", "index identity override")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
@@ -104,6 +123,17 @@ func parseMCPCLIOptions(args []string) (mcpCLIOptions, error) {
 		return opts, fmt.Errorf("--root requires a value")
 	}
 	return opts, nil
+}
+
+func newMCPFlagSet(opts *mcpCLIOptions) *flag.FlagSet {
+	fs := flag.NewFlagSet("codeindex mcp", flag.ContinueOnError)
+	fs.StringVar(&opts.configPath, "config", opts.configPath, "codeindex config path")
+	fs.StringVar(&opts.minnowURL, "minnow-url", opts.minnowURL, "Minnow HTTP base URL")
+	fs.StringVar(&opts.token, "token", opts.token, "Minnow bearer token")
+	fs.StringVar(&opts.root, "root", opts.root, "repository or directory root")
+	fs.StringVar(&opts.kbID, "kb", "", "knowledge base identity override")
+	fs.StringVar(&opts.indexKey, "index-key", "", "index identity override")
+	return fs
 }
 
 func newMCPServer(service *mcpService) *mcp.Server {

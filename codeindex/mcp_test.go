@@ -208,12 +208,13 @@ func TestMCPIdentityOverrides(t *testing.T) {
 	}
 }
 
-// Clients hide a server's stderr, so exiting on a bad config shows only a
-// closed connection during the handshake.
+// Clients hide a server's stderr, so a config failure has to survive the
+// handshake and come back from a tool call.
 func TestMCPStartupFailure(t *testing.T) {
-	t.Run("serves_despite_missing_config", func(t *testing.T) {
-		service := newMCPService([]string{"--config", filepath.Join(t.TempDir(), "absent.yaml")})
-		require.Error(t, service.ready())
+	t.Run("serves_despite_missing_env", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("minnow:\n  token: ${CODEINDEX_ABSENT_VAR}\n"), 0o644))
+		service := newMCPService(mcpCLIOptions{configPath: path, root: "."})
 
 		_, _, err := service.status(context.Background(), nil, mcpStatusInput{})
 		require.ErrorContains(t, err, "codeindex mcp did not start")
@@ -221,14 +222,51 @@ func TestMCPStartupFailure(t *testing.T) {
 	})
 
 	t.Run("reports_from_search_too", func(t *testing.T) {
-		service := newMCPService([]string{"--root", ""})
+		service := newMCPService(mcpCLIOptions{configPath: filepath.Join(t.TempDir(), "absent.yaml")})
 		_, _, err := service.search(context.Background(), nil, mcpSearchInput{Query: "anything"})
 		require.ErrorContains(t, err, "codeindex mcp did not start")
+	})
+
+	// Telling someone to forward an environment variable when their YAML is
+	// malformed sends them the wrong way.
+	t.Run("omits_env_advice_for_other_failures", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("minnow:\n url: x\n bad: [\n"), 0o644))
+		service := newMCPService(mcpCLIOptions{configPath: path, root: "."})
+
+		_, _, err := service.status(context.Background(), nil, mcpStatusInput{})
+		require.ErrorContains(t, err, "codeindex mcp did not start")
+		require.NotContains(t, err.Error(), "env_vars")
+	})
+
+	// A name forwarded but never exported arrives set and empty.
+	t.Run("empty_env_counts_as_missing", func(t *testing.T) {
+		t.Setenv("CODEINDEX_EMPTY_VAR", "")
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("minnow:\n  token: ${CODEINDEX_EMPTY_VAR}\n"), 0o644))
+
+		require.ErrorIs(t, newMCPService(mcpCLIOptions{configPath: path}).startErr, errMissingConfigEnv)
 	})
 
 	t.Run("ready_when_config_loads", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		require.NoError(t, os.WriteFile(path, []byte("minnow:\n  url: https://example.com\n"), 0o644))
-		require.NoError(t, newMCPService([]string{"--config", path, "--root", "."}).ready())
+		require.NoError(t, newMCPService(mcpCLIOptions{configPath: path, root: "."}).ready())
 	})
+}
+
+// A wrong command line is visible to whoever typed it, so it must not start a
+// server that blocks on stdio forever.
+func TestMCPUsageExits(t *testing.T) {
+	for name, args := range map[string][]string{
+		"help":     {"--help"},
+		"bad_flag": {"--bogus"},
+		"bad_root": {"--root", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseMCPCLIOptions(args)
+			require.Error(t, err)
+		})
+	}
+	require.Equal(t, 2, writeMCPUsage())
 }

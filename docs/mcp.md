@@ -84,9 +84,11 @@ For OpenCode, add this to `opencode.jsonc`:
 }
 ```
 
-Forwarding only names the variable. Export `MINNOW_TOKEN` in the environment the
-client itself starts from, and note that `-e KEY=VALUE` stores whatever the
-shell expanded, so re-run it after rotating the token.
+Codex and OpenCode forward by name, so export `MINNOW_TOKEN` in the environment
+the client itself starts from. Claude Code's `-e` stores the value at add time,
+so export it in the shell you run `claude mcp add` from and re-run that command
+after rotating the token. A name forwarded but never exported reaches the server
+set and empty, which is reported the same way as absent.
 
 Restart the client after registration. The server provides two tools:
 
