@@ -57,7 +57,13 @@ missing environment variables: MINNOW_TOKEN
 The config references `${MINNOW_TOKEN}` but the variable is not exported in the
 current shell. Export it, or persist it in the shell profile. Sourcing a
 profile that only defines the variable inside a conditional block will not fix
-it.
+it. A variable that is set but empty is reported the same way.
+
+Under an MCP client the same message comes back from every tool call rather
+than the terminal, because the client starts the server without the shell it
+was registered from. Name the variable in the server entry: `env_vars` for
+Codex, `-e NAME=value` for Claude Code, an `environment` map for OpenCode. See
+the `codeindex-setup` skill.
 
 ## A token that is accepted, then rejected
 

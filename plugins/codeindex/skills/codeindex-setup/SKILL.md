@@ -97,10 +97,38 @@ claude mcp add --scope project codeindex -- \
   codeindex mcp --root /path/to/repository
 ```
 
+The client starts the server as its own process, which does not inherit the
+shell it was registered from. A config referencing `${MINNOW_TOKEN}` therefore
+needs that variable named in the server entry. Codex forwards by name, which
+keeps the token out of the file:
+
+```toml
+[mcp_servers.codeindex]
+command = "codeindex"
+args = ["mcp", "--root", "/path/to/repository"]
+env_vars = ["MINNOW_TOKEN"]
+```
+
+Claude Code takes `KEY=VALUE`, so pass it through the shell rather than pasting
+the token, and re-run after rotating it:
+
+```bash
+claude mcp add --scope project -e MINNOW_TOKEN="$MINNOW_TOKEN" codeindex -- \
+  codeindex mcp --root /path/to/repository
+```
+
+OpenCode takes an `environment` map in `opencode.jsonc`, using
+`"MINNOW_TOKEN": "{env:MINNOW_TOKEN}"`.
+
+Without forwarding, every tool call answers with the variable the server could
+not read. A name that is forwarded but never exported arrives set and empty and
+is reported the same way.
+
 If indexing used `--kb` or `--index-key`, pass the same flags to `codeindex mcp`.
 
-The MCP process reads the hosted Minnow URL and token from the normal codeindex
-configuration. It exposes search and status only; `codeindex hooks install`
-keeps the index current after Git changes.
+The MCP process reads the hosted Minnow URL from the normal codeindex
+configuration and the token from its own environment. It exposes search and
+status only; `codeindex hooks install` keeps the index current after Git
+changes.
 
 Once registered, see the `codeindex-search` skill for querying the index.
