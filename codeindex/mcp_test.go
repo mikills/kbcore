@@ -271,7 +271,14 @@ func TestWithoutURLCredentials(t *testing.T) {
 		"redacts_one_slash":   {"https:/user:pw@host", "(redacted)"},
 		"redacts_three_slash": {"https:///user:pw@host", "(redacted)"},
 		"redacts_no_scheme":   {"/user:pw@host", "(redacted)"},
-		"keeps_at_in_path":    {"https://host/@scope/pkg", "https://host/@scope/pkg"},
+		// An @ this parse did not read as userinfo is redacted whole rather
+		// than reasoned about, so a path @ is redacted too.
+		"redacts_at_in_path":  {"https://host/@scope/pkg", "(redacted)"},
+		"redacts_slash_in_pw": {"https://admin:/tR7kQz@minnow.example.com", "(redacted)"},
+		"redacts_port_in_pw":  {"https://admin:8021/tR7kQz@minnow.example.com", "(redacted)"},
+		"redacts_hash_in_pw":  {"https://admin:#tR7kQz@minnow.example.com", "(redacted)"},
+		"redacts_query_in_pw": {"https://admin:?tR7kQz@minnow.example.com", "(redacted)"},
+		"redacts_slash_user":  {"https://ad/min:hunter2@minnow.example.com", "(redacted)"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, tc.want, withoutURLCredentials(tc.raw))

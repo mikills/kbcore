@@ -109,22 +109,18 @@ func writeMCPUsage() int {
 
 // withoutURLCredentials strips userinfo, which net/http would otherwise send as
 // a Basic-auth header, making it as much a secret as the bearer token.
+// withoutURLCredentials strips userinfo, which net/http sends as a Basic-auth
+// header, making it as much a secret as the bearer token. Anything else holding
+// an @ is redacted whole: a separator inside the userinfo can truncate the
+// authority so the credential never reaches parsed.User, and usage text is not
+// worth the chance of printing a password.
 func withoutURLCredentials(raw string) string {
 	trimmed := strings.TrimSpace(raw)
-	parsed, err := url.Parse(trimmed)
-	if err != nil {
-		if strings.Contains(trimmed, "@") {
-			return "(redacted)"
-		}
-		return raw
-	}
-	if parsed.User != nil {
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.User != nil {
 		parsed.User = nil
 		return parsed.String()
 	}
-	// Without an authority there is nowhere for userinfo to be parsed into,
-	// so it stays in Opaque or Path where User never sees it.
-	if parsed.Host == "" && strings.Contains(trimmed, "@") {
+	if strings.Contains(trimmed, "@") {
 		return "(redacted)"
 	}
 	return raw
