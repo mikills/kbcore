@@ -1,0 +1,64 @@
+http:
+  address: 0.0.0.0:8080
+  read_header_timeout: 5s
+  shutdown_timeout: 15s
+
+storage:
+  blob:
+    kind: local
+    root: /var/lib/minnow/blobs
+  cache:
+    dir: /var/lib/minnow/cache
+    max_bytes: 536870912 # 512 MiB
+    entry_ttl: 30m
+    warm_shards: 0
+    evict_interval: 30s
+
+format:
+  kind: duckdb
+  duckdb:
+    # MINNOW_DUCKDB_MEMORY_LIMIT overrides this without rebuilding the image.
+    memory_limit: 128MB
+    extension_dir: /opt/minnow/extensions
+    offline: true
+
+embedder:
+  provider: ollama
+  ollama:
+    # host.docker.internal reaches Ollama on the host, not inside this container.
+    url: http://host.docker.internal:11434
+    model: all-minilm
+
+scheduler:
+  enabled: true
+  tick_interval: 1m
+
+workers:
+  defaults:
+    max_attempts: 5
+    poll_interval: 500ms
+    visibility_timeout: 5m
+  document_upsert:
+    concurrency: 2
+  document_chunked:
+    concurrency: 2
+  document_publish:
+    concurrency: 1
+  media_upload:
+    concurrency: 1
+
+sharding:
+  query_shard_fanout: 2
+  query_shard_fanout_adaptive_max: 2
+  query_shard_parallelism: 1
+
+mcp:
+  enabled: true
+  transports: [http]
+  http_path: /mcp
+  read_only: false
+  allow_indexing: true
+  allow_sync_indexing: true
+  allow_destructive: false
+  allow_admin: false
+  http_stateless: true

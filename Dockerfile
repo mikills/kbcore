@@ -24,6 +24,8 @@ RUN apt-get update \
 COPY --from=build /out/minnow /usr/local/bin/minnow
 COPY --chown=minnow:minnow extensions/v1.5.0/linux_amd64/ /opt/minnow/extensions/v1.5.0/linux_amd64/
 COPY --chown=minnow:minnow deploy/docker/minnow.yaml /etc/minnow/minnow.yaml
+COPY --chown=minnow:minnow deploy/docker/minnow.yaml /etc/minnow/minnow.openai.yaml
+COPY --chown=minnow:minnow deploy/docker/minnow.ollama.yaml /etc/minnow/minnow.ollama.yaml
 
 USER minnow
 ENV MINNOW_CONFIG=/etc/minnow/minnow.yaml \

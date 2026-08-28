@@ -1,0 +1,9 @@
+# Build the image from this checkout instead of pulling the published one:
+#   docker compose -f compose.yaml -f compose.build.yaml up --build
+services:
+  minnow:
+    build:
+      context: .
+      target: runtime
+      platforms: [linux/amd64]
+    image: minnow:local

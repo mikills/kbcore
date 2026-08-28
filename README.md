@@ -7,10 +7,34 @@ Embedded vector search for Go. DuckDB-backed, HNSW-indexed, multi-tenant via per
 
 ## Quickstart
 
+One command installs the `codeindex` CLI and starts a local Minnow in Docker:
+
 ```bash
-go run .
+curl -fsSL https://raw.githubusercontent.com/mikills/minnow/main/install.sh | sh
+```
+
+It defaults to [Ollama](https://ollama.com) for embeddings, so no API key is
+needed. Run `ollama pull all-minilm` first. To use OpenAI instead:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mikills/minnow/main/install.sh |
+  MINNOW_EMBEDDER=openai OPENAI_API_KEY=sk-... sh
+```
+
+Switching embedders changes the vector width, so an index built with one is not
+readable by the other. Pick one before indexing, or delete the `minnow-data`
+volume when you switch.
+
+To run the server without the installer:
+
+```bash
+docker compose up -d              # pulls ghcr.io/mikills/minnow
 curl -s http://127.0.0.1:8080/healthz
 ```
+
+From a source checkout, `go run .` serves the same thing, and
+`docker compose -f compose.yaml -f compose.build.yaml up --build` builds the
+image locally instead of pulling it.
 
 For globally installed MCP use with OpenAI embeddings:
 

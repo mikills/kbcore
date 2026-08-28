@@ -34,7 +34,11 @@ jobs:
         run: |
           OPENAI_API_KEY=test go run . config validate deploy/docker/minnow.yaml
           OPENAI_API_KEY=test go run . config validate deploy/fly/minnow.yaml
-          OPENAI_API_KEY=test docker compose config --quiet
+          go run . config validate deploy/docker/minnow.ollama.yaml
+          docker compose config --quiet
+          MINNOW_EMBEDDER=openai OPENAI_API_KEY=test docker compose config --quiet
+          docker compose -f compose.yaml -f compose.build.yaml config --quiet
+          sh -n install.sh
 
       - name: Test
         run: go test ./... -count=1 -tags=long
@@ -94,9 +98,19 @@ jobs:
         run: |
           set -euo pipefail
           cleanup() {
-            docker rm -f minnow-runtime-ci minnow-fly-ci >/dev/null 2>&1 || true
+            docker rm -f minnow-runtime-ci minnow-ollama-ci minnow-fly-ci >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
+
+          docker run -d --name minnow-ollama-ci \
+            -e MINNOW_CONFIG=/etc/minnow/minnow.ollama.yaml \
+            -p 127.0.0.1:18082:8080 minnow:ci
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:18082/healthz && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18082/healthz
+          docker rm -f minnow-ollama-ci
 
           docker run -d --name minnow-runtime-ci -e OPENAI_API_KEY \
             -p 127.0.0.1:18080:8080 minnow:ci
@@ -150,3 +164,40 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
+
+  release-codeindex:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/codeindex/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release binaries
+        working-directory: codeindex
+        env:
+          GOWORK: off
+          CGO_ENABLED: 0
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#codeindex/}"
+          mkdir -p dist
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            GOOS="$os" GOARCH="$arch" go build -trimpath \
+              -ldflags="-s -w -X main.releaseVersion=$version" \
+              -o "dist/codeindex" .
+            tar -czf "dist/codeindex_${version}_${os}_${arch}.tar.gz" -C dist codeindex
+            rm dist/codeindex
+          done
+          cd dist && sha256sum *.tar.gz > checksums.txt
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" codeindex/dist/* --clobber
