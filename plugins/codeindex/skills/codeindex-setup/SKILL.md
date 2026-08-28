@@ -92,10 +92,16 @@ Register codeindex's read-only local MCP so the agent automatically uses the
 current branch scope:
 
 ```bash
+# Codex
 codex mcp add codeindex -- codeindex mcp --root /path/to/repository
+
+# Claude Code
 claude mcp add --scope project codeindex -- \
   codeindex mcp --root /path/to/repository
 ```
+
+OpenCode is configured in `opencode.jsonc` rather than by a command; the full
+entry is below.
 
 The client starts the server as its own process, which does not inherit the
 shell it was registered from. A config referencing `${MINNOW_TOKEN}` therefore
@@ -117,8 +123,21 @@ claude mcp add --scope project -e MINNOW_TOKEN="$MINNOW_TOKEN" codeindex -- \
   codeindex mcp --root /path/to/repository
 ```
 
-OpenCode takes an `environment` map in `opencode.jsonc`, using
-`"MINNOW_TOKEN": "{env:MINNOW_TOKEN}"`.
+OpenCode takes an `environment` map in `opencode.jsonc`, which also forwards by
+name:
+
+```jsonc
+{
+  "mcp": {
+    "codeindex": {
+      "type": "local",
+      "command": ["codeindex", "mcp", "--root", "/path/to/repository"],
+      "environment": { "MINNOW_TOKEN": "{env:MINNOW_TOKEN}" },
+      "enabled": true
+    }
+  }
+}
+```
 
 Without forwarding, every tool call answers with the variable the server could
 not read. A name that is forwarded but never exported arrives set and empty and
