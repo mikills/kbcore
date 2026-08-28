@@ -113,23 +113,21 @@ func withoutURLCredentials(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	parsed, err := url.Parse(trimmed)
 	if err != nil {
-		// Nothing can be located inside a URL that will not parse, so a
-		// userinfo separator has to be assumed to hide a credential.
 		if strings.Contains(trimmed, "@") {
 			return "(redacted)"
 		}
 		return raw
 	}
-	if parsed.User == nil {
-		// A URL with no // authority parses whole into Opaque, so userinfo
-		// never reaches parsed.User.
-		if strings.Contains(parsed.Opaque, "@") {
-			return "(redacted)"
-		}
-		return raw
+	if parsed.User != nil {
+		parsed.User = nil
+		return parsed.String()
 	}
-	parsed.User = nil
-	return parsed.String()
+	// Without an authority there is nowhere for userinfo to be parsed into,
+	// so it stays in Opaque or Path where User never sees it.
+	if parsed.Host == "" && strings.Contains(trimmed, "@") {
+		return "(redacted)"
+	}
+	return raw
 }
 
 func defaultMCPCLIOptions() mcpCLIOptions {

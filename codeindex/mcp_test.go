@@ -268,6 +268,10 @@ func TestWithoutURLCredentials(t *testing.T) {
 		"keeps_bad_url":       {"https://host:notaport", "https://host:notaport"},
 		"redacts_opaque":      {"user:pw@minnow.example.com", "(redacted)"},
 		"redacts_schemeless":  {"https:user:pw@host", "(redacted)"},
+		"redacts_one_slash":   {"https:/user:pw@host", "(redacted)"},
+		"redacts_three_slash": {"https:///user:pw@host", "(redacted)"},
+		"redacts_no_scheme":   {"/user:pw@host", "(redacted)"},
+		"keeps_at_in_path":    {"https://host/@scope/pkg", "https://host/@scope/pkg"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, tc.want, withoutURLCredentials(tc.raw))
