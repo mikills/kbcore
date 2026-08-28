@@ -256,6 +256,23 @@ func TestMCPStartupFailure(t *testing.T) {
 	})
 }
 
+func TestWithoutURLCredentials(t *testing.T) {
+	for name, tc := range map[string]struct{ raw, want string }{
+		"strips_userinfo":     {"https://user:pw@host/base", "https://host/base"},
+		"strips_username":     {"https://user@host", "https://host"},
+		"keeps_plain":         {"https://host/base", "https://host/base"},
+		"keeps_bare_host":     {"minnow.example.com", "minnow.example.com"},
+		"keeps_empty":         {"", ""},
+		"trims_before_parse":  {"https://user:pw@host/base\r", "https://host/base"},
+		"redacts_unparseable": {"https://user:p%ssw0rd@host", "(redacted)"},
+		"keeps_bad_url":       {"https://host:notaport", "https://host:notaport"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.want, withoutURLCredentials(tc.raw))
+		})
+	}
+}
+
 func TestMCPUsageOutput(t *testing.T) {
 	t.Setenv("CODEINDEX_TOKEN", "super-secret-value")
 	t.Setenv("CODEINDEX_MINNOW_URL", "https://user:super-secret-value@minnow.example.com")
