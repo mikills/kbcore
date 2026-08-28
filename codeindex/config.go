@@ -235,17 +235,24 @@ func writeConfig(path string, cfg Config, force bool) error {
 	return err
 }
 
+// errMissingConfigEnv lets callers tell an unusable environment apart from a
+// malformed config, which need different advice.
+var errMissingConfigEnv = errors.New("missing environment variables")
+
 func expandConfigEnv(raw string) (string, error) {
 	var missing []string
 	expanded := os.Expand(raw, func(name string) string {
+		// A variable forwarded by name but never exported arrives set and
+		// empty, which is as unusable as an absent one.
 		value, ok := os.LookupEnv(name)
-		if !ok {
+		if !ok || strings.TrimSpace(value) == "" {
 			missing = append(missing, name)
+			return ""
 		}
 		return value
 	})
 	if len(missing) != 0 {
-		return "", fmt.Errorf("missing environment variables: %s", strings.Join(missing, ", "))
+		return "", fmt.Errorf("%w: %s", errMissingConfigEnv, strings.Join(missing, ", "))
 	}
 	return expanded, nil
 }

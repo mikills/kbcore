@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -208,12 +209,13 @@ func TestMCPIdentityOverrides(t *testing.T) {
 	}
 }
 
-// Clients hide a server's stderr, so exiting on a bad config shows only a
-// closed connection during the handshake.
+// Clients hide a server's stderr, so a config failure has to survive the
+// handshake and come back from a tool call.
 func TestMCPStartupFailure(t *testing.T) {
-	t.Run("serves_despite_missing_config", func(t *testing.T) {
-		service := newMCPService([]string{"--config", filepath.Join(t.TempDir(), "absent.yaml")})
-		require.Error(t, service.ready())
+	t.Run("serves_despite_missing_env", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("minnow:\n  token: ${CODEINDEX_ABSENT_VAR}\n"), 0o644))
+		service := newMCPService(mcpCLIOptions{configPath: path, root: "."})
 
 		_, _, err := service.status(context.Background(), nil, mcpStatusInput{})
 		require.ErrorContains(t, err, "codeindex mcp did not start")
@@ -221,14 +223,109 @@ func TestMCPStartupFailure(t *testing.T) {
 	})
 
 	t.Run("reports_from_search_too", func(t *testing.T) {
-		service := newMCPService([]string{"--root", ""})
+		service := newMCPService(mcpCLIOptions{configPath: filepath.Join(t.TempDir(), "absent.yaml")})
 		_, _, err := service.search(context.Background(), nil, mcpSearchInput{Query: "anything"})
 		require.ErrorContains(t, err, "codeindex mcp did not start")
+	})
+
+	// Telling someone to forward an environment variable when their YAML is
+	// malformed sends them the wrong way.
+	t.Run("omits_env_advice_for_other_failures", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("minnow:\n url: x\n bad: [\n"), 0o644))
+		service := newMCPService(mcpCLIOptions{configPath: path, root: "."})
+
+		_, _, err := service.status(context.Background(), nil, mcpStatusInput{})
+		require.ErrorContains(t, err, "codeindex mcp did not start")
+		require.NotContains(t, err.Error(), "env_vars")
+	})
+
+	// A name forwarded but never exported arrives set and empty.
+	t.Run("empty_env_counts_as_missing", func(t *testing.T) {
+		t.Setenv("CODEINDEX_EMPTY_VAR", "")
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("minnow:\n  token: ${CODEINDEX_EMPTY_VAR}\n"), 0o644))
+
+		require.ErrorIs(t, newMCPService(mcpCLIOptions{configPath: path}).startErr, errMissingConfigEnv)
 	})
 
 	t.Run("ready_when_config_loads", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		require.NoError(t, os.WriteFile(path, []byte("minnow:\n  url: https://example.com\n"), 0o644))
-		require.NoError(t, newMCPService([]string{"--config", path, "--root", "."}).ready())
+		require.NoError(t, newMCPService(mcpCLIOptions{configPath: path, root: "."}).ready())
 	})
+}
+
+func TestWithoutURLCredentials(t *testing.T) {
+	for name, tc := range map[string]struct{ raw, want string }{
+		"strips_userinfo":     {"https://user:pw@host/base", "https://host/base"},
+		"strips_username":     {"https://user@host", "https://host"},
+		"keeps_plain":         {"https://host/base", "https://host/base"},
+		"keeps_bare_host":     {"minnow.example.com", "minnow.example.com"},
+		"keeps_empty":         {"", ""},
+		"trims_before_parse":  {"https://user:pw@host/base\r", "https://host/base"},
+		"redacts_unparseable": {"https://user:p%ssw0rd@host", "(redacted)"},
+		"keeps_bad_url":       {"https://host:notaport", "https://host:notaport"},
+		"redacts_opaque":      {"user:pw@minnow.example.com", "(redacted)"},
+		"redacts_schemeless":  {"https:user:pw@host", "(redacted)"},
+		"redacts_one_slash":   {"https:/user:pw@host", "(redacted)"},
+		"redacts_three_slash": {"https:///user:pw@host", "(redacted)"},
+		"redacts_no_scheme":   {"/user:pw@host", "(redacted)"},
+		// An @ this parse did not read as userinfo is redacted whole rather
+		// than reasoned about, so a path @ is redacted too.
+		"redacts_at_in_path":  {"https://host/@scope/pkg", "(redacted)"},
+		"redacts_slash_in_pw": {"https://admin:/tR7kQz@minnow.example.com", "(redacted)"},
+		"redacts_port_in_pw":  {"https://admin:8021/tR7kQz@minnow.example.com", "(redacted)"},
+		"redacts_hash_in_pw":  {"https://admin:#tR7kQz@minnow.example.com", "(redacted)"},
+		"redacts_query_in_pw": {"https://admin:?tR7kQz@minnow.example.com", "(redacted)"},
+		"redacts_slash_user":  {"https://ad/min:hunter2@minnow.example.com", "(redacted)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.want, withoutURLCredentials(tc.raw))
+		})
+	}
+}
+
+func TestMCPUsageOutput(t *testing.T) {
+	t.Setenv("CODEINDEX_TOKEN", "super-secret-value")
+	t.Setenv("CODEINDEX_MINNOW_URL", "https://user:super-secret-value@minnow.example.com")
+	t.Setenv("CODEINDEX_REPO_ROOT", "")
+	t.Setenv("MINNOW_REPO_ROOT", "")
+
+	usage := captureStderr(t, func() { require.Equal(t, 2, writeMCPUsage()) })
+
+	require.Contains(t, usage, "Usage: codeindex mcp")
+	require.Contains(t, usage, `(default ".")`)
+	require.Contains(t, usage, "https://minnow.example.com")
+	require.NotContains(t, usage, "super-secret-value")
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	read, write, err := os.Pipe()
+	require.NoError(t, err)
+	original := os.Stderr
+	os.Stderr = write
+	defer func() { os.Stderr = original }()
+
+	fn()
+	require.NoError(t, write.Close())
+	out, err := io.ReadAll(read)
+	require.NoError(t, err)
+	return string(out)
+}
+
+// A wrong command line is visible to whoever typed it, so it must not start a
+// server that blocks on stdio forever. runMCP returns before any transport is
+// built, so calling it here touches neither stdin nor stdout.
+func TestMCPUsageExits(t *testing.T) {
+	for name, args := range map[string][]string{
+		"help":     {"--help"},
+		"bad_flag": {"--bogus"},
+		"bad_root": {"--root", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, 2, runMCP(context.Background(), args))
+		})
+	}
 }
