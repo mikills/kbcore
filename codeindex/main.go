@@ -105,9 +105,16 @@ func runRemove(ctx context.Context, args []string) int {
 	return 0
 }
 
+// Stamped by the release workflow, which cross-compiles with `go build` and so
+// leaves Main.Version as "(devel)".
+var releaseVersion string
+
 // A codeindex/vX.Y.Z tag for installed binaries, a pseudo-version for builds
 // with VCS info. A hardcoded fallback would silently go stale after a release.
 func versionString() string {
+	if releaseVersion != "" {
+		return releaseVersion
+	}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		if v := info.Main.Version; v != "" && v != "(devel)" {
 			return v

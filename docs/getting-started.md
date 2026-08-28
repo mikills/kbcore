@@ -1,6 +1,112 @@
 # Getting Started
 
+## Install script
+
+The fastest path needs only Docker and, for keyless embeddings,
+[Ollama](https://ollama.com):
+
+```bash
+ollama pull all-minilm
+curl -fsSL https://raw.githubusercontent.com/mikills/minnow/main/install.sh | sh
+```
+
+The script downloads a prebuilt `codeindex` binary, verifies its checksum,
+starts Minnow through `docker compose`, waits for `/healthz`, and writes the
+codeindex connection config. It reads these variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CODEINDEX_VERSION` | latest `codeindex/v*` | release tag to install |
+| `CODEINDEX_INSTALL_DIR` | `~/.local/bin` | where the binary goes |
+| `MINNOW_EMBEDDER` | `ollama` | `ollama` or `openai` |
+| `MINNOW_PORT` | `8080` | host port for Minnow |
+| `SKIP_SERVER` | unset | set to `1` to install the CLI only |
+
+The two embedders produce different vector widths, so an index built with one
+cannot be queried with the other. Delete the `minnow-data` volume if you switch.
+
+## Manual install
+
+The script is a convenience. These are the same steps by hand.
+
+### 1. Start Minnow
+
+The published image carries two configs. `MINNOW_EMBEDDER` selects between them:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/mikills/minnow/main/compose.yaml
+docker compose up -d                                   # ollama, no API key
+MINNOW_EMBEDDER=openai OPENAI_API_KEY=sk-... docker compose up -d
+curl -s http://127.0.0.1:8080/healthz
+```
+
+Without compose, name the config yourself:
+
+```bash
+docker run -d --name minnow \
+  -e MINNOW_CONFIG=/etc/minnow/minnow.ollama.yaml \
+  --add-host host.docker.internal:host-gateway \
+  -p 127.0.0.1:8080:8080 -v minnow-data:/var/lib/minnow \
+  ghcr.io/mikills/minnow:latest
+```
+
+The image ships `/etc/minnow/minnow.ollama.yaml` and
+`/etc/minnow/minnow.openai.yaml`. `/etc/minnow/minnow.yaml` stays the OpenAI one
+and is the default when `MINNOW_CONFIG` is unset. The ollama config points at
+`host.docker.internal:11434`, so Ollama runs on the host, not in the container.
+On Linux that hostname needs `--add-host host.docker.internal:host-gateway`,
+which compose already sets.
+
+Compose passes `OPENAI_API_KEY` through only when your shell exports it. Leave
+it unset with `MINNOW_EMBEDDER=openai` and Minnow refuses to start with
+`unresolved env vars: OPENAI_API_KEY` instead of failing later on a 401.
+
+To mount your own config instead of using a baked one:
+
+```bash
+docker run -d -v "$PWD/minnow.yaml:/etc/minnow/custom.yaml:ro" \
+  -e MINNOW_CONFIG=/etc/minnow/custom.yaml ... ghcr.io/mikills/minnow:latest
+```
+
+### 2. Install codeindex
+
+Download the release binary and check it before running it. Pick your platform
+from `darwin_arm64`, `darwin_amd64`, `linux_amd64`, `linux_arm64`:
+
+```bash
+version=v0.8.1
+platform=darwin_arm64
+base="https://github.com/mikills/minnow/releases/download/codeindex/$version"
+curl -fsSLO "$base/codeindex_${version}_${platform}.tar.gz"
+curl -fsSLO "$base/checksums.txt"
+shasum -a 256 -c checksums.txt --ignore-missing   # sha256sum -c on Linux
+tar -xzf "codeindex_${version}_${platform}.tar.gz"
+install -m 755 codeindex ~/.local/bin/codeindex
+```
+
+Or build it, which needs a Go toolchain but no release assets:
+
+```bash
+go install github.com/mikills/minnow/codeindex@latest
+```
+
+### 3. Point codeindex at Minnow
+
+```bash
+codeindex setup --minnow-url http://127.0.0.1:8080
+```
+
+Add `--force` to overwrite an existing config, and `--token-env MINNOW_TOKEN`
+when the server needs a bearer token. That writes a `${MINNOW_TOKEN}` reference
+rather than the secret itself.
+
+Then index and register the MCP server as described under
+[Index a codebase](#index-a-codebase) and [MCP endpoints](#mcp-endpoints).
+
 ## Prerequisites
+
+These apply to running Minnow from a checkout. The published image needs none of
+them.
 
 - Go toolchain matching the module's version.
 - CGO-capable environment for the DuckDB driver.
@@ -140,7 +246,10 @@ For OpenCode code search, add this to `opencode.jsonc`:
 
 Check registration with `codex mcp get codeindex --json`,
 `claude mcp get codeindex`, or `opencode mcp list`. The local process reads the
-hosted URL and token from the normal codeindex configuration.
+hosted URL from the normal codeindex configuration, but an agent starts it as
+its own process, so a `${MINNOW_TOKEN}` reference in that config resolves
+against the server entry's environment and not your shell. Forward the variable
+there. [MCP](mcp.md) shows the syntax for each client.
 
 For the full setup, tool permissions, and troubleshooting steps, see
 [MCP](mcp.md). The configuration fields are documented in the [`mcp` section

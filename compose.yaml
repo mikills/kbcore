@@ -1,15 +1,19 @@
 services:
   minnow:
-    build:
-      context: .
-      platforms: [linux/amd64]
-    image: minnow:local
+    image: ghcr.io/mikills/minnow:${MINNOW_VERSION:-latest}
     platform: linux/amd64
     restart: unless-stopped
     environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
-      GOMEMLIMIT: ${GOMEMLIMIT:-768MiB}
-      MINNOW_DUCKDB_MEMORY_LIMIT: ${MINNOW_DUCKDB_MEMORY_LIMIT:-512MB}
+      # ollama needs no API key. Set MINNOW_EMBEDDER=openai with OPENAI_API_KEY
+      # in your shell to use OpenAI instead.
+      - MINNOW_CONFIG=/etc/minnow/minnow.${MINNOW_EMBEDDER:-ollama}.yaml
+      # Passed through only when set, so the openai config fails with
+      # "unresolved env vars" rather than a 401 at the first embedding call.
+      - OPENAI_API_KEY
+      - GOMEMLIMIT=${GOMEMLIMIT:-768MiB}
+      - MINNOW_DUCKDB_MEMORY_LIMIT=${MINNOW_DUCKDB_MEMORY_LIMIT:-512MB}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       # Loopback-only by default. Put an authenticating HTTPS proxy or
       # Tailscale in front before allowing remote access.
