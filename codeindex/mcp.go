@@ -49,7 +49,7 @@ func runMCP(ctx context.Context, args []string) int {
 		return writeCommandError(err, 2)
 	}
 	service := newMCPService(opts)
-	if err := server(service).Run(ctx, &mcp.StdioTransport{}); err != nil {
+	if err := newMCPServer(service).Run(ctx, &mcp.StdioTransport{}); err != nil {
 		return writeCommandError(fmt.Errorf("serve codeindex MCP: %w", err), 1)
 	}
 	if service.startErr != nil {
@@ -57,8 +57,6 @@ func runMCP(ctx context.Context, args []string) int {
 	}
 	return 0
 }
-
-func server(service *mcpService) *mcp.Server { return newMCPServer(service) }
 
 // newMCPService keeps a config failure instead of exiting on it. Clients do not
 // show a server's stderr, so exiting here surfaces only "connection closed"
@@ -96,7 +94,7 @@ func (s *mcpService) ready() error {
 }
 
 func writeMCPUsage() int {
-	var opts mcpCLIOptions
+	opts := defaultMCPCLIOptions()
 	fs := newMCPFlagSet(&opts)
 	fs.SetOutput(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Usage: codeindex mcp [flags]")
@@ -104,13 +102,17 @@ func writeMCPUsage() int {
 	return 2
 }
 
-func parseMCPCLIOptions(args []string) (mcpCLIOptions, error) {
-	opts := mcpCLIOptions{
+func defaultMCPCLIOptions() mcpCLIOptions {
+	return mcpCLIOptions{
 		configPath: os.Getenv("CODEINDEX_CONFIG"),
 		minnowURL:  os.Getenv("CODEINDEX_MINNOW_URL"),
 		token:      os.Getenv("CODEINDEX_TOKEN"),
 		root:       firstNonEmpty(os.Getenv("CODEINDEX_REPO_ROOT"), os.Getenv("MINNOW_REPO_ROOT"), "."),
 	}
+}
+
+func parseMCPCLIOptions(args []string) (mcpCLIOptions, error) {
+	opts := defaultMCPCLIOptions()
 	fs := newMCPFlagSet(&opts)
 	fs.SetOutput(io.Discard)
 	if err := fs.Parse(args); err != nil {

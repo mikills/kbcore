@@ -256,7 +256,8 @@ func TestMCPStartupFailure(t *testing.T) {
 }
 
 // A wrong command line is visible to whoever typed it, so it must not start a
-// server that blocks on stdio forever.
+// server that blocks on stdio forever. runMCP returns before any transport is
+// built, so calling it here touches neither stdin nor stdout.
 func TestMCPUsageExits(t *testing.T) {
 	for name, args := range map[string][]string{
 		"help":     {"--help"},
@@ -264,9 +265,7 @@ func TestMCPUsageExits(t *testing.T) {
 		"bad_root": {"--root", ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := parseMCPCLIOptions(args)
-			require.Error(t, err)
+			require.Equal(t, 2, runMCP(context.Background(), args))
 		})
 	}
-	require.Equal(t, 2, writeMCPUsage())
 }
