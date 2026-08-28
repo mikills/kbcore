@@ -266,6 +266,8 @@ func TestWithoutURLCredentials(t *testing.T) {
 		"trims_before_parse":  {"https://user:pw@host/base\r", "https://host/base"},
 		"redacts_unparseable": {"https://user:p%ssw0rd@host", "(redacted)"},
 		"keeps_bad_url":       {"https://host:notaport", "https://host:notaport"},
+		"redacts_opaque":      {"user:pw@minnow.example.com", "(redacted)"},
+		"redacts_schemeless":  {"https:user:pw@host", "(redacted)"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, tc.want, withoutURLCredentials(tc.raw))

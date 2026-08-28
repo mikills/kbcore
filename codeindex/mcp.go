@@ -121,6 +121,11 @@ func withoutURLCredentials(raw string) string {
 		return raw
 	}
 	if parsed.User == nil {
+		// A URL with no // authority parses whole into Opaque, so userinfo
+		// never reaches parsed.User.
+		if strings.Contains(parsed.Opaque, "@") {
+			return "(redacted)"
+		}
 		return raw
 	}
 	parsed.User = nil
