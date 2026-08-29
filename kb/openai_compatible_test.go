@@ -70,6 +70,25 @@ func TestOpenAICompatibleEmbedder(t *testing.T) {
 		require.Equal(t, [][]float32{{1, 2}, {3, 4}}, vectors)
 	})
 
+	t.Run("reorders_batch_by_index", func(t *testing.T) {
+		// The API does not promise response order. Positional assembly would
+		// give every document another document's vector, silently.
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(
+				`{"data":[{"index":2,"embedding":[5,6]},{"index":0,"embedding":[1,2]},{"index":1,"embedding":[3,4]}]}`,
+			))
+		}))
+		defer server.Close()
+
+		embedder, err := kb.NewOpenAICompatibleEmbedder(
+			kb.OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "model"},
+		)
+		require.NoError(t, err)
+		vectors, err := embedder.EmbedBatch(context.Background(), []string{"one", "two", "three"})
+		require.NoError(t, err)
+		require.Equal(t, [][]float32{{1, 2}, {3, 4}, {5, 6}}, vectors)
+	})
+
 	t.Run("embeds_batch_without_indices", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"data":[{"embedding":[1,2]},{"embedding":[3,4]}]}`))

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"math"
 	"math/rand"
 	"os"
@@ -66,7 +67,12 @@ const (
 	envBenchMemoryLimit = "MINNOW_BENCH_MEMORY_LIMIT"
 	envBenchJSON        = "MINNOW_BENCH_JSON"
 	envBenchTempDir     = "MINNOW_BENCH_TEMP_DIR"
+	envBenchCorpusDir   = "MINNOW_BENCH_CORPUS_DIR"
+	envBenchOpenAIKey   = "OPEN_AI_EMBEDDING_KEY_MINNOW"
+	envBenchOpenAIModel = "MINNOW_BENCH_OPENAI_MODEL"
 )
+
+const defaultOpenAIEmbedModel = "text-embedding-3-small"
 
 type benchCase struct {
 	name       string
@@ -84,6 +90,10 @@ type BenchResult struct {
 	Embedder    string  `json:"embedder"`
 	MemoryLimit string  `json:"memory_limit"`
 	Samples     int     `json:"samples"`
+	TextBytes   int64   `json:"text_bytes"`
+	BlobBytes   int64   `json:"blob_bytes"`
+	CacheBytes  int64   `json:"cache_bytes"`
+	BytesPerDoc float64 `json:"bytes_per_doc"`
 	SeedSeconds float64 `json:"seed_seconds"`
 	SeedDocsSec float64 `json:"seed_docs_per_sec"`
 	QueriesSec  float64 `json:"queries_per_sec"`
@@ -161,6 +171,21 @@ func parseBenchCase(name string) (benchCase, error) {
 	return benchCase{name: name, corpusSize: size, vectorDim: dim, realCorpus: m[3] != ""}, nil
 }
 
+// dirSize totals a tree, skipping what vanishes under a concurrent sweep.
+func dirSize(root string) int64 {
+	var total int64
+	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, statErr := d.Info(); statErr == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
 func benchMemoryLimit() string {
 	if v := strings.TrimSpace(os.Getenv(envBenchMemoryLimit)); v != "" {
 		return v
@@ -204,7 +229,7 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 
 	blobStore := &kb.LocalBlobStore{Root: blobRoot}
 	manifestStore := &kb.BlobManifestStore{Store: blobStore}
-	embedder, embedderLabel := pickEmbedder(b, vectorDim, realCorpus)
+	embedder, embedderLabel, embedderIsRemote := pickEmbedder(b, vectorDim, realCorpus)
 	memoryLimit := benchMemoryLimit()
 
 	loader := kb.NewKB(blobStore, cacheDir,
@@ -212,25 +237,12 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 		kb.WithManifestStore(manifestStore),
 	)
 
-	af, err := duckdb.NewArtifactFormat(duckdb.DuckDBArtifactDeps{
-		BlobStore:      loader.BlobStore,
-		ManifestStore:  loader.ManifestStore,
-		CacheDir:       cacheDir,
-		MemoryLimit:    memoryLimit,
-		TempDir:        strings.TrimSpace(os.Getenv(envBenchTempDir)),
-		ShardingPolicy: loader.ShardingPolicy,
-		Embed:          loader.Embed,
-		GraphBuilder:   func() *kb.GraphBuilder { return loader.GraphBuilder },
-		EvictCacheIfNeeded: func(ctx context.Context, protectKBID string) error {
-			return loader.EvictCacheIfNeeded(ctx, protectKBID)
-		},
-		LockFor: loader.LockFor,
-		AcquireWriteLease: func(ctx context.Context, kbID string) (kb.WriteLeaseManager, *kb.WriteLease, error) {
-			return loader.AcquireWriteLease(ctx, kbID)
-		},
-		EnqueueReplacedShardsForGC: loader.EnqueueReplacedShardsForGC,
-		Metrics:                    loader,
-	})
+	// NewDepsFromKB, not a literal: it wires EmbedBatch, so a remote embedder
+	// costs one request per batch rather than one per document.
+	af, err := duckdb.NewArtifactFormat(duckdb.NewDepsFromKB(loader,
+		duckdb.WithMemoryLimit(memoryLimit),
+		duckdb.WithTempDir(strings.TrimSpace(os.Getenv(envBenchTempDir))),
+	))
 	require.NoError(b, err)
 	require.NoError(b, loader.RegisterFormat(af))
 
@@ -238,11 +250,17 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 	var queryTexts []string
 	if realCorpus {
 		needed := corpusSize + warmups + samples
-		all, err := loadRealCorpus(0)
+		// Headroom for what looksEmbeddable rejects. Loading the whole corpus
+		// would hold a million chunks in memory to take a slice of it.
+		all, err := loadRealCorpus(needed + needed/4)
 		if err != nil {
 			b.Skipf("real corpus unavailable: %v (run: go run ./scripts/fetch_corpus/)", err)
 		}
-		good := collectEmbeddableDocs(ctx, embedder, all, needed)
+		probe := embedder
+		if embedderIsRemote {
+			probe = nil
+		}
+		good := collectEmbeddableDocs(ctx, probe, all, needed)
 		if len(good) < needed {
 			b.Skipf("real corpus has %d embeddable chunks after filter, need %d", len(good), needed)
 		}
@@ -260,9 +278,17 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 		}
 	}
 
+	var textBytes int64
+	for _, d := range docs {
+		textBytes += int64(len(d.Text))
+	}
+
 	seedStart := time.Now()
 	require.NoError(b, loader.UpsertDocsAndUpload(ctx, kbID, docs))
 	seedElapsed := time.Since(seedStart)
+
+	blobBytes := dirSize(blobRoot)
+	cacheBytes := dirSize(cacheDir)
 
 	queryVecs := make([][]float32, warmups+samples)
 	if realCorpus {
@@ -318,6 +344,9 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 		corpusSize, vectorDim, topK, embedderLabel, memoryLimit, warmups, samples)
 	b.Logf("seed:    %v  (%.1f docs/s)",
 		seedElapsed, float64(corpusSize)/seedElapsed.Seconds())
+	b.Logf("disk:    text %.1f MB  blobs %.1f MB  cache %.1f MB  (%.0f B/doc, %.1fx text)",
+		float64(textBytes)/1e6, float64(blobBytes)/1e6, float64(cacheBytes)/1e6,
+		float64(blobBytes)/float64(corpusSize), float64(blobBytes)/float64(max(textBytes, 1)))
 	b.Logf("warmup:  %v", warmupElapsed)
 	b.Logf("measure: %v  (%.1f qps)",
 		runElapsed, float64(samples)/runElapsed.Seconds())
@@ -332,6 +361,10 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 		Embedder:    embedderLabel,
 		MemoryLimit: memoryLimit,
 		Samples:     samples,
+		TextBytes:   textBytes,
+		BlobBytes:   blobBytes,
+		CacheBytes:  cacheBytes,
+		BytesPerDoc: float64(blobBytes) / float64(corpusSize),
 		SeedSeconds: seedElapsed.Seconds(),
 		SeedDocsSec: float64(corpusSize) / seedElapsed.Seconds(),
 		QueriesSec:  float64(samples) / runElapsed.Seconds(),
@@ -353,8 +386,10 @@ func collectEmbeddableDocs(ctx context.Context, embedder kb.Embedder, in []kb.Do
 		if !looksEmbeddable(d.Text) {
 			continue
 		}
-		if _, err := embedder.Embed(ctx, d.Text); err != nil {
-			continue
+		if embedder != nil {
+			if _, err := embedder.Embed(ctx, d.Text); err != nil {
+				continue
+			}
 		}
 		out = append(out, d)
 		if len(out) >= needed {
@@ -391,9 +426,23 @@ func looksEmbeddable(text string) bool {
 // vectors). Real-corpus cases use a real embedder that produces clustered
 // vectors: Ollama all-minilm at 384 dim, the in-repo LocalEmbedder at 768.
 // If Ollama is selected but unreachable, the bench skips cleanly.
-func pickEmbedder(b *testing.B, vectorDim int, realCorpus bool) (kb.Embedder, string) {
+func pickEmbedder(b *testing.B, vectorDim int, realCorpus bool) (kb.Embedder, string, bool) {
 	if !realCorpus {
-		return mustBenchLocalEmbedder(b, vectorDim), fmt.Sprintf("local-subword-%d", vectorDim)
+		return mustBenchLocalEmbedder(b, vectorDim), fmt.Sprintf("local-subword-%d", vectorDim), false
+	}
+	if key := strings.TrimSpace(os.Getenv(envBenchOpenAIKey)); key != "" {
+		model := strings.TrimSpace(os.Getenv(envBenchOpenAIModel))
+		if model == "" {
+			model = defaultOpenAIEmbedModel
+		}
+		emb, err := kb.NewOpenAICompatibleEmbedder(kb.OpenAICompatibleEmbedderConfig{
+			BaseURL:    "https://api.openai.com/v1",
+			Model:      model,
+			Token:      key,
+			Dimensions: vectorDim,
+		})
+		require.NoError(b, err)
+		return emb, fmt.Sprintf("openai-%s-%d", model, vectorDim), true
 	}
 	if vectorDim == 768 {
 		const model = "nomic-embed-text"
@@ -403,22 +452,25 @@ func pickEmbedder(b *testing.B, vectorDim int, realCorpus bool) (kb.Embedder, st
 		if err := emb.Ping(pingCtx); err != nil {
 			b.Skipf("ollama unavailable: %v (start ollama and `ollama pull %s`)", err, model)
 		}
-		return emb, "ollama-" + strings.TrimSuffix(model, ":latest")
+		return emb, "ollama-" + strings.TrimSuffix(model, ":latest"), true
 	}
 	le, err := kb.NewLocalEmbedder(vectorDim)
 	require.NoError(b, err)
-	return le, fmt.Sprintf("local-subword-%d", vectorDim)
+	return le, fmt.Sprintf("local-subword-%d", vectorDim), false
 }
 
 // loadRealCorpus reads JSONL files produced by scripts/fetch_corpus, returning
 // up to limit Documents. Files are globbed from testdata/corpus/10k-filings/
 // relative to the nearest ancestor with a go.mod file.
 func loadRealCorpus(limit int) ([]kb.Document, error) {
-	root, err := findRepoRoot()
-	if err != nil {
-		return nil, err
+	dir := strings.TrimSpace(os.Getenv(envBenchCorpusDir))
+	if dir == "" {
+		root, err := findRepoRoot()
+		if err != nil {
+			return nil, err
+		}
+		dir = filepath.Join(root, "testdata", "corpus", "10k-filings")
 	}
-	dir := filepath.Join(root, "testdata", "corpus", "10k-filings")
 	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	if err != nil {
 		return nil, err

@@ -15,6 +15,14 @@ func WithMemoryLimit(limit string) DepOption {
 	return func(d *DuckDBArtifactDeps) { d.MemoryLimit = limit }
 }
 
+func batchEmbedFromKB(k *kb.KB) func(context.Context, []string) ([][]float32, error) {
+	batcher, ok := k.Embedder.(kb.BatchEmbedder)
+	if !ok {
+		return nil
+	}
+	return batcher.EmbedBatch
+}
+
 // WithTempDir sets where DuckDB spills. Empty spills beside the shard.
 func WithTempDir(dir string) DepOption {
 	return func(d *DuckDBArtifactDeps) { d.TempDir = dir }
@@ -42,6 +50,7 @@ func NewDepsFromKB(k *kb.KB, opts ...DepOption) DuckDBArtifactDeps {
 		OfflineExt:                 true,
 		ShardingPolicy:             k.ShardingPolicy,
 		Embed:                      k.Embed,
+		EmbedBatch:                 batchEmbedFromKB(k),
 		GraphBuilder:               graphBuilderFromKB(k),
 		EvictCacheIfNeeded:         k.EvictCacheIfNeeded,
 		ReserveCache:               k.ReserveCache,

@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,6 +66,10 @@ func main() {
 	userAgent := flag.String("ua", "minnow-bench contact@example.com", "SEC EDGAR User-Agent (contact info required)")
 	chunkSize := flag.Int("chunk", 1000, "approximate chunk size in characters")
 	throttleMs := flag.Int("throttle-ms", 500, "sleep between companies to respect SEC rate limits")
+	useIndex := flag.Bool("index", false, "read every filer from EDGAR instead of the built-in list")
+	target := flag.Int("target", 0, "stop once this many chunks exist; 0 fetches the whole list")
+	limit := flag.Int("limit", 0, "stop after this many companies; 0 means no limit")
+	resume := flag.Bool("resume", true, "skip a company whose output file already exists")
 	flag.Parse()
 
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
@@ -74,11 +80,44 @@ func main() {
 	chunker := kb.TextChunker{ChunkSize: *chunkSize}
 	ctx := backgroundContext
 
-	totalChunks := 0
+	list := companies
+	if *useIndex {
+		fetched, err := fetchCompanyIndex(ctx, client, *userAgent)
+		if err != nil {
+			exit("company index: %v", err)
+		}
+		list = fetched
+		fmt.Printf("%d filers from EDGAR\n", len(list))
+	}
+
+	totalChunks := countExistingChunks(*outDir)
+	if totalChunks > 0 {
+		fmt.Printf("%d chunks already on disk\n", totalChunks)
+	}
+	attempted := 0
 	failures := 0
+	skipped := 0
 	start := time.Now()
 
-	for _, co := range companies {
+	for _, co := range list {
+		if *target > 0 && totalChunks >= *target {
+			break
+		}
+		if *limit > 0 && attempted >= *limit {
+			break
+		}
+		outPath := filepath.Join(*outDir, sanitizeTicker(co.Ticker)+".jsonl")
+		if *resume {
+			if info, err := os.Stat(outPath); err == nil && info.Size() > 0 {
+				skipped++
+				continue
+			}
+		}
+		previous := 0
+		if info, err := os.Stat(outPath); err == nil && info.Size() > 0 {
+			previous = countChunks(outPath)
+		}
+		attempted++
 		fmt.Printf("[%s] CIK %s\n", co.Ticker, co.CIK)
 		chunks, filingDate, err := fetchOne(ctx, client, *userAgent, co, chunker)
 		if err != nil {
@@ -87,17 +126,112 @@ func main() {
 			time.Sleep(time.Duration(*throttleMs) * time.Millisecond)
 			continue
 		}
-		outPath := filepath.Join(*outDir, co.Ticker+".jsonl")
 		if err := writeJSONL(outPath, chunks); err != nil {
 			exit("write %s: %v", outPath, err)
 		}
-		fmt.Printf("  %d chunks, 10-K filed %s -> %s\n", len(chunks), filingDate, outPath)
-		totalChunks += len(chunks)
+		totalChunks += len(chunks) - previous
+		fmt.Printf("  %d chunks (%d total), 10-K filed %s -> %s\n",
+			len(chunks), totalChunks, filingDate, outPath)
 		time.Sleep(time.Duration(*throttleMs) * time.Millisecond)
 	}
 
-	fmt.Printf("\n%d filings, %d chunks, %d failures, elapsed %v\n",
-		len(companies)-failures, totalChunks, failures, time.Since(start).Round(time.Second))
+	fmt.Printf("\n%d filings, %d chunks, %d failures, %d already present, elapsed %v\n",
+		attempted-failures, totalChunks, failures, skipped, time.Since(start).Round(time.Second))
+}
+
+const companyIndexURL = "https://www.sec.gov/files/company_tickers.json"
+
+// fetchCompanyIndex reads every EDGAR filer. The JSON is an object keyed by a
+// numeric string in EDGAR's own order, roughly largest first, so sorting by
+// that key keeps runs reproducible and takes the biggest filings earliest.
+func fetchCompanyIndex(ctx context.Context, client *http.Client, ua string) ([]company, error) {
+	body, err := fetch(ctx, client, ua, companyIndexURL)
+	if err != nil {
+		return nil, err
+	}
+	var raw map[string]struct {
+		CIK    int    `json:"cik_str"`
+		Ticker string `json:"ticker"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("unmarshal index: %w", err)
+	}
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, _ := strconv.Atoi(keys[i])
+		b, _ := strconv.Atoi(keys[j])
+		return a < b
+	})
+	out := make([]company, 0, len(raw))
+	seenCIK := make(map[int]struct{}, len(raw))
+	seenTicker := make(map[string]struct{}, len(raw))
+	for _, k := range keys {
+		entry := raw[k]
+		ticker := sanitizeTicker(entry.Ticker)
+		if ticker == "" {
+			continue
+		}
+		// Share classes list separately under one CIK and one 10-K, so
+		// deduping on ticker alone downloads the same filing twice.
+		if _, dup := seenCIK[entry.CIK]; dup {
+			continue
+		}
+		if _, dup := seenTicker[ticker]; dup {
+			continue
+		}
+		seenCIK[entry.CIK] = struct{}{}
+		seenTicker[ticker] = struct{}{}
+		out = append(out, company{Ticker: ticker, CIK: fmt.Sprintf("%010d", entry.CIK)})
+	}
+	return out, nil
+}
+
+// sanitizeTicker keeps a ticker usable as a file name. EDGAR emits forms like
+// "BRK-B" and the occasional slash.
+func sanitizeTicker(raw string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(strings.TrimSpace(raw)) {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func countExistingChunks(dir string) int {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	if err != nil {
+		return 0
+	}
+	total := 0
+	for _, path := range matches {
+		total += countChunks(path)
+	}
+	return total
+}
+
+func countChunks(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 8*1024*1024)
+	total := 0
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) != "" {
+			total++
+		}
+	}
+	if scanner.Err() != nil {
+		return 0
+	}
+	return total
 }
 
 func fetchOne(
@@ -220,14 +354,22 @@ func collapseWhitespace(s string) string {
 	return out.String()
 }
 
-func writeJSONL(path string, chunks []kb.Chunk) error {
-	f, err := os.Create(path)
+// writeJSONL writes through a temporary file. A partial write left in place
+// would be non-empty, so -resume would skip it forever and one malformed line
+// makes the whole corpus unreadable.
+func writeJSONL(path string, chunks []kb.Chunk) (err error) {
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if err != nil {
+			f.Close()
+			os.Remove(tmp)
+		}
+	}()
 	w := bufio.NewWriter(f)
-	defer w.Flush()
 	for _, c := range chunks {
 		rec := map[string]string{"id": c.ChunkID, "text": c.Text}
 		data, err := json.Marshal(rec)
@@ -241,7 +383,13 @@ func writeJSONL(path string, chunks []kb.Chunk) error {
 			return err
 		}
 	}
-	return nil
+	if err = w.Flush(); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func exit(format string, args ...any) {

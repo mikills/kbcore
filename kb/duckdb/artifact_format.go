@@ -39,7 +39,10 @@ type DuckDBArtifactDeps struct {
 	DuckDBThreads  int
 	ShardingPolicy kb.ShardingPolicy
 
-	Embed        func(context.Context, string) ([]float32, error)
+	Embed func(context.Context, string) ([]float32, error)
+	// EmbedBatch is optional. Without it every document costs one round trip,
+	// which a remote embedder makes the dominant cost of an ingest.
+	EmbedBatch   func(context.Context, []string) ([][]float32, error)
 	GraphBuilder func() *kb.GraphBuilder
 
 	EvictCacheIfNeeded         func(context.Context, string) error

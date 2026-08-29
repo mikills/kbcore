@@ -21,6 +21,10 @@ on:
         description: "Per-case timeout in minutes. Hosted runners cap at 360."
         required: true
         default: "350"
+      corpus_tag:
+        description: "Release tag holding corpus.tar.gz, for _real_ cases."
+        required: false
+        default: "corpus/v1"
   push:
     branches: ["bench/**"]
   # labeled only. synchronize would double up with push on a bench/** branch.
@@ -124,6 +128,24 @@ jobs:
           echo "corpus in $best, DuckDB spill in $best/spill ($((best_kb / 1024 / 1024)) GB free)"
           echo "scratch \`$best\`, $((best_kb / 1024 / 1024)) GB free" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Fetch the corpus
+        id: corpus
+        if: contains(matrix.case, '_real_')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.corpus_tag || 'corpus/v1' }}
+        run: |
+          set -euo pipefail
+          dir="${{ steps.scratch.outputs.dir }}/corpus"
+          mkdir -p "$dir"
+          gh release download "$TAG" --pattern corpus.tar.gz --dir "$dir" ||
+            { echo "no corpus at $TAG. Run the Corpus workflow first." >&2; exit 1; }
+          tar -xzf "$dir/corpus.tar.gz" -C "$dir"
+          echo "dir=$dir/10k-filings" >> "$GITHUB_OUTPUT"
+          chunks=$(cat "$dir"/10k-filings/*.jsonl | wc -l)
+          [ "$chunks" -gt 0 ] || { echo "corpus extracted empty" >&2; exit 1; }
+          echo "$chunks corpus chunks from $TAG"
+
       - name: Run ${{ matrix.case }}
         id: run
         env:
@@ -132,6 +154,8 @@ jobs:
           MINNOW_BENCH_TEMP_DIR: ${{ steps.scratch.outputs.dir }}/spill
           MINNOW_BENCH_CASES: ${{ matrix.case }}
           MINNOW_BENCH_MEMORY_LIMIT: ${{ needs.plan.outputs.memory_limit }}
+          MINNOW_BENCH_CORPUS_DIR: ${{ steps.corpus.outputs.dir }}
+          OPEN_AI_EMBEDDING_KEY_MINNOW: ${{ secrets.OPEN_AI_EMBEDDING_KEY_MINNOW }}
           MINNOW_BENCH_JSON: ${{ github.workspace }}/bench-${{ matrix.case }}.jsonl
         run: |
           set +e
@@ -240,9 +264,9 @@ jobs:
             echo
             echo "Runner \`$RUNNER_LABEL\`, DuckDB limit \`$MEMORY_LIMIT\`."
             echo
-            echo "| case | docs | dim | status | seed s | docs/s | peak RSS MB | p50 ms | p90 ms | p99 ms | max ms |"
-            echo "| --- | ---: | ---: | :-- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
-            jq -r '.[] | "| \(.name) | \(.docs) | \(.dim) | \(.status) | \(if .seed_seconds then (.seed_seconds|floor) else "-" end) | \(if .seed_docs_per_sec then (.seed_docs_per_sec|floor) else "-" end) | \(.peak_rss_mb // "-") | \(.p50_ms // "-") | \(.p90_ms // "-") | \(.p99_ms // "-") | \(.max_ms // "-") |"' results.json
+            echo "| case | docs | dim | status | seed s | docs/s | disk MB | B/doc | peak RSS MB | p50 ms | p90 ms | p99 ms | max ms |"
+            echo "| --- | ---: | ---: | :-- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+            jq -r '.[] | [.name, (.docs|tostring), (.dim|tostring), .status, (if .seed_seconds then (.seed_seconds|floor|tostring) else "-" end), (if .seed_docs_per_sec then (.seed_docs_per_sec|floor|tostring) else "-" end), (if .blob_bytes then ((.blob_bytes/1000000)|floor|tostring) else "-" end), (if .bytes_per_doc then (.bytes_per_doc|floor|tostring) else "-" end), (.peak_rss_mb // "-"|tostring), (if .p50_ms then ((.p50_ms*100|round)/100|tostring) else "-" end), (if .p90_ms then ((.p90_ms*100|round)/100|tostring) else "-" end), (if .p99_ms then ((.p99_ms*100|round)/100|tostring) else "-" end), (if .max_ms then ((.max_ms*100|round)/100|tostring) else "-" end)] | "| " + join(" | ") + " |"' results.json
             echo
             failed=$(jq -r '[.[] | select(.status != "ok")] | length' results.json)
             if [ "$failed" -gt 0 ]; then
