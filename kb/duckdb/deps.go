@@ -15,6 +15,11 @@ func WithMemoryLimit(limit string) DepOption {
 	return func(d *DuckDBArtifactDeps) { d.MemoryLimit = limit }
 }
 
+// WithTempDir sets where DuckDB spills. Empty spills beside the shard.
+func WithTempDir(dir string) DepOption {
+	return func(d *DuckDBArtifactDeps) { d.TempDir = dir }
+}
+
 // WithExtensionDir sets the DuckDB extension directory path.
 func WithExtensionDir(dir string) DepOption {
 	return func(d *DuckDBArtifactDeps) { d.ExtensionDir = dir }

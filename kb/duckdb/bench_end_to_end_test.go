@@ -65,6 +65,7 @@ const (
 	envBenchCases       = "MINNOW_BENCH_CASES"
 	envBenchMemoryLimit = "MINNOW_BENCH_MEMORY_LIMIT"
 	envBenchJSON        = "MINNOW_BENCH_JSON"
+	envBenchTempDir     = "MINNOW_BENCH_TEMP_DIR"
 )
 
 type benchCase struct {
@@ -74,8 +75,7 @@ type benchCase struct {
 	realCorpus bool
 }
 
-// BenchResult is one case's measurements, appended as JSON lines so a CI run
-// can be compared against a previous one without reparsing test output.
+// BenchResult is one case, appended as a JSON line for comparing runs.
 type BenchResult struct {
 	Name        string  `json:"name"`
 	CorpusSize  int     `json:"corpus_size"`
@@ -110,8 +110,7 @@ func defaultBenchCases() []benchCase {
 	}
 }
 
-// benchCases parses a comma-separated list like "2M_dim384,5M_dim384". An empty
-// spec keeps the default suite, so an unset variable runs what it always ran.
+// benchCases parses a list like "2M_dim384,5M_dim384". Empty keeps the default.
 func benchCases(spec string) ([]benchCase, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
@@ -218,6 +217,7 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 		ManifestStore:  loader.ManifestStore,
 		CacheDir:       cacheDir,
 		MemoryLimit:    memoryLimit,
+		TempDir:        strings.TrimSpace(os.Getenv(envBenchTempDir)),
 		ShardingPolicy: loader.ShardingPolicy,
 		Embed:          loader.Embed,
 		GraphBuilder:   func() *kb.GraphBuilder { return loader.GraphBuilder },

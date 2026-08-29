@@ -33,6 +33,7 @@ type DuckDBArtifactDeps struct {
 	ManifestStore  kb.ManifestStore
 	CacheDir       string
 	MemoryLimit    string
+	TempDir        string
 	ExtensionDir   string
 	OfflineExt     bool
 	DuckDBThreads  int

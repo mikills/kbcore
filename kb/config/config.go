@@ -122,9 +122,10 @@ type FormatConfig struct {
 
 // DuckDBFormatConfig carries DuckDB-specific knobs.
 type DuckDBFormatConfig struct {
-	MemoryLimit  string `yaml:"memory_limit"  json:"memory_limit"`
-	ExtensionDir string `yaml:"extension_dir" json:"extension_dir"`
-	Offline      bool   `yaml:"offline"       json:"offline"`
+	MemoryLimit  string `yaml:"memory_limit"   json:"memory_limit"`
+	TempDir      string `yaml:"temp_directory" json:"temp_directory"`
+	ExtensionDir string `yaml:"extension_dir"  json:"extension_dir"`
+	Offline      bool   `yaml:"offline"        json:"offline"`
 }
 
 // EmbedderConfig selects an embedder implementation.

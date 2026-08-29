@@ -34,6 +34,7 @@ func ResolveExtensionDir() string {
 type Config struct {
 	ExtensionDir string
 	MemoryLimit  string
+	TempDir      string
 	OfflineExt   bool
 	Threads      int
 }
@@ -47,6 +48,10 @@ func Open(ctx context.Context, dbPath string, cfg Config) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	tempDir, err := NormalizeTempDir(cfg.TempDir)
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("duckdb", dbPath)
 	if err != nil {
 		return nil, err
@@ -57,6 +62,7 @@ func Open(ctx context.Context, dbPath string, cfg Config) (*sql.DB, error) {
 	db.SetMaxIdleConns(1)
 	cfg.ExtensionDir = extensionDir
 	cfg.MemoryLimit = memLimit
+	cfg.TempDir = tempDir
 	if err := Configure(ctx, db, cfg); err != nil {
 		if closeErr := db.Close(); closeErr != nil {
 			return nil, fmt.Errorf("%w; close duckdb after configure failure: %v", err, closeErr)
@@ -81,7 +87,7 @@ func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
 	if err := LoadFTS(ctx, db, cfg.ExtensionDir, cfg.OfflineExt); err != nil {
 		return err
 	}
-	return ConfigureRuntime(ctx, db, cfg.MemoryLimit, cfg.Threads)
+	return ConfigureRuntime(ctx, db, cfg.MemoryLimit, cfg.TempDir, cfg.Threads)
 }
 
 func LoadFTS(ctx context.Context, db *sql.DB, extensionDir string, offlineExt bool) error {
@@ -124,12 +130,17 @@ func LoadVSS(ctx context.Context, db *sql.DB, extensionDir string, offlineExt bo
 	return nil
 }
 
-func ConfigureRuntime(ctx context.Context, db *sql.DB, memLimit string, threads int) error {
+func ConfigureRuntime(ctx context.Context, db *sql.DB, memLimit, tempDir string, threads int) error {
 	if _, err := db.ExecContext(ctx, `SET hnsw_enable_experimental_persistence = true`); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, fmt.Sprintf(`SET memory_limit = '%s'`, QuoteSQLString(memLimit))); err != nil {
 		return err
+	}
+	if tempDir != "" {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf(`SET temp_directory = '%s'`, QuoteSQLString(tempDir))); err != nil {
+			return fmt.Errorf("set temp_directory: %w", err)
+		}
 	}
 	if threads <= 0 {
 		threads = 1
@@ -191,6 +202,23 @@ func NormalizeExtensionDir(raw string, offline bool) (string, error) {
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("extension directory %q is not a directory", cleaned)
+	}
+	return cleaned, nil
+}
+
+// NormalizeTempDir resolves the spill directory. Empty keeps DuckDB's default,
+// which is a .tmp directory beside the database file.
+func NormalizeTempDir(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	if strings.ContainsRune(trimmed, '\x00') {
+		return "", fmt.Errorf("invalid temp directory %q", raw)
+	}
+	cleaned := filepath.Clean(trimmed)
+	if err := os.MkdirAll(cleaned, 0o755); err != nil {
+		return "", fmt.Errorf("temp directory %q: %w", cleaned, err)
 	}
 	return cleaned, nil
 }

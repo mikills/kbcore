@@ -108,10 +108,11 @@ At Turbopuffer's exact 1M / 768 corpus, minnow trails p50 by ~2.5x and p99 by ~4
 
 ## Reproduce
 
-All six cases, end-to-end (~75 min):
+The default suite is 10k, 100k, and 1M at 384, 512, and 768 dimensions, plus
+three real-corpus cases that skip when the corpus is absent (~110 min):
 
 ```bash
-go test ./kb/duckdb/ -bench=BenchmarkVectorQuery -run=^$ -benchtime=1x -v -timeout=120m
+go test ./kb/duckdb/ -bench=BenchmarkVectorQuery -run=^$ -benchtime=1x -v -timeout=180m
 ```
 
 Subset by regex:
@@ -119,6 +120,41 @@ Subset by regex:
 ```bash
 go test ./kb/duckdb/ -bench=BenchmarkVectorQuery/1M -run=^$ -benchtime=1x -v -timeout=120m
 ```
+
+Or name the cases, which is the only way to reach a size the suite does not list:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `MINNOW_BENCH_CASES` | the suite above | Comma-separated `<count>[k\|M][_real]_dim<n>`. |
+| `MINNOW_BENCH_MEMORY_LIMIT` | `16GB` | DuckDB `memory_limit` for the run. |
+| `MINNOW_BENCH_TEMP_DIR` | unset | Where DuckDB spills. Unset spills beside the shard. |
+| `MINNOW_BENCH_JSON` | unset | Appends one JSON line per case. |
+
+```bash
+MINNOW_BENCH_CASES=2M_dim512,5M_dim512 \
+MINNOW_BENCH_MEMORY_LIMIT=32GB \
+MINNOW_BENCH_JSON=results.jsonl \
+  go test ./kb/duckdb/ -bench=BenchmarkVectorQuery -run=^$ -benchtime=1x -v -timeout=360m
+```
+
+### On CI
+
+The `Benchmark` workflow runs the same cases on a runner instead of a
+workstation. Dispatch it from the Actions tab or with:
+
+```bash
+gh workflow run Benchmark -f cases=1M_dim512,2M_dim512 \
+  -f runner=ubuntu-latest -f memory_limit=10GB -f timeout_minutes=350
+```
+
+Each case gets its own job, and one summary table reports them in corpus order
+with peak RSS. A case that runs out of memory or disk keeps its row with the
+reason, so the table shows where the limit is rather than omitting it.
+
+A hosted runner has 16 GB of RAM, caps a job at 6 hours, and needs the scratch
+volume chosen for it; the workflow picks the larger of `/mnt` and `RUNNER_TEMP`
+and points both the corpus and the DuckDB spill there. Corpora past roughly 2M
+want a self-hosted runner, which caps at 5 days.
 
 ## Tuning notes
 

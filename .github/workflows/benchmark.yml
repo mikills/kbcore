@@ -65,9 +65,7 @@ jobs:
           df -h /
           free -g || true
 
-      # Minnow does not set DuckDB's temp_directory, so a spill lands beside the
-      # shard file, which the benchmark puts under TMPDIR. Scratch has to hold
-      # the corpus and its spill, so pick whichever volume has more room.
+      # Scratch holds the corpus and the DuckDB spill, so take the larger volume.
       - name: Point scratch at the largest volume
         id: scratch
         run: |
@@ -82,7 +80,7 @@ jobs:
             fi
           fi
           echo "dir=$best" >> "$GITHUB_OUTPUT"
-          echo "scratch and DuckDB spill: $best ($((best_kb / 1024 / 1024)) GB free)"
+          echo "corpus in $best, DuckDB spill in $best/spill ($((best_kb / 1024 / 1024)) GB free)"
           echo "scratch \`$best\`, $((best_kb / 1024 / 1024)) GB free" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run ${{ matrix.case }}
@@ -90,6 +88,7 @@ jobs:
         env:
           GOWORK: off
           TMPDIR: ${{ steps.scratch.outputs.dir }}
+          MINNOW_BENCH_TEMP_DIR: ${{ steps.scratch.outputs.dir }}/spill
           MINNOW_BENCH_CASES: ${{ matrix.case }}
           MINNOW_BENCH_MEMORY_LIMIT: ${{ inputs.memory_limit }}
           MINNOW_BENCH_JSON: ${{ github.workspace }}/bench-${{ matrix.case }}.jsonl
