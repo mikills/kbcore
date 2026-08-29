@@ -9,7 +9,9 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -25,20 +27,9 @@ import (
 //
 //	go test ./kb/duckdb/ -bench=BenchmarkVectorQuery -run=^$ -benchtime=1x -v -timeout=90m
 func BenchmarkVectorQuery(b *testing.B) {
-	cases := []struct {
-		name       string
-		corpusSize int
-		vectorDim  int
-		realCorpus bool
-	}{
-		{"10k_dim384", 10_000, 384, false},
-		{"100k_dim384", 100_000, 384, false},
-		{"1M_dim384", 1_000_000, 384, false},
-		{"10k_dim768", 10_000, 768, false},
-		{"100k_dim768", 100_000, 768, false},
-		{"1M_dim768", 1_000_000, 768, false},
-		{"10k_real_dim384", 10_000, 384, true},
-		{"10k_real_dim768", 10_000, 768, true},
+	cases, err := benchCases(os.Getenv(envBenchCases))
+	if err != nil {
+		b.Fatalf("%s: %v", envBenchCases, err)
 	}
 
 	suiteStart := time.Now()
@@ -50,7 +41,11 @@ func BenchmarkVectorQuery(b *testing.B) {
 	for _, tc := range cases {
 		caseStart := time.Now()
 		b.Run(tc.name, func(b *testing.B) {
-			runVectorQueryBench(b, tc.corpusSize, tc.vectorDim, tc.realCorpus)
+			result := runVectorQueryBench(b, tc.corpusSize, tc.vectorDim, tc.realCorpus)
+			result.Name = tc.name
+			if err := appendBenchResult(os.Getenv(envBenchJSON), result); err != nil {
+				b.Errorf("write %s: %v", envBenchJSON, err)
+			}
 		})
 		totals = append(totals, struct {
 			name  string
@@ -66,7 +61,133 @@ func BenchmarkVectorQuery(b *testing.B) {
 	b.Logf("  %-14s %v", "suite total", time.Since(suiteStart))
 }
 
-func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus bool) {
+const (
+	envBenchCases       = "MINNOW_BENCH_CASES"
+	envBenchMemoryLimit = "MINNOW_BENCH_MEMORY_LIMIT"
+	envBenchJSON        = "MINNOW_BENCH_JSON"
+	envBenchTempDir     = "MINNOW_BENCH_TEMP_DIR"
+)
+
+type benchCase struct {
+	name       string
+	corpusSize int
+	vectorDim  int
+	realCorpus bool
+}
+
+// BenchResult is one case, appended as a JSON line for comparing runs.
+type BenchResult struct {
+	Name        string  `json:"name"`
+	CorpusSize  int     `json:"corpus_size"`
+	VectorDim   int     `json:"vector_dim"`
+	RealCorpus  bool    `json:"real_corpus"`
+	Embedder    string  `json:"embedder"`
+	MemoryLimit string  `json:"memory_limit"`
+	Samples     int     `json:"samples"`
+	SeedSeconds float64 `json:"seed_seconds"`
+	SeedDocsSec float64 `json:"seed_docs_per_sec"`
+	QueriesSec  float64 `json:"queries_per_sec"`
+	P50Millis   float64 `json:"p50_ms"`
+	P90Millis   float64 `json:"p90_ms"`
+	P99Millis   float64 `json:"p99_ms"`
+	MaxMillis   float64 `json:"max_ms"`
+}
+
+func defaultBenchCases() []benchCase {
+	return []benchCase{
+		{"10k_dim384", 10_000, 384, false},
+		{"100k_dim384", 100_000, 384, false},
+		{"1M_dim384", 1_000_000, 384, false},
+		{"10k_dim512", 10_000, 512, false},
+		{"100k_dim512", 100_000, 512, false},
+		{"1M_dim512", 1_000_000, 512, false},
+		{"10k_dim768", 10_000, 768, false},
+		{"100k_dim768", 100_000, 768, false},
+		{"1M_dim768", 1_000_000, 768, false},
+		{"10k_real_dim384", 10_000, 384, true},
+		{"10k_real_dim512", 10_000, 512, true},
+		{"10k_real_dim768", 10_000, 768, true},
+	}
+}
+
+// benchCases parses a list like "2M_dim384,5M_dim384". Empty keeps the default.
+func benchCases(spec string) ([]benchCase, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return defaultBenchCases(), nil
+	}
+	var cases []benchCase
+	for _, name := range strings.Split(spec, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		tc, err := parseBenchCase(name)
+		if err != nil {
+			return nil, err
+		}
+		cases = append(cases, tc)
+	}
+	if len(cases) == 0 {
+		return nil, fmt.Errorf("no cases in %q", spec)
+	}
+	return cases, nil
+}
+
+var benchCaseRE = regexp.MustCompile(`^(\d+)([kM]?)(_real)?_dim(\d+)$`)
+
+func parseBenchCase(name string) (benchCase, error) {
+	m := benchCaseRE.FindStringSubmatch(name)
+	if m == nil {
+		return benchCase{}, fmt.Errorf("%q is not <count>[k|M][_real]_dim<n>", name)
+	}
+	size, err := strconv.Atoi(m[1])
+	if err != nil {
+		return benchCase{}, fmt.Errorf("%q: %w", name, err)
+	}
+	switch m[2] {
+	case "k":
+		size *= 1_000
+	case "M":
+		size *= 1_000_000
+	}
+	dim, err := strconv.Atoi(m[4])
+	if err != nil {
+		return benchCase{}, fmt.Errorf("%q: %w", name, err)
+	}
+	if size <= 0 || dim <= 0 {
+		return benchCase{}, fmt.Errorf("%q: count and dim must be positive", name)
+	}
+	return benchCase{name: name, corpusSize: size, vectorDim: dim, realCorpus: m[3] != ""}, nil
+}
+
+func benchMemoryLimit() string {
+	if v := strings.TrimSpace(os.Getenv(envBenchMemoryLimit)); v != "" {
+		return v
+	}
+	return "16GB"
+}
+
+func appendBenchResult(path string, result BenchResult) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(encoded, '\n')); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus bool) BenchResult {
 	const (
 		topK    = 10
 		warmups = 100
@@ -84,6 +205,7 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 	blobStore := &kb.LocalBlobStore{Root: blobRoot}
 	manifestStore := &kb.BlobManifestStore{Store: blobStore}
 	embedder, embedderLabel := pickEmbedder(b, vectorDim, realCorpus)
+	memoryLimit := benchMemoryLimit()
 
 	loader := kb.NewKB(blobStore, cacheDir,
 		kb.WithEmbedder(embedder),
@@ -94,7 +216,8 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 		BlobStore:      loader.BlobStore,
 		ManifestStore:  loader.ManifestStore,
 		CacheDir:       cacheDir,
-		MemoryLimit:    "16GB",
+		MemoryLimit:    memoryLimit,
+		TempDir:        strings.TrimSpace(os.Getenv(envBenchTempDir)),
 		ShardingPolicy: loader.ShardingPolicy,
 		Embed:          loader.Embed,
 		GraphBuilder:   func() *kb.GraphBuilder { return loader.GraphBuilder },
@@ -191,8 +314,8 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 	slices.Sort(durations)
 	pct := func(p int) time.Duration { return durations[(len(durations)*p)/100] }
 
-	b.Logf("corpus=%d dim=%d topk=%d embedder=%s warmups=%d samples=%d",
-		corpusSize, vectorDim, topK, embedderLabel, warmups, samples)
+	b.Logf("corpus=%d dim=%d topk=%d embedder=%s memory_limit=%s warmups=%d samples=%d",
+		corpusSize, vectorDim, topK, embedderLabel, memoryLimit, warmups, samples)
 	b.Logf("seed:    %v  (%.1f docs/s)",
 		seedElapsed, float64(corpusSize)/seedElapsed.Seconds())
 	b.Logf("warmup:  %v", warmupElapsed)
@@ -200,6 +323,23 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 		runElapsed, float64(samples)/runElapsed.Seconds())
 	b.Logf("latency  p50=%v  p90=%v  p99=%v  max=%v",
 		pct(50), pct(90), pct(99), durations[len(durations)-1])
+
+	ms := func(d time.Duration) float64 { return float64(d.Nanoseconds()) / 1e6 }
+	return BenchResult{
+		CorpusSize:  corpusSize,
+		VectorDim:   vectorDim,
+		RealCorpus:  realCorpus,
+		Embedder:    embedderLabel,
+		MemoryLimit: memoryLimit,
+		Samples:     samples,
+		SeedSeconds: seedElapsed.Seconds(),
+		SeedDocsSec: float64(corpusSize) / seedElapsed.Seconds(),
+		QueriesSec:  float64(samples) / runElapsed.Seconds(),
+		P50Millis:   ms(pct(50)),
+		P90Millis:   ms(pct(90)),
+		P99Millis:   ms(pct(99)),
+		MaxMillis:   ms(durations[len(durations)-1]),
+	}
 }
 
 // collectEmbeddableDocs returns up to needed documents that the embedder

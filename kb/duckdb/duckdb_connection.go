@@ -18,6 +18,7 @@ func (f *DuckDBArtifactFormat) openConfiguredDB(ctx context.Context, dbPath stri
 		connection.Config{
 			ExtensionDir: f.deps.ExtensionDir,
 			MemoryLimit:  f.deps.MemoryLimit,
+			TempDir:      f.deps.TempDir,
 			OfflineExt:   f.deps.OfflineExt,
 			Threads:      f.deps.DuckDBThreads,
 		},

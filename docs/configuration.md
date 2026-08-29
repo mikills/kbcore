@@ -203,6 +203,7 @@ It does not include DuckDB native memory, so retain an OS/cgroup memory limit.
 | ---------------------- | ------ | --------------- | ---------------------------------- |
 | `kind`                 | string | `duckdb`        | Only `duckdb` is supported today.  |
 | `duckdb.memory_limit`  | string | `128MB`         | Passed to DuckDB verbatim. `MINNOW_DUCKDB_MEMORY_LIMIT` overrides it at startup, for deployments whose config is baked into an image. |
+| `duckdb.temp_directory` | path  | unset           | Where DuckDB spills once a query exceeds `memory_limit`. Created if missing. Unset spills to a `.tmp` directory beside each shard, so the spill lands on whichever volume holds `storage.cache.dir`. Set it when that volume is smaller than the working set. |
 | `duckdb.extension_dir` | path   | `./extensions`  | Relative to YAML file.             |
 | `duckdb.offline`       | bool   | `false`         | If true, disables extension fetch. |
 

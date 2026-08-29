@@ -1,0 +1,208 @@
+name: Benchmark
+
+# Manual only. A large corpus takes hours and holds a runner for all of it.
+on:
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "Comma-separated cases, e.g. 1M_dim512,2M_dim512,5M_dim512"
+        required: true
+        default: "100k_dim512,1M_dim512,2M_dim512,5M_dim512"
+      runner:
+        description: "Runner label. Hosted caps a job at 6h; self-hosted at 5 days."
+        required: true
+        default: "ubuntu-latest"
+      memory_limit:
+        description: "DuckDB memory limit. Keep it under the runner's RAM."
+        required: true
+        default: "10GB"
+      timeout_minutes:
+        description: "Per-case timeout in minutes. Hosted runners cap at 360."
+        required: true
+        default: "350"
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      cases: ${{ steps.split.outputs.cases }}
+    steps:
+      - id: split
+        env:
+          CASES: ${{ inputs.cases }}
+        run: |
+          set -euo pipefail
+          json=$(printf '%s' "$CASES" | tr ',' '\n' |
+            sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' |
+            jq -R . | jq -sc .)
+          [ "$(printf '%s' "$json" | jq 'length')" -gt 0 ] || {
+            echo "no cases parsed from '$CASES'" >&2; exit 1; }
+          echo "cases=$json" >> "$GITHUB_OUTPUT"
+
+  benchmark:
+    needs: plan
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        case: ${{ fromJSON(needs.plan.outputs.cases) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Report and reclaim disk
+        run: |
+          set -euo pipefail
+          # A 5M corpus does not fit beside the preinstalled toolchains.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
+          df -h /
+          free -g || true
+
+      # Scratch holds the corpus and the DuckDB spill, so take the larger volume.
+      - name: Point scratch at the largest volume
+        id: scratch
+        run: |
+          set -euo pipefail
+          best="$RUNNER_TEMP"
+          best_kb=$(df -Pk "$best" | awk 'NR==2 {print $4}')
+          if sudo mkdir -p /mnt/minnow-bench && sudo chown "$USER" /mnt/minnow-bench; then
+            mnt_kb=$(df -Pk /mnt/minnow-bench | awk 'NR==2 {print $4}')
+            if [ "$mnt_kb" -gt "$best_kb" ]; then
+              best=/mnt/minnow-bench
+              best_kb=$mnt_kb
+            fi
+          fi
+          echo "dir=$best" >> "$GITHUB_OUTPUT"
+          echo "corpus in $best, DuckDB spill in $best/spill ($((best_kb / 1024 / 1024)) GB free)"
+          echo "scratch \`$best\`, $((best_kb / 1024 / 1024)) GB free" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run ${{ matrix.case }}
+        id: run
+        env:
+          GOWORK: off
+          TMPDIR: ${{ steps.scratch.outputs.dir }}
+          MINNOW_BENCH_TEMP_DIR: ${{ steps.scratch.outputs.dir }}/spill
+          MINNOW_BENCH_CASES: ${{ matrix.case }}
+          MINNOW_BENCH_MEMORY_LIMIT: ${{ inputs.memory_limit }}
+          MINNOW_BENCH_JSON: ${{ github.workspace }}/bench-${{ matrix.case }}.jsonl
+        run: |
+          set -uo pipefail
+          /usr/bin/time -v -o "rss-${{ matrix.case }}.txt" \
+            go test ./kb/duckdb/ -bench=BenchmarkVectorQuery -run='^$' \
+              -benchtime=1x -v -timeout=${{ inputs.timeout_minutes }}m \
+            2>&1 | tee "bench-${{ matrix.case }}.log"
+          status=${PIPESTATUS[0]}
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      # A case that exhausts memory or disk writes no result. Record why, so the
+      # aggregate table shows where the limit is rather than a missing row.
+      - name: Record the outcome
+        if: always()
+        env:
+          CASE: ${{ matrix.case }}
+          RESULTS: bench-${{ matrix.case }}.jsonl
+          OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          set -euo pipefail
+          rss_mb=0
+          if [ -f "rss-$CASE.txt" ]; then
+            rss_kb=$(awk '/Maximum resident set size/ {print $NF}' "rss-$CASE.txt")
+            rss_mb=$(( ${rss_kb:-0} / 1024 ))
+          fi
+          status=ok
+          [ "$OUTCOME" = success ] || status=failed
+          if [ -s "$RESULTS" ]; then
+            jq -c --argjson rss "$rss_mb" --arg status "$status" \
+              '. + {peak_rss_mb: $rss, status: $status}' "$RESULTS" > "$RESULTS.tmp"
+          else
+            reason=$(grep -iEo 'signal: killed|out of memory|no space left on device|panic: .*' \
+              "bench-$CASE.log" 2>/dev/null | head -1 || true)
+            jq -nc --arg name "$CASE" --argjson rss "$rss_mb" \
+              --arg reason "${reason:-no result written}" \
+              '{name: $name, status: "failed", peak_rss_mb: $rss, reason: $reason}' \
+              > "$RESULTS.tmp"
+          fi
+          mv "$RESULTS.tmp" "$RESULTS"
+          cat "$RESULTS"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.case }}
+          path: |
+            bench-${{ matrix.case }}.jsonl
+            bench-${{ matrix.case }}.log
+            rss-${{ matrix.case }}.txt
+          if-no-files-found: warn
+
+  report:
+    needs: [plan, benchmark]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bench-*
+          merge-multiple: true
+
+      - name: Build the table
+        env:
+          CASES: ${{ needs.plan.outputs.cases }}
+          RUNNER_LABEL: ${{ inputs.runner }}
+          MEMORY_LIMIT: ${{ inputs.memory_limit }}
+        run: |
+          set -euo pipefail
+          cat bench-*.jsonl > merged.jsonl 2>/dev/null || : > merged.jsonl
+          # A job killed before its record step leaves nothing at all.
+          printf '%s' "$CASES" | jq -r '.[]' | while read -r name; do
+            grep -q "\"name\":\"$name\"" merged.jsonl 2>/dev/null && continue
+            jq -nc --arg name "$name" \
+              '{name: $name, status: "failed", reason: "job produced no artifact"}' \
+              >> merged.jsonl
+          done
+          # A failed case has no corpus_size, so take it from the name to keep
+          # the table in size order. That ordering is the point of the table.
+          jq -s '
+            map(
+              . as $r
+              | (try ($r.name | capture("^(?<num>\\d+)(?<unit>[kM]?)(_real)?_dim(?<dim>\\d+)$")) catch null) as $p
+              | $r + {
+                  docs: ($r.corpus_size // (if $p then (($p.num|tonumber) * (if $p.unit=="k" then 1000 elif $p.unit=="M" then 1000000 else 1 end)) else 0 end)),
+                  dim:  ($r.vector_dim  // (if $p then ($p.dim|tonumber) else 0 end))
+                }
+            ) | sort_by(.docs, .dim)
+          ' merged.jsonl > results.json
+
+          {
+            echo "## Benchmark results"
+            echo
+            echo "Runner \`$RUNNER_LABEL\`, DuckDB limit \`$MEMORY_LIMIT\`."
+            echo
+            echo "| case | docs | dim | status | seed s | docs/s | peak RSS MB | p50 ms | p90 ms | p99 ms | max ms |"
+            echo "| --- | ---: | ---: | :-- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+            jq -r '.[] | "| \(.name) | \(.docs) | \(.dim) | \(.status) | \(if .seed_seconds then (.seed_seconds|floor) else "-" end) | \(if .seed_docs_per_sec then (.seed_docs_per_sec|floor) else "-" end) | \(.peak_rss_mb // "-") | \(.p50_ms // "-") | \(.p90_ms // "-") | \(.p99_ms // "-") | \(.max_ms // "-") |"' results.json
+            echo
+            failed=$(jq -r '[.[] | select(.status != "ok")] | length' results.json)
+            if [ "$failed" -gt 0 ]; then
+              echo "### Where it stopped"
+              echo
+              jq -r '.[] | select(.status != "ok") | "- `\(.name)`: \(.reason // "see the job log")"' results.json
+            else
+              echo "Every case completed. The largest corpus here is a floor, not a ceiling."
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            results.json
+            merged.jsonl
