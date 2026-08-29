@@ -140,10 +140,11 @@ MINNOW_BENCH_JSON=results.jsonl \
 ### On CI
 
 The `Benchmark` workflow runs the same cases on a runner instead of a
-workstation. Dispatch it from the Actions tab or with:
+workstation. Dispatch it from the Actions tab, or from any branch without
+merging first:
 
 ```bash
-gh workflow run Benchmark -f cases=1M_dim512,2M_dim512 \
+gh workflow run Benchmark --ref my-branch -f cases=1M_dim512,2M_dim512 \
   -f runner=ubuntu-latest -f memory_limit=10GB -f timeout_minutes=350
 ```
 
@@ -151,10 +152,16 @@ Each case gets its own job, and one summary table reports them in corpus order
 with peak RSS. A case that runs out of memory or disk keeps its row with the
 reason, so the table shows where the limit is rather than omitting it.
 
-A hosted runner has 16 GB of RAM, caps a job at 6 hours, and needs the scratch
-volume chosen for it; the workflow picks the larger of `/mnt` and `RUNNER_TEMP`
-and points both the corpus and the DuckDB spill there. Corpora past roughly 2M
-want a self-hosted runner, which caps at 5 days.
+A hosted runner has 15 GB of RAM and caps a job at 6 hours, so memory binds
+before disk does. The workflow points the corpus and the DuckDB spill at
+whichever of `/mnt` and `RUNNER_TEMP` has more room and reports both the choice
+and the free space, so a run records its own headroom rather than assuming it.
+Corpora past roughly 2M spill hard enough to want a self-hosted runner, which
+caps at 5 days.
+
+A push to a `bench/**` branch, or the `benchmark` label on a pull request, runs
+`100k_dim512` alone. The four-case sweep is dispatch-only, so a label cannot
+start a multi-hour job.
 
 ## Tuning notes
 

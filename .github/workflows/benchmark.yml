@@ -1,6 +1,7 @@
 name: Benchmark
 
-# Manual only. A large corpus takes hours and holds a runner for all of it.
+# A large corpus takes hours, so automatic runs are opt-in: push to bench/**, or
+# label a pull request "benchmark". Both use AUTO_CASES, not the full sweep.
 on:
   workflow_dispatch:
     inputs:
@@ -20,19 +21,62 @@ on:
         description: "Per-case timeout in minutes. Hosted runners cap at 360."
         required: true
         default: "350"
+  push:
+    branches: ["bench/**"]
+  # labeled only. synchronize would double up with push on a bench/** branch.
+  pull_request:
+    types: [labeled]
 
 permissions:
   contents: read
 
+env:
+  AUTO_CASES: "100k_dim512"
+  AUTO_RUNNER: "ubuntu-latest"
+  AUTO_MEMORY_LIMIT: "10GB"
+  AUTO_TIMEOUT_MINUTES: "60"
+
+# A dispatch keys on its own run so a queued sweep is never discarded. Only a
+# superseded push cancels: a run enters this group before any job `if` is read,
+# so cancelling on pull_request would let an unrelated label kill a live run.
+concurrency:
+  group: >-
+    benchmark-${{ github.event_name == 'workflow_dispatch' && github.run_id
+    || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
 jobs:
   plan:
+    # The benchmark label, not any label. Another label must not enter the
+    # concurrency group and cancel a run already going.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.label.name == 'benchmark'
     runs-on: ubuntu-latest
     outputs:
       cases: ${{ steps.split.outputs.cases }}
+      runner: ${{ steps.settings.outputs.runner }}
+      memory_limit: ${{ steps.settings.outputs.memory_limit }}
+      timeout_minutes: ${{ steps.settings.outputs.timeout_minutes }}
     steps:
+      - id: settings
+        env:
+          RUNNER_IN: ${{ inputs.runner || env.AUTO_RUNNER }}
+          MEMORY_IN: ${{ inputs.memory_limit || env.AUTO_MEMORY_LIMIT }}
+          TIMEOUT_IN: ${{ inputs.timeout_minutes || env.AUTO_TIMEOUT_MINUTES }}
+        run: |
+          set -euo pipefail
+          for pair in "runner=$RUNNER_IN" "memory_limit=$MEMORY_IN" "timeout_minutes=$TIMEOUT_IN"; do
+            value=${pair#*=}
+            case "$value" in *[!-A-Za-z0-9_.]*|"")
+              echo "rejected ${pair%%=*}: $value" >&2; exit 1 ;;
+            esac
+            echo "$pair"
+          done >> "$GITHUB_OUTPUT"
+
       - id: split
         env:
-          CASES: ${{ inputs.cases }}
+          CASES: ${{ inputs.cases || env.AUTO_CASES }}
         run: |
           set -euo pipefail
           json=$(printf '%s' "$CASES" | tr ',' '\n' |
@@ -44,8 +88,8 @@ jobs:
 
   benchmark:
     needs: plan
-    runs-on: ${{ inputs.runner }}
-    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    runs-on: ${{ needs.plan.outputs.runner }}
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
     strategy:
       fail-fast: false
       matrix:
@@ -56,13 +100,10 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Report and reclaim disk
+      - name: Report available resources
         run: |
           set -euo pipefail
-          # A 5M corpus does not fit beside the preinstalled toolchains.
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
-          df -h /
+          df -h / /mnt 2>/dev/null || df -h /
           free -g || true
 
       # Scratch holds the corpus and the DuckDB spill, so take the larger volume.
@@ -90,17 +131,20 @@ jobs:
           TMPDIR: ${{ steps.scratch.outputs.dir }}
           MINNOW_BENCH_TEMP_DIR: ${{ steps.scratch.outputs.dir }}/spill
           MINNOW_BENCH_CASES: ${{ matrix.case }}
-          MINNOW_BENCH_MEMORY_LIMIT: ${{ inputs.memory_limit }}
+          MINNOW_BENCH_MEMORY_LIMIT: ${{ needs.plan.outputs.memory_limit }}
           MINNOW_BENCH_JSON: ${{ github.workspace }}/bench-${{ matrix.case }}.jsonl
         run: |
+          set +e
           set -uo pipefail
+          # Below the job timeout, so a hang panics into the log and the table
+          # gets a reason instead of an empty row.
+          go_timeout=$(( ${{ needs.plan.outputs.timeout_minutes }} - 10 ))
+          [ "$go_timeout" -gt 0 ] || go_timeout=${{ needs.plan.outputs.timeout_minutes }}
           /usr/bin/time -v -o "rss-${{ matrix.case }}.txt" \
             go test ./kb/duckdb/ -bench=BenchmarkVectorQuery -run='^$' \
-              -benchtime=1x -v -timeout=${{ inputs.timeout_minutes }}m \
+              -benchtime=1x -v -timeout=${go_timeout}m \
             2>&1 | tee "bench-${{ matrix.case }}.log"
-          status=${PIPESTATUS[0]}
-          echo "status=$status" >> "$GITHUB_OUTPUT"
-          exit "$status"
+          exit "${PIPESTATUS[0]}"
 
       # A case that exhausts memory or disk writes no result. Record why, so the
       # aggregate table shows where the limit is rather than a missing row.
@@ -123,11 +167,19 @@ jobs:
             jq -c --argjson rss "$rss_mb" --arg status "$status" \
               '. + {peak_rss_mb: $rss, status: $status}' "$RESULTS" > "$RESULTS.tmp"
           else
+            # go test exits 0 on a skip, so no result plus success is a skip,
+            # not a limit. Calling it failed would accuse a missing corpus.
             reason=$(grep -iEo 'signal: killed|out of memory|no space left on device|panic: .*' \
               "bench-$CASE.log" 2>/dev/null | head -1 || true)
-            jq -nc --arg name "$CASE" --argjson rss "$rss_mb" \
+            if [ "$status" = ok ]; then
+              status=skipped
+              reason=$(grep -oE '^\s+.*_test\.go:[0-9]+: .*' "bench-$CASE.log" 2>/dev/null |
+                tail -1 | sed 's/^[[:space:]]*//' || true)
+              reason=${reason:-skipped without a result}
+            fi
+            jq -nc --arg name "$CASE" --argjson rss "$rss_mb" --arg status "$status" \
               --arg reason "${reason:-no result written}" \
-              '{name: $name, status: "failed", peak_rss_mb: $rss, reason: $reason}' \
+              '{name: $name, status: $status, peak_rss_mb: $rss, reason: $reason}' \
               > "$RESULTS.tmp"
           fi
           mv "$RESULTS.tmp" "$RESULTS"
@@ -145,7 +197,9 @@ jobs:
 
   report:
     needs: [plan, benchmark]
-    if: always()
+    # !cancelled() so a failed case still reports, but a cancelled run does not
+    # publish a table saying every case failed.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -156,8 +210,8 @@ jobs:
       - name: Build the table
         env:
           CASES: ${{ needs.plan.outputs.cases }}
-          RUNNER_LABEL: ${{ inputs.runner }}
-          MEMORY_LIMIT: ${{ inputs.memory_limit }}
+          RUNNER_LABEL: ${{ needs.plan.outputs.runner }}
+          MEMORY_LIMIT: ${{ needs.plan.outputs.memory_limit }}
         run: |
           set -euo pipefail
           cat bench-*.jsonl > merged.jsonl 2>/dev/null || : > merged.jsonl
