@@ -192,6 +192,9 @@ sharding:
   query_shard_fanout: 2
   query_shard_fanout_adaptive_max: 2
   query_shard_parallelism: 1
+format:
+  duckdb:
+    build_threads: 1 # index builds hold memory too
 ```
 
 Set `GOMEMLIMIT` in the service environment as an additional Go-heap guard.
@@ -203,6 +206,7 @@ It does not include DuckDB native memory, so retain an OS/cgroup memory limit.
 | ---------------------- | ------ | --------------- | ---------------------------------- |
 | `kind`                 | string | `duckdb`        | Only `duckdb` is supported today.  |
 | `duckdb.memory_limit`  | string | `128MB`         | Passed to DuckDB verbatim. `MINNOW_DUCKDB_MEMORY_LIMIT` overrides it at startup, for deployments whose config is baked into an image. |
+| `duckdb.build_threads` | int    | `min(GOMAXPROCS, 4)` | DuckDB threads while sealing or compacting a shard, capped at 256. Queries stay at one thread per shard because several are probed at once. Roughly halves index build time on a 75k row shard at 512 dim, and the gain flattens past four. Every concurrent build shares one budget of `GOMAXPROCS` threads, so raising this does not multiply across parallel seals. Each build thread also raises DuckDB's per-operator memory reservation, so lower it alongside a small `memory_limit`. |
 | `duckdb.temp_directory` | path  | unset           | Where DuckDB spills once a query exceeds `memory_limit`. Created if missing. Unset spills to a `.tmp` directory beside each shard, so the spill lands on whichever volume holds `storage.cache.dir`. Set it when that volume is smaller than the working set. |
 | `duckdb.extension_dir` | path   | `./extensions`  | Relative to YAML file.             |
 | `duckdb.offline`       | bool   | `false`         | If true, disables extension fetch. |

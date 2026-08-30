@@ -123,6 +123,7 @@ type FormatConfig struct {
 // DuckDBFormatConfig carries DuckDB-specific knobs.
 type DuckDBFormatConfig struct {
 	MemoryLimit  string `yaml:"memory_limit"   json:"memory_limit"`
+	BuildThreads int    `yaml:"build_threads"  json:"build_threads"`
 	TempDir      string `yaml:"temp_directory" json:"temp_directory"`
 	ExtensionDir string `yaml:"extension_dir"  json:"extension_dir"`
 	Offline      bool   `yaml:"offline"        json:"offline"`

@@ -29,14 +29,18 @@ type DuckDBArtifactFormat struct {
 }
 
 type DuckDBArtifactDeps struct {
-	BlobStore      kb.BlobStore
-	ManifestStore  kb.ManifestStore
-	CacheDir       string
-	MemoryLimit    string
-	TempDir        string
-	ExtensionDir   string
-	OfflineExt     bool
-	DuckDBThreads  int
+	BlobStore     kb.BlobStore
+	ManifestStore kb.ManifestStore
+	CacheDir      string
+	MemoryLimit   string
+	TempDir       string
+	ExtensionDir  string
+	OfflineExt    bool
+	DuckDBThreads int
+	// BuildThreads applies while sealing or compacting a shard. Queries want
+	// one thread per shard because several run at once; an index build is
+	// alone and single-threaded leaves most of the machine idle.
+	BuildThreads   int
 	ShardingPolicy kb.ShardingPolicy
 
 	Embed func(context.Context, string) ([]float32, error)

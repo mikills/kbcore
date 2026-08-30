@@ -23,6 +23,12 @@ func batchEmbedFromKB(k *kb.KB) func(context.Context, []string) ([][]float32, er
 	return batcher.EmbedBatch
 }
 
+// WithBuildThreads sets the thread count for sealing and compacting a shard.
+// Zero picks a default that leaves headroom for concurrent queries.
+func WithBuildThreads(threads int) DepOption {
+	return func(d *DuckDBArtifactDeps) { d.BuildThreads = threads }
+}
+
 // WithTempDir sets where DuckDB spills. Empty spills beside the shard.
 func WithTempDir(dir string) DepOption {
 	return func(d *DuckDBArtifactDeps) { d.TempDir = dir }

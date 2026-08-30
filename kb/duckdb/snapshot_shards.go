@@ -219,7 +219,12 @@ func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(
 	if err := shardbuild.ValidateLimit(source.limit); err != nil {
 		return 0, false, "", nil, err
 	}
-	shardDB, err := shardbuild.OpenAttached(ctx, source.sourceDBPath, source.shardPath, f.openConfiguredDB)
+	threads, releaseThreads := acquireBuildThreads(ctx, f.buildThreads())
+	defer releaseThreads()
+	openBuild := func(ctx context.Context, path string) (*sql.DB, error) {
+		return f.openWithThreads(ctx, path, threads)
+	}
+	shardDB, err := shardbuild.OpenAttached(ctx, source.sourceDBPath, source.shardPath, openBuild)
 	if err != nil {
 		return 0, false, "", nil, err
 	}
@@ -343,10 +348,11 @@ func (f *DuckDBArtifactFormat) downloadSnapshotFromShards(
 	}
 	defer cleanupTmpDest()
 
-	db, err := f.openConfiguredDB(ctx, tmpDest)
+	db, releaseThreads, err := f.openBuildDB(ctx, tmpDest)
 	if err != nil {
 		return nil, err
 	}
+	defer releaseThreads()
 	defer db.Close()
 
 	if err := f.mergeManifestShards(ctx, db, tmpDir, manifest.Shards); err != nil {

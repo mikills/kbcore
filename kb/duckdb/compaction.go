@@ -158,10 +158,11 @@ func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(
 
 func (f *DuckDBArtifactFormat) buildCompactionShard(ctx context.Context, tmpDir string, shards []kb.SnapshotShardMetadata) (builtCompactionShard, error) {
 	combinedPath := filepath.Join(tmpDir, "replacement.duckdb")
-	db, err := f.openConfiguredDB(ctx, combinedPath)
+	db, releaseThreads, err := f.openBuildDB(ctx, combinedPath)
 	if err != nil {
 		return builtCompactionShard{}, err
 	}
+	defer releaseThreads()
 	defer db.Close()
 
 	if err := f.mergeCompactionShards(ctx, db, tmpDir, shards); err != nil {

@@ -12,6 +12,23 @@ const DefaultExtensionDir = connection.DefaultExtensionDir
 func ResolveExtensionDir() string { return connection.ResolveExtensionDir() }
 
 func (f *DuckDBArtifactFormat) openConfiguredDB(ctx context.Context, dbPath string) (*sql.DB, error) {
+	return f.openWithThreads(ctx, dbPath, f.deps.DuckDBThreads)
+}
+
+// openBuildDB opens a connection for sealing or compacting a shard. The caller
+// must call the returned release once the build is done, since the thread
+// budget is shared across every concurrent build in the process.
+func (f *DuckDBArtifactFormat) openBuildDB(ctx context.Context, dbPath string) (*sql.DB, func(), error) {
+	threads, release := acquireBuildThreads(ctx, f.buildThreads())
+	db, err := f.openWithThreads(ctx, dbPath, threads)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	return db, release, nil
+}
+
+func (f *DuckDBArtifactFormat) openWithThreads(ctx context.Context, dbPath string, threads int) (*sql.DB, error) {
 	return connection.Open(
 		ctx,
 		dbPath,
@@ -20,7 +37,7 @@ func (f *DuckDBArtifactFormat) openConfiguredDB(ctx context.Context, dbPath stri
 			MemoryLimit:  f.deps.MemoryLimit,
 			TempDir:      f.deps.TempDir,
 			OfflineExt:   f.deps.OfflineExt,
-			Threads:      f.deps.DuckDBThreads,
+			Threads:      threads,
 		},
 	)
 }

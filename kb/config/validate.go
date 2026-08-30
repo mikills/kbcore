@@ -345,11 +345,22 @@ func (c *Config) validateFormat() error {
 	if c.Format.Kind != "duckdb" {
 		return fmt.Errorf("format.kind %q is not supported (only \"duckdb\")", c.Format.Kind)
 	}
+	if c.Format.DuckDB.BuildThreads < 0 {
+		return fmt.Errorf("format.duckdb.build_threads must be >= 0, got %d", c.Format.DuckDB.BuildThreads)
+	}
+	if c.Format.DuckDB.BuildThreads > maxConfiguredBuildThreads {
+		return fmt.Errorf(
+			"format.duckdb.build_threads must be <= %d, got %d",
+			maxConfiguredBuildThreads, c.Format.DuckDB.BuildThreads,
+		)
+	}
 	if err := requireNonEmptyString("format.duckdb.memory_limit", c.Format.DuckDB.MemoryLimit); err != nil {
 		return err
 	}
 	return nil
 }
+
+const maxConfiguredBuildThreads = 256
 
 func (c *Config) validateEmbedder() error {
 	switch c.Embedder.Provider {

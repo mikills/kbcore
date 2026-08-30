@@ -109,6 +109,7 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 	af, err := kbduckdb.NewArtifactFormat(kbduckdb.NewDepsFromKB(k,
 		kbduckdb.WithMemoryLimit(cfg.Format.DuckDB.MemoryLimit),
 		kbduckdb.WithTempDir(cfg.Format.DuckDB.TempDir),
+		kbduckdb.WithBuildThreads(cfg.Format.DuckDB.BuildThreads),
 		kbduckdb.WithExtensionDir(cfg.Format.DuckDB.ExtensionDir),
 		kbduckdb.WithOfflineExt(cfg.Format.DuckDB.Offline),
 	))
