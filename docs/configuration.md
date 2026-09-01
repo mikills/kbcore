@@ -255,16 +255,25 @@ allocated outside DuckDB's buffer manager, DuckDB has non-buffer allocations
 
 So on Linux minnow also asks the kernel. It writes `memory.high` on its own
 cgroup at 95% of the ceiling, which makes the kernel reclaim and throttle there
-instead of letting the process run to the OOM killer, then waits on
-`memory.events`. The mark sits above the ones below so userspace sheds work
-first and the kernel is the backstop. Where the cgroup is not writable, which is
-usual under a container runtime that owns it, minnow registers a pressure-stall
-trigger on `memory.pressure` instead and reacts without the kernel enforcing.
-The previous `memory.high` is restored on shutdown.
+instead of letting the process run to the OOM killer. The mark sits above the
+ones below, so userspace sheds work first and the kernel is the backstop. The
+previous value is restored on shutdown. Where the cgroup is not writable, which
+is usual under a container runtime that owns it, nothing is enforced and only
+the shedding below applies.
+
+For notification it waits on `memory.pressure`, the time this cgroup actually
+lost to reclaim, with a trigger at 150ms in any second. Not `memory.events`:
+that counter bumps on every allocation the kernel throttles, and `memory.high`
+is policed against `memory.current`, so a process whose page cache sits at the
+mark is woken continuously while nothing it can act on has changed. Stall time
+is the part worth waking for. `memory.events` is the fallback where pressure
+stall is unavailable, and it wakes far more often than it needs to.
 
 Nothing is polled. A healthy process costs one goroutine blocked in
-`epoll_wait`. On a wake-up minnow reads the working set of the cgroup that set
-the ceiling, `memory.current` minus `inactive_file`, and sheds work:
+`epoll_wait`. Wake-ups are paced to four a second, since sustained pressure
+reports continuously and correctly. On a wake-up minnow reads the working set of
+the cgroup that set the ceiling, `memory.current` minus `inactive_file`, and
+sheds work:
 
 | use | what changes |
 | --- | --- |

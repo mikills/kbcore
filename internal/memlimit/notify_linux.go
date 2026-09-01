@@ -51,10 +51,14 @@ func (w *Watcher) Enforced() bool { return w.enforced }
 // Watch arms kernel notification for the cgroup at dir, which must be the one
 // that supplied the ceiling.
 //
-// It prefers setting memory.high, because that makes the kernel reclaim at the
-// mark rather than leaving minnow to notice afterwards. Where the cgroup is not
-// writable, which is usual under a container runtime that owns it, it falls
-// back to a pressure-stall trigger on memory.pressure.
+// It sets memory.high where it can, because that makes the kernel reclaim at
+// the mark rather than leaving minnow to notice afterwards.
+//
+// For notification it prefers memory.pressure over memory.events. The events
+// counter bumps on every allocation the kernel throttles, and memory.high is
+// policed against memory.current, so a process whose page cache sits at the
+// mark is woken continuously while nothing it can act on has changed. Pressure
+// stall is time actually lost to reclaim, which is the thing worth waking for.
 func Watch(dir string, ceiling int64) (Notifier, error) {
 	own, err := ownCgroupDir()
 	if err != nil {
@@ -62,15 +66,28 @@ func Watch(dir string, ceiling int64) (Notifier, error) {
 	}
 	// Only ever our own cgroup. Writing memory.high on an ancestor would
 	// throttle every sibling sharing it.
+	restore := func() {}
+	enforced := false
 	if dir == "" || dir == own {
-		if w, err := watchEvents(own, int64(float64(ceiling)*BackstopMark)); err == nil {
-			return w, nil
+		if put, err := setHigh(own, int64(float64(ceiling)*BackstopMark)); err == nil {
+			restore, enforced = put, true
 		}
 	}
-	return watchPressure(own)
+	w, err := watchPressure(own)
+	if err != nil {
+		w, err = watchEvents(own)
+	}
+	if err != nil {
+		restore()
+		return nil, err
+	}
+	w.restore = restore
+	w.enforced = enforced
+	return w, nil
 }
 
-func watchEvents(dir string, mark int64) (*Watcher, error) {
+// setHigh writes the backstop and returns the undo.
+func setHigh(dir string, mark int64) (func(), error) {
 	// Page aligned: the kernel rounds memory.high down to a page multiple, so
 	// an unaligned request lands somewhere other than where it was asked for.
 	mark -= mark % int64(os.Getpagesize())
@@ -82,25 +99,23 @@ func watchEvents(dir string, mark int64) (*Watcher, error) {
 	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", mark)), 0o644); err != nil {
 		return nil, fmt.Errorf("set memory.high: %w", err)
 	}
-	restore := func() {
+	return func() {
 		value := strings.TrimSpace(string(previous))
 		if value == "" {
 			value = "max"
 		}
 		_ = os.WriteFile(path, []byte(value+"\n"), 0o644)
-	}
+	}, nil
+}
+
+// watchEvents is the fallback where pressure stall is unavailable. It wakes far
+// more often than it needs to, which is why it is not the first choice.
+func watchEvents(dir string) (*Watcher, error) {
 	file, err := os.Open(filepath.Join(dir, "memory.events"))
 	if err != nil {
-		restore()
 		return nil, err
 	}
-	w, err := arm(file, "memory.events", true, true)
-	if err != nil {
-		restore()
-		return nil, err
-	}
-	w.restore = restore
-	return w, nil
+	return arm(file, "memory.events", true)
 }
 
 // watchPressure asks for a wake-up when this cgroup stalls on memory for 150ms
@@ -114,16 +129,16 @@ func watchPressure(dir string) (*Watcher, error) {
 		_ = file.Close()
 		return nil, fmt.Errorf("arm memory.pressure trigger: %w", err)
 	}
-	return arm(file, "memory.pressure", false, false)
+	return arm(file, "memory.pressure", false)
 }
 
-func arm(file *os.File, source string, enforced, events bool) (*Watcher, error) {
+func arm(file *os.File, source string, events bool) (*Watcher, error) {
 	epfd, err := unix.EpollCreate1(unix.EPOLL_CLOEXEC)
 	if err != nil {
 		_ = file.Close()
 		return nil, err
 	}
-	w := &Watcher{epfd: epfd, file: file, source: source, enforced: enforced, events: events}
+	w := &Watcher{epfd: epfd, file: file, source: source, events: events}
 	event := unix.EpollEvent{Events: unix.EPOLLPRI | unix.EPOLLERR, Fd: int32(file.Fd())}
 	if err := unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, int(file.Fd()), &event); err != nil {
 		_ = w.Close()

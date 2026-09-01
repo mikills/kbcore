@@ -64,7 +64,10 @@ func TestCgroupIntegration(t *testing.T) {
 		watcher, err := Watch(dir, ceiling)
 		require.NoError(t, err)
 		require.True(t, watcher.Enforced(), "the cgroup was writable but nothing was enforced")
-		require.Equal(t, "memory.events", watcher.Source())
+		// Stall time, not the events counter: memory.high is policed against
+		// memory.current, so page cache at the mark wakes an events watcher
+		// continuously while nothing actionable has changed.
+		require.Equal(t, "memory.pressure", watcher.Source())
 
 		// The kernel stores memory.high rounded down to a page multiple, so the
 		// value asked for has to be aligned or the mark is not where we put it.
@@ -93,22 +96,21 @@ func TestCgroupIntegration(t *testing.T) {
 			}
 			hog = append(hog, block)
 		}
-		require.NoError(t, watcher.Wait(5000), "allocating past memory.high did not wake the watcher")
+		require.NoError(t, watcher.Wait(20000), "reclaiming past memory.high did not wake the watcher")
 		require.Len(t, hog, cap(hog))
 
-		// Every allocation over the mark bumps the counter, so wake-ups while
-		// still over it are the kernel doing its job. The governor paces them;
-		// what has to be true here is that quiet is quiet again afterwards.
 		hog = nil
 		debug.FreeOSMemory()
 		require.Eventually(t, func() bool {
 			usage := Current(dir)
-			return usage.Ok && float64(usage.Bytes) < float64(Detect().Ceiling)*BackstopMark*0.9
+			return usage.Ok && float64(usage.Bytes) < float64(Detect().Ceiling)*0.5
 		}, 20*time.Second, 200*time.Millisecond, "memory was never returned")
 
+		// Page cache still sits near the mark here, so an events watcher would
+		// keep firing. Stall time has stopped, so this one has to go quiet.
 		start := time.Now()
 		_ = watcher.Wait(1000)
 		require.GreaterOrEqual(t, time.Since(start), 900*time.Millisecond,
-			"the watcher woke with nothing to report, so memory.events is never being read back")
+			"the watcher woke with no stall to report")
 	})
 }
