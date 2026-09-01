@@ -19,6 +19,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/mikills/minnow/internal/budget"
+	"github.com/mikills/minnow/internal/memlimit"
 	kb "github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/kb/duckdb"
 )
@@ -190,7 +192,11 @@ func benchMemoryLimit() string {
 	if v := strings.TrimSpace(os.Getenv(envBenchMemoryLimit)); v != "" {
 		return v
 	}
-	return "16GB"
+	// A fixed default outgrew the runner it ran on. Size from the host instead.
+	if plan, err := memlimit.Detect().Divide(budget.PlannedDatabases, 0); err == nil {
+		return plan.MemoryLimit()
+	}
+	return "1GB"
 }
 
 func appendBenchResult(path string, result BenchResult) error {

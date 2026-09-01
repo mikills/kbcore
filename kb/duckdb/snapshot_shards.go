@@ -22,6 +22,11 @@ func (f *DuckDBArtifactFormat) BuildArtifacts(
 	kbID, srcPath string,
 	targetBytes int64,
 ) ([]kb.SnapshotShardMetadata, error) {
+	// Once, before the loop. Checking per shard aborts a snapshot midway and
+	// strands the shards already uploaded.
+	if err := f.budget().AdmitBuild(); err != nil {
+		return nil, err
+	}
 	if targetBytes <= 0 {
 		targetBytes = kb.DefaultSnapshotShardSize
 	}
@@ -219,7 +224,7 @@ func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(
 	if err := shardbuild.ValidateLimit(source.limit); err != nil {
 		return 0, false, "", nil, err
 	}
-	threads, releaseThreads := acquireBuildThreads(ctx, f.buildThreads())
+	threads, releaseThreads := f.budget().AcquireBuildThreads(ctx, f.buildThreads())
 	defer releaseThreads()
 	openBuild := func(ctx context.Context, path string) (*sql.DB, error) {
 		return f.openWithThreads(ctx, path, threads)

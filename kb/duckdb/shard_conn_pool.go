@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/mikills/minnow/internal/budget"
 	"log/slog"
 	"os"
 	"strings"
@@ -20,7 +21,8 @@ type shardConn struct {
 }
 
 // shardConnPool keeps warm DuckDB connections keyed by local file path.
-const maxShardConnPoolEntries = 16
+// Kept in step with budget.CachedReaders, which the memory plan divides by.
+const maxShardConnPoolEntries = budget.CachedReaders
 
 var errShardConnPoolEvicting = errors.New("DuckDB shard cache path is being evicted")
 
