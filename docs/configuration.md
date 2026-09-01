@@ -188,28 +188,114 @@ storage:
 format:
   duckdb:
     memory_limit: 64MB
+    build_threads: 1 # index builds hold memory too
 sharding:
   query_shard_fanout: 2
   query_shard_fanout_adaptive_max: 2
   query_shard_parallelism: 1
-format:
-  duckdb:
-    build_threads: 1 # index builds hold memory too
 ```
 
-Set `GOMEMLIMIT` in the service environment as an additional Go-heap guard.
-It does not include DuckDB native memory, so retain an OS/cgroup memory limit.
+`memory_limit: auto` derives all of this from the host instead. Set `GOMEMLIMIT`
+yourself only if you want a specific Go-heap figure; `auto` then sizes DuckDB
+around it rather than on top of it.
 
 ### `format`
 
 | Field                  | Type   | Default         | Notes                              |
 | ---------------------- | ------ | --------------- | ---------------------------------- |
 | `kind`                 | string | `duckdb`        | Only `duckdb` is supported today.  |
-| `duckdb.memory_limit`  | string | `128MB`         | Passed to DuckDB verbatim. `MINNOW_DUCKDB_MEMORY_LIMIT` overrides it at startup, for deployments whose config is baked into an image. |
-| `duckdb.build_threads` | int    | `min(GOMAXPROCS, 4)` | DuckDB threads while sealing or compacting a shard, capped at 256. Queries stay at one thread per shard because several are probed at once. Roughly halves index build time on a 75k row shard at 512 dim, and the gain flattens past four. Every concurrent build shares one budget of `GOMAXPROCS` threads, so raising this does not multiply across parallel seals. Each build thread also raises DuckDB's per-operator memory reservation, so lower it alongside a small `memory_limit`. |
+| `duckdb.memory_limit`  | string | sized from the host | A size such as `4GB`, passed to DuckDB verbatim. Unset sizes from the host (see below), falling back to `128MB` where the ceiling cannot be read. `auto` is the same sizing but fails rather than falling back. `MINNOW_DUCKDB_MEMORY_LIMIT` overrides it at startup, for deployments whose config is baked into an image. |
+| `duckdb.build_threads` | int    | `min(GOMAXPROCS, 4)` | DuckDB threads while sealing or compacting a shard, capped at 256. Queries stay at one thread per shard because several are probed at once. Halves index build time on a 75k row shard at 512 dim; the gain flattens past four. All concurrent builds share one budget sized to the machine's cores, and each build is also held to the current GOMAXPROCS, which Go re-reads from the cgroup CPU quota about once a second. Raising a container's CPU limit therefore widens builds without a restart. Each thread raises DuckDB's per-operator memory reservation, so lower it alongside a small `memory_limit`. |
+| `duckdb.embed_parallelism` | int | `4` | Embedding batches in flight during one upsert, capped at 16. A remote embedder spends each request waiting, so running several at once cuts the wall clock. All upserts share a process budget of 64, so raising this does not multiply across concurrent ingests. |
 | `duckdb.temp_directory` | path  | unset           | Where DuckDB spills once a query exceeds `memory_limit`. Created if missing. Unset spills to a `.tmp` directory beside each shard, so the spill lands on whichever volume holds `storage.cache.dir`. Set it when that volume is smaller than the working set. |
 | `duckdb.extension_dir` | path   | `./extensions`  | Relative to YAML file.             |
 | `duckdb.offline`       | bool   | `false`         | If true, disables extension fetch. |
+
+#### Sizing memory from the host
+
+`memory_limit: auto` reads the ceiling this process runs under and divides it.
+In a cgroup that is the tightest limit in the ancestry, from `memory.max`,
+`memory.high`, or v1's `memory.limit_in_bytes`. Otherwise it is physical memory.
+
+```
+budget  = 90% of ceiling
+Go heap = 30% of budget, or your GOMEMLIMIT if you set one
+DuckDB  = budget - Go heap, divided by 16
+```
+
+`memory_limit` bounds only DuckDB's buffer manager. Documents and embeddings in
+flight are Go allocations it never sees, so the Go heap needs its own share.
+When the computed Go share falls below 256MiB the floor applies instead; a
+`GOMEMLIMIT` you set is used as-is.
+
+The division by 16 is the part to understand. `memory_limit` binds one
+database, not the process, and minnow holds up to 16 shard readers open at
+once. A fanout query across six shards runs six buffer managers, each entitled
+to the full setting. So the budget is divided before it becomes a setting. On a
+16 GiB host that is a 14.4 GiB budget, a 4.3 GiB Go heap, and `645MB` per
+database.
+
+Sixteen is the shard-reader cache, the steady-state population. Ingest,
+sealing, and compaction open their own short-lived databases on top of it, so
+minnow tracks how much of the DuckDB total it has already handed out and gives
+each new database the planned share or whatever is left, whichever is smaller.
+Databases that close return their share.
+
+Nothing blocks waiting for a share, which matters because these opens nest: a
+database waiting on a slot could be waiting on one its own caller holds.
+
+The floor is 64MiB, below which an index build cannot finish. That is the one
+way the sum exceeds the total. Once the total is spent every further database
+still gets 64MiB, so a host running far more databases than the cache holds can
+issue more `memory_limit` in aggregate than it planned for.
+
+No plan can see everything. The HNSW index the VSS extension builds is
+allocated outside DuckDB's buffer manager, DuckDB has non-buffer allocations
+`memory_limit` does not cover, and `GOMEMLIMIT` bounds no cgo at all.
+
+So on Linux minnow also asks the kernel. It writes `memory.high` on its own
+cgroup at 95% of the ceiling, which makes the kernel reclaim and throttle there
+instead of letting the process run to the OOM killer, then waits on
+`memory.events`. The mark sits above the ones below so userspace sheds work
+first and the kernel is the backstop. Where the cgroup is not writable, which is
+usual under a container runtime that owns it, minnow registers a pressure-stall
+trigger on `memory.pressure` instead and reacts without the kernel enforcing.
+The previous `memory.high` is restored on shutdown.
+
+Nothing is polled. A healthy process costs one goroutine blocked in
+`epoll_wait`. On a wake-up minnow reads the working set of the cgroup that set
+the ceiling, `memory.current` minus `inactive_file`, and sheds work:
+
+| use | what changes |
+| --- | --- |
+| under 75% | budgets apply as planned |
+| 75% to 90% | new databases get half the planned share, embedding batches in flight halve |
+| over 90% | new shard seals and compactions are refused, new databases get the 64MiB floor, index builds drop to one thread, embedding runs one batch at a time, and the GC runs harder |
+
+Reclaimable page cache is subtracted deliberately. Counting it would leave any
+process that writes shard files sitting at its own limit, throttled for good by
+cache the kernel would drop on demand.
+
+A level holds until use falls five points clear of its mark, so a process
+sitting on a threshold does not flap between settings.
+
+What this cannot do is reach a build that has already started. Its
+`memory_limit` and thread count are fixed when it opens, and DuckDB takes one
+connection at a time, so a later `SET` would queue behind the very build it
+needed to reach. Refusing to start the next seal or compaction is the lever that
+works, and it bounds the peak rather than smearing it.
+
+All of this runs whether or not `memory_limit` was chosen for you. Pinning a
+size keeps your number and still gets back-pressure and admission control.
+Startup logs which mechanism is in force, or warns that none is.
+
+Where the kernel cannot report pressure, which is every platform but Linux, the
+static plan is all you get.
+
+Startup logs the ceiling, its source, and every share. `auto` fails at startup
+rather than guessing when the platform has no readable ceiling, when a cgroup
+filesystem is mounted but its limits cannot be read, and when the shares work
+out below 64MiB per database, which is too little to finish an index build.
 
 ### `embedder`
 
