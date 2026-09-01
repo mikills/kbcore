@@ -40,7 +40,9 @@ func TestLoad(t *testing.T) {
 
 		// Format defaults.
 		require.Equal(t, "duckdb", cfg.Format.Kind)
-		require.Equal(t, "128MB", cfg.Format.DuckDB.MemoryLimit)
+		// Left unset so the runtime can size it from the host. A default here
+		// would give every machine the smallest sensible number.
+		require.Empty(t, cfg.Format.DuckDB.MemoryLimit)
 
 		// Explicit embedder.
 		require.Equal(t, "local", cfg.Embedder.Provider)

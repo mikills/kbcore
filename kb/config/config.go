@@ -122,11 +122,12 @@ type FormatConfig struct {
 
 // DuckDBFormatConfig carries DuckDB-specific knobs.
 type DuckDBFormatConfig struct {
-	MemoryLimit  string `yaml:"memory_limit"   json:"memory_limit"`
-	BuildThreads int    `yaml:"build_threads"  json:"build_threads"`
-	TempDir      string `yaml:"temp_directory" json:"temp_directory"`
-	ExtensionDir string `yaml:"extension_dir"  json:"extension_dir"`
-	Offline      bool   `yaml:"offline"        json:"offline"`
+	MemoryLimit      string `yaml:"memory_limit"   json:"memory_limit"`
+	BuildThreads     int    `yaml:"build_threads"  json:"build_threads"`
+	EmbedParallelism int    `yaml:"embed_parallelism" json:"embed_parallelism"`
+	TempDir          string `yaml:"temp_directory" json:"temp_directory"`
+	ExtensionDir     string `yaml:"extension_dir"  json:"extension_dir"`
+	Offline          bool   `yaml:"offline"        json:"offline"`
 }
 
 // EmbedderConfig selects an embedder implementation.
@@ -449,9 +450,9 @@ func (c *Config) applyFormatDefaults() {
 	if c.Format.Kind == "" {
 		c.Format.Kind = "duckdb"
 	}
-	if c.Format.DuckDB.MemoryLimit == "" {
-		c.Format.DuckDB.MemoryLimit = "128MB"
-	}
+	// Left empty on purpose: the runtime sizes an unset limit from the host and
+	// falls back to a fixed default only where it cannot. Writing 128MB here
+	// would hand every machine the smallest sensible number instead.
 	if c.Format.DuckDB.ExtensionDir == "" {
 		c.Format.DuckDB.ExtensionDir = "./extensions"
 	}
