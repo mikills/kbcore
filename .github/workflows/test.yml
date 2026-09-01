@@ -175,7 +175,11 @@ jobs:
 
   publish-container:
     needs: [test, container]
-    if: ${{ github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/codeindex/') }}
+    # Only main and release tags. Feature branches run the tests; they have no
+    # business pushing an image to the registry.
+    if: ${{ github.event_name == 'push'
+      && !startsWith(github.ref, 'refs/tags/codeindex/')
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
