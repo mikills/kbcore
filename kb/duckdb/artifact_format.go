@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/mikills/minnow/internal/budget"
 	"sort"
 	"strings"
 	"sync"
@@ -46,7 +47,12 @@ type DuckDBArtifactDeps struct {
 	Embed func(context.Context, string) ([]float32, error)
 	// EmbedBatch is optional. Without it every document costs one round trip,
 	// which a remote embedder makes the dominant cost of an ingest.
-	EmbedBatch   func(context.Context, []string) ([][]float32, error)
+	// EmbedBatch must be safe for concurrent use: batches are sent in parallel.
+	EmbedBatch func(context.Context, []string) ([][]float32, error)
+	// EmbedParallelism bounds batches in flight. Zero picks a default.
+	EmbedParallelism int
+	// Budget holds the process-wide limits. Nil uses the shared manager.
+	Budget       *budget.Manager
 	GraphBuilder func() *kb.GraphBuilder
 
 	EvictCacheIfNeeded         func(context.Context, string) error

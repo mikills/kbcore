@@ -2,6 +2,7 @@ package duckdb
 
 import (
 	"context"
+	"github.com/mikills/minnow/internal/budget"
 	"time"
 
 	kb "github.com/mikills/minnow/kb"
@@ -27,6 +28,16 @@ func batchEmbedFromKB(k *kb.KB) func(context.Context, []string) ([][]float32, er
 // Zero picks a default that leaves headroom for concurrent queries.
 func WithBuildThreads(threads int) DepOption {
 	return func(d *DuckDBArtifactDeps) { d.BuildThreads = threads }
+}
+
+// WithEmbedParallelism bounds embedding batches in flight during an upsert.
+func WithEmbedParallelism(n int) DepOption {
+	return func(d *DuckDBArtifactDeps) { d.EmbedParallelism = n }
+}
+
+// WithBudget wires the process-wide limits. Nil uses the shared manager.
+func WithBudget(m *budget.Manager) DepOption {
+	return func(d *DuckDBArtifactDeps) { d.Budget = m }
 }
 
 // WithTempDir sets where DuckDB spills. Empty spills beside the shard.

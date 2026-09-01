@@ -15,6 +15,7 @@ import (
 
 	kb "github.com/mikills/minnow/kb"
 	graph "github.com/mikills/minnow/kb/duckdb/internal/graph"
+	"golang.org/x/sync/errgroup"
 )
 
 func (f *DuckDBArtifactFormat) Ingest(ctx context.Context, req kb.IngestUpsertRequest) (kb.IngestResult, error) {
@@ -959,16 +960,15 @@ func (f *DuckDBArtifactFormat) prepareDocsForUpsert(
 	return prepared, nil
 }
 
-// One request is bounded by both, because the HTTP client timeout now covers a
-// whole batch and some compatible endpoints cap inputs well below 32.
+// One request is bounded by both: some compatible endpoints cap inputs well
+// below 32, and a large batch is what pushes a request past its timeout.
 const (
 	upsertEmbedBatchSize  = 32
 	upsertEmbedBatchBytes = 256 << 10
 )
 
-// embedTexts embeds the documents at idx, one request per batch where the
-// embedder supports it. One round trip per document makes a remote embedder
-// the dominant cost of an ingest.
+// embedTexts embeds the documents at idx. Batches run concurrently: each writes
+// its own span of out, so only the embedder's own limits are at stake.
 func (f *DuckDBArtifactFormat) embedTexts(
 	ctx context.Context,
 	docs []kb.Document,
@@ -988,21 +988,41 @@ func (f *DuckDBArtifactFormat) embedTexts(
 		}
 		return out, nil
 	}
-	for start := 0; start < len(idx); {
-		end := batchEnd(docs, idx, start)
-		inputs := make([]string, 0, end-start)
-		for _, i := range idx[start:end] {
-			inputs = append(inputs, docs[i].Text)
-		}
-		vectors, err := f.deps.EmbedBatch(ctx, inputs)
-		if err != nil {
-			return nil, fmt.Errorf("embed docs %q..%q: %w", docs[idx[start]].ID, docs[idx[end-1]].ID, err)
-		}
-		if len(vectors) != len(inputs) {
-			return nil, fmt.Errorf("batch embed returned %d vectors for %d documents", len(vectors), len(inputs))
-		}
-		copy(out[start:end], vectors)
-		start = end
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(f.embedParallelism())
+	for start := 0; start < len(idx) && groupCtx.Err() == nil; {
+		// Fixed here: the loop advances start before the goroutine reads it.
+		from, to := start, batchEnd(docs, idx, start)
+		group.Go(func() error {
+			release, err := f.budget().AcquireEmbed(groupCtx)
+			if err != nil {
+				return err
+			}
+			defer release()
+			inputs := make([]string, 0, to-from)
+			for _, i := range idx[from:to] {
+				inputs = append(inputs, docs[i].Text)
+			}
+			vectors, err := f.deps.EmbedBatch(groupCtx, inputs)
+			if err != nil {
+				return fmt.Errorf("embed docs %q..%q: %w", docs[idx[from]].ID, docs[idx[to-1]].ID, err)
+			}
+			if len(vectors) != len(inputs) {
+				return fmt.Errorf("batch embed returned %d vectors for %d documents", len(vectors), len(inputs))
+			}
+			copy(out[from:to], vectors)
+			return nil
+		})
+		start = to
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	// The loop stops scheduling on cancellation, so an early exit can leave out
+	// half filled with a nil error behind it.
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
