@@ -27,6 +27,9 @@ func stubDetect(t *testing.T, limit memlimit.Limit) {
 	previousLimit := debug.SetMemoryLimit(-1)
 	previousProcess := budget.Process()
 	detect = func() memlimit.Limit { return limit }
+	// No inherited GOMEMLIMIT: the runner sets one and the developer machine
+	// does not, which silently changes every number below.
+	debug.SetMemoryLimit(math.MaxInt64)
 	t.Cleanup(func() {
 		detect = previousDetect
 		debug.SetMemoryLimit(previousLimit)

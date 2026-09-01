@@ -307,6 +307,30 @@ func TestGovernor(t *testing.T) {
 		}
 	})
 
+	t.Run("sustained pressure does not spin the loop", func(t *testing.T) {
+		m := New(planFor(t, ceiling), true)
+		usage := &stubUsage{}
+		usage.bytes.Store(int64(float64(ceiling) * 0.95))
+		watch := newFakeWatch(true)
+		m.startGovernor(context.Background(), usage.read, watch.watcher, nil)
+		t.Cleanup(m.StopGovernor)
+
+		// The kernel bumps memory.events on every allocation past the mark, so
+		// while use stays over it the wake-ups are continuous and correct.
+		go func() {
+			for range 200 {
+				watch.signal()
+			}
+		}()
+		waitPressure(t, m, PressureCritical)
+
+		time.Sleep(minWakeInterval * 3)
+		g := m.gov.Load()
+		require.NotNil(t, g)
+		require.LessOrEqual(t, g.wakes.Load(), int64(6),
+			"the loop handled wake-ups faster than its floor allows")
+	})
+
 	t.Run("a build is refused while critical and admitted once it lifts", func(t *testing.T) {
 		m, usage, watch := governed(t, ceiling)
 		require.NoError(t, m.AdmitBuild())

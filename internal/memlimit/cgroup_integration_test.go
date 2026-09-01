@@ -5,6 +5,7 @@ package memlimit
 import (
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"testing"
@@ -65,8 +66,13 @@ func TestCgroupIntegration(t *testing.T) {
 		require.True(t, watcher.Enforced(), "the cgroup was writable but nothing was enforced")
 		require.Equal(t, "memory.events", watcher.Source())
 
-		during := readValue(t, filepath.Join(dir, "memory.high"))
-		require.Equal(t, strconv.FormatInt(int64(float64(ceiling)*BackstopMark), 10), during)
+		// The kernel stores memory.high rounded down to a page multiple, so the
+		// value asked for has to be aligned or the mark is not where we put it.
+		during, err := strconv.ParseInt(readValue(t, filepath.Join(dir, "memory.high")), 10, 64)
+		require.NoError(t, err)
+		want := int64(float64(ceiling) * BackstopMark)
+		want -= want % int64(os.Getpagesize())
+		require.Equal(t, want, during, "the kernel rounded the mark we asked for")
 
 		require.NoError(t, watcher.Close())
 		// Left written, the next start reads it back as the ceiling and takes
@@ -74,12 +80,11 @@ func TestCgroupIntegration(t *testing.T) {
 		require.Equal(t, before, readValue(t, filepath.Join(dir, "memory.high")))
 	})
 
-	t.Run("a wake-up does not repeat forever", func(t *testing.T) {
+	t.Run("crossing the mark wakes the watcher, and quiet blocks it", func(t *testing.T) {
 		watcher, err := Watch(dir, Detect().Ceiling)
 		require.NoError(t, err)
 		defer func() { _ = watcher.Close() }()
 
-		// Allocate past memory.high so the kernel bumps the events counter.
 		hog := make([][]byte, 0, 64)
 		for range cap(hog) {
 			block := make([]byte, 32<<20)
@@ -88,14 +93,22 @@ func TestCgroupIntegration(t *testing.T) {
 			}
 			hog = append(hog, block)
 		}
-		require.NoError(t, watcher.Wait(5000))
-
-		// memory.events is level-triggered through kernfs: without reading it
-		// back, every later wait returns instantly and pegs a core.
-		start := time.Now()
-		require.NoError(t, watcher.Wait(300))
-		require.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond,
-			"the watcher is spinning instead of blocking")
+		require.NoError(t, watcher.Wait(5000), "allocating past memory.high did not wake the watcher")
 		require.Len(t, hog, cap(hog))
+
+		// Every allocation over the mark bumps the counter, so wake-ups while
+		// still over it are the kernel doing its job. The governor paces them;
+		// what has to be true here is that quiet is quiet again afterwards.
+		hog = nil
+		debug.FreeOSMemory()
+		require.Eventually(t, func() bool {
+			usage := Current(dir)
+			return usage.Ok && float64(usage.Bytes) < float64(Detect().Ceiling)*BackstopMark*0.9
+		}, 20*time.Second, 200*time.Millisecond, "memory was never returned")
+
+		start := time.Now()
+		_ = watcher.Wait(1000)
+		require.GreaterOrEqual(t, time.Since(start), 900*time.Millisecond,
+			"the watcher woke with nothing to report, so memory.events is never being read back")
 	})
 }

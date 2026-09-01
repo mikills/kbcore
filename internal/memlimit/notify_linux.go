@@ -71,6 +71,9 @@ func Watch(dir string, ceiling int64) (Notifier, error) {
 }
 
 func watchEvents(dir string, mark int64) (*Watcher, error) {
+	// Page aligned: the kernel rounds memory.high down to a page multiple, so
+	// an unaligned request lands somewhere other than where it was asked for.
+	mark -= mark % int64(os.Getpagesize())
 	if mark <= 0 {
 		return nil, fmt.Errorf("memory.high needs a positive mark")
 	}

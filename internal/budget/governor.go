@@ -53,6 +53,11 @@ const (
 	// upward, so coming back down is the one thing worth sampling for, and
 	// only while there is something to come back from.
 	recoveryInterval = 2 * time.Second
+	// minWakeInterval paces the loop while use sits over the mark. Every
+	// allocation past memory.high bumps the counter, so the kernel wakes us
+	// continuously and correctly; without a floor between wake-ups that is a
+	// spin. Costs nothing while healthy, because then there are no wake-ups.
+	minWakeInterval = 250 * time.Millisecond
 )
 
 // governor turns real memory use into back-pressure. The plan divides a budget,
@@ -209,6 +214,7 @@ func (g *governor) run(ctx context.Context, ceiling int64) {
 		watcher.Interrupt()
 	}()
 
+	handled := time.Now()
 	for {
 		// Blocked with no timeout while healthy; once pressure is on, wake to
 		// check whether it has lifted.
@@ -224,6 +230,15 @@ func (g *governor) run(ctx context.Context, ceiling int64) {
 		}
 		g.wakes.Add(1)
 		g.sample(ceiling)
+
+		if since := time.Since(handled); since < minWakeInterval {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(minWakeInterval - since):
+			}
+		}
+		handled = time.Now()
 	}
 }
 
