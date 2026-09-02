@@ -1,5 +1,7 @@
 package memlimit
 
+import "errors"
+
 // Usage is what this process is using right now, against the ceiling it must
 // stay under. Ok is false where the platform cannot report it, in which case
 // callers must not infer headroom from silence.
@@ -29,3 +31,6 @@ type Notifier interface {
 	// Source names the mechanism, for startup logs.
 	Source() string
 }
+
+// errClosed ends a Wait once the notifier is interrupted.
+var errClosed = errors.New("memory notifier closed")

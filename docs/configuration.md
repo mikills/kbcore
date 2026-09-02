@@ -218,9 +218,10 @@ In a cgroup that is the tightest limit in the ancestry, from `memory.max`,
 `memory.high`, or v1's `memory.limit_in_bytes`. Otherwise it is physical memory.
 
 ```
-budget  = 90% of ceiling
-Go heap = 30% of budget, or your GOMEMLIMIT if you set one
-DuckDB  = budget - Go heap, divided by 16
+budget    = 90% of ceiling
+Go heap   = 30% of budget, or your GOMEMLIMIT if you set one
+DuckDB    = budget - Go heap
+databases = min(16, DuckDB / what one index build needs)
 ```
 
 `memory_limit` bounds only DuckDB's buffer manager. Documents and embeddings in
@@ -228,14 +229,49 @@ flight are Go allocations it never sees, so the Go heap needs its own share.
 When the computed Go share falls below 256MiB the floor applies instead; a
 `GOMEMLIMIT` you set is used as-is.
 
-The division by 16 is the part to understand. `memory_limit` binds one
-database, not the process, and minnow holds up to 16 shard readers open at
-once. A fanout query across six shards runs six buffer managers, each entitled
-to the full setting. So the budget is divided before it becomes a setting. On a
-16 GiB host that is a 14.4 GiB budget, a 4.3 GiB Go heap, and `645MB` per
-database.
+The divisor is the part to understand. `memory_limit` binds one database, not
+the process, and minnow holds up to 16 shard readers open at once. A fanout
+query across six shards runs six buffer managers, each entitled to the full
+setting. So the budget is divided before it becomes a setting. On a 16 GiB host
+that is a 14.4 GiB budget, a 4.3 GiB Go heap, and `645MB` per database.
 
-Sixteen is the shard-reader cache, the steady-state population. Ingest,
+Sixteen is a ceiling on that divisor, not a fixed one. A host that cannot give
+sixteen databases enough to finish an index build keeps fewer instead, and the
+reader cache is bounded by the same number, so the cache and the budget cannot
+drift apart. A 2 GiB box with a 768MiB `GOMEMLIMIT` runs four databases of
+`250MB` rather than sixteen of `62MB`, none of which could seal a shard.
+
+This costs something. A tight host caches fewer shard readers, so a fanout
+query across more shards than the cache holds reopens databases it just closed.
+Wide vectors make it worse. At 1536 dimensions a 4 GiB host affords three
+databases, where at 512 it affords eleven. If `sharding.query_shard_fanout`
+exceeds the `databases` count logged at startup, lower
+`sharding.max_vector_rows_per_shard` or add memory. A bigger cache would only
+overcommit.
+
+What one index build needs is measured, not assumed. `TestIndexBuildMemoryFloor`
+walks `memory_limit` down until an HNSW build over a full shard stops finishing.
+The floor tracks raw vector bytes, `rows x dimensions x 4`, rather than row
+count. 75k rows at 256 dimensions and 37.5k at 512 measure identically.
+
+| rows x dimensions | raw vectors | floor | ratio |
+| --- | --- | --- | --- |
+| 18,750 x 512 | 36 MiB | 56MB | 1.53 |
+| 37,500 x 512 | 73 MiB | 96MB | 1.31 |
+| 75,000 x 256 | 73 MiB | 96MB | 1.31 |
+| 37,500 x 768 | 109 MiB | 144MB | 1.31 |
+| 56,250 x 640 | 137 MiB | 176MB | 1.28 |
+| 75,000 x 512 | 146 MiB | 192MB | 1.31 |
+| 100,000 x 384 | 146 MiB | 192MB | 1.31 |
+
+The ratio falls as a shard grows. The planner uses 1.6 times raw, above the
+worst measured, and never less than 64MiB. Getting this wrong does not always
+fail cleanly. An allocation past `memory_limit` can throw where nothing catches
+it and abort the process. The shard shape comes from
+`sharding.max_vector_rows_per_shard` and your embedder's dimensions. Where only
+the provider knows the width, the 64MiB bound applies.
+
+Ingest,
 sealing, and compaction open their own short-lived databases on top of it, so
 minnow tracks how much of the DuckDB total it has already handed out and gives
 each new database the planned share or whatever is left, whichever is smaller.
@@ -244,10 +280,10 @@ Databases that close return their share.
 Nothing blocks waiting for a share, which matters because these opens nest: a
 database waiting on a slot could be waiting on one its own caller holds.
 
-The floor is 64MiB, below which an index build cannot finish. That is the one
-way the sum exceeds the total. Once the total is spent every further database
-still gets 64MiB, so a host running far more databases than the cache holds can
-issue more `memory_limit` in aggregate than it planned for.
+That floor is also the one way the sum exceeds the total. Once the total is
+spent every further database still gets the floor, so a host running far more
+databases than the cache holds can issue more `memory_limit` in aggregate than
+it planned for. Shrinking below it would trade one failure for a worse one.
 
 No plan can see everything. The HNSW index the VSS extension builds is
 allocated outside DuckDB's buffer manager, DuckDB has non-buffer allocations
@@ -266,20 +302,28 @@ lost to reclaim, with a trigger at 150ms in any second. Not `memory.events`:
 that counter bumps on every allocation the kernel throttles, and `memory.high`
 is policed against `memory.current`, so a process whose page cache sits at the
 mark is woken continuously while nothing it can act on has changed. Stall time
-is the part worth waking for. `memory.events` is the fallback where pressure
-stall is unavailable, and it wakes far more often than it needs to.
+is the part worth waking for.
 
-Nothing is polled. A healthy process costs one goroutine blocked in
-`epoll_wait`. Wake-ups are paced to four a second, since sustained pressure
-reports continuously and correctly. On a wake-up minnow reads the working set of
-the cgroup that set the ceiling, `memory.current` minus `inactive_file`, and
-sheds work:
+There are four sources, tried in this order. This cgroup's `memory.pressure`,
+then its `memory.events`, then machine-wide `/proc/pressure/memory` on a host
+with no cgroup v2 memory controller, then a 2-second poll. The poll exists for
+one case, a Firecracker VM whose kernel reports pressure but refuses triggers on
+it. There the choice is a slow read of one small file or no back-pressure at
+all. Startup logs which source is in force.
+
+The kernel alone tells us too late. Stall only starts once reclaim is already
+running at 95%, above both marks below, so the first thing minnow heard would be
+critical. It also samples every 5 seconds while healthy, and every 2 seconds
+under pressure to catch the moment it lifts. Kernel wake-ups are paced to four a
+second, since sustained pressure reports continuously and correctly. On each
+sample minnow reads the working set of the cgroup that set the ceiling,
+`memory.current` minus `inactive_file`, and sheds work:
 
 | use | what changes |
 | --- | --- |
 | under 75% | budgets apply as planned |
 | 75% to 90% | new databases get half the planned share, embedding batches in flight halve |
-| over 90% | new shard seals and compactions are refused, new databases get the 64MiB floor, index builds drop to one thread, embedding runs one batch at a time, and the GC runs harder |
+| over 90% | new shard seals and compactions are refused, new databases get the index build floor, index builds drop to one thread, embedding runs one batch at a time, and the GC runs harder |
 
 Reclaimable page cache is subtracted deliberately. Counting it would leave any
 process that writes shard files sitting at its own limit, throttled for good by
@@ -298,13 +342,12 @@ All of this runs whether or not `memory_limit` was chosen for you. Pinning a
 size keeps your number and still gets back-pressure and admission control.
 Startup logs which mechanism is in force, or warns that none is.
 
-Where the kernel cannot report pressure, which is every platform but Linux, the
-static plan is all you get.
+On every platform but Linux the static plan is all you get.
 
 Startup logs the ceiling, its source, and every share. `auto` fails at startup
 rather than guessing when the platform has no readable ceiling, when a cgroup
-filesystem is mounted but its limits cannot be read, and when the shares work
-out below 64MiB per database, which is too little to finish an index build.
+filesystem is mounted but its limits cannot be read, and when what is left
+cannot give even one database enough to finish an index build.
 
 ### `embedder`
 

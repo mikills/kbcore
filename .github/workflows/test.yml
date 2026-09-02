@@ -12,6 +12,7 @@ on:
       - "codeindex/v*"
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -65,6 +66,38 @@ jobs:
         env:
           GOWORK: off
         run: go test ./...
+
+  index-floor:
+    name: index build memory floor on linux/amd64
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rows: 75000
+            dim: 512
+          - rows: 18750
+            dim: 512
+          - rows: 56250
+            dim: 640
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # memlimit.buildOverhead is derived from these numbers, and they were
+      # taken on darwin/arm64. This is where they are checked on the platform
+      # that actually runs the thing.
+      - name: Measure
+        env:
+          MINNOW_MEASURE_INDEX_FLOOR: "1"
+          MINNOW_FLOOR_ROWS: ${{ matrix.rows }}
+          MINNOW_FLOOR_DIM: ${{ matrix.dim }}
+        run: go test ./kb/duckdb/ -run TestIndexBuildMemoryFloor -v -timeout 85m
 
   cgroup:
     name: memory governor on a real cgroup

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"github.com/mikills/minnow/internal/budget"
 	"log/slog"
 	"os"
 	"strings"
@@ -12,20 +11,16 @@ import (
 	"time"
 )
 
-// shardConn is a pooled DuckDB connection for a single shard file.
-// Callers must hold mu while using db to serialize access.
+// Callers must hold mu while using db.
 type shardConn struct {
 	db      *sql.DB
 	mu      sync.Mutex
 	lastUse time.Time
 }
 
-// shardConnPool keeps warm DuckDB connections keyed by local file path.
-// Kept in step with budget.CachedReaders, which the memory plan divides by.
-const maxShardConnPoolEntries = budget.CachedReaders
-
 var errShardConnPoolEvicting = errors.New("DuckDB shard cache path is being evicted")
 
+// shardConnPool keeps warm DuckDB connections keyed by local file path.
 type shardConnPool struct {
 	mu          sync.Mutex
 	entries     map[string]*shardConn
@@ -40,10 +35,9 @@ type shardEviction struct {
 	done  chan struct{}
 }
 
-// GetOrOpen returns a pooled connection for localPath, creating one via openFn
-// if not already cached. The returned shardConn is locked. the caller MUST
-// unlock shardConn.mu after finishing use of shardConn.db.
-func (p *shardConnPool) GetOrOpen(ctx context.Context, localPath string,
+// GetOrOpen returns a locked connection for localPath. The caller must unlock
+// shardConn.mu when done with shardConn.db.
+func (p *shardConnPool) GetOrOpen(ctx context.Context, localPath string, maxEntries int,
 	openFn func(ctx context.Context, path string) (*sql.DB, error)) (*shardConn, error) {
 
 	p.mu.Lock()
@@ -102,7 +96,7 @@ func (p *shardConnPool) GetOrOpen(ctx context.Context, localPath string,
 	}
 	sc.mu.Lock()
 	p.entries[localPath] = sc
-	toClose := p.takeOverflowLocked(localPath)
+	toClose := p.takeOverflowLocked(localPath, maxEntries)
 	p.mu.Unlock()
 
 	for _, stale := range toClose {
@@ -115,9 +109,10 @@ func (p *shardConnPool) GetOrOpen(ctx context.Context, localPath string,
 	return sc, nil
 }
 
-func (p *shardConnPool) takeOverflowLocked(protectedPath string) []*shardConn {
+// maxEntries comes from the caller's memory plan.
+func (p *shardConnPool) takeOverflowLocked(protectedPath string, maxEntries int) []*shardConn {
 	var toClose []*shardConn
-	for len(p.entries) > maxShardConnPoolEntries {
+	for len(p.entries) > maxEntries {
 		var oldestPath string
 		var oldest *shardConn
 		for path, candidate := range p.entries {

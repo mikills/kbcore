@@ -104,7 +104,11 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 
 	// Before buildKB: a config-shaped error should not tear down a live KB, and
 	// the Go limit should be in force for the first allocations, not after.
-	memoryLimit, err := resolveMemoryLimit(cfg.Format.DuckDB.MemoryLimit, logger, opts.DryRun)
+	shape := memlimit.Shape{
+		Rows:       cfg.ShardingPolicy().MaxVectorRowsPerShard,
+		Dimensions: cfg.EmbeddingDimensions(),
+	}
+	memoryLimit, err := resolveMemoryLimit(cfg.Format.DuckDB.MemoryLimit, shape, logger, opts.DryRun)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +168,8 @@ func (r *Runtime) stopGovernor() {
 }
 
 // logMemoryPressure records every transition. A process that silently drops to
-// one build thread and 64MiB databases is the hardest kind of slow to diagnose.
+// one build thread and floor-sized databases is the hardest kind of slow to
+// diagnose.
 func (r *Runtime) logMemoryPressure(from, to budget.Pressure, usage memlimit.Usage) {
 	level := slog.LevelInfo
 	if to > from {

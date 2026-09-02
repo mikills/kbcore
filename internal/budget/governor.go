@@ -15,13 +15,11 @@ import (
 type Pressure int32
 
 const (
-	// PressureNone means use is below SoftMark: budgets apply as planned.
+	// Below SoftMark: budgets apply as planned.
 	PressureNone Pressure = iota
-	// PressureHigh means use is past SoftMark. New work takes smaller shares
-	// so the process stops climbing before it reaches the ceiling.
+	// Past SoftMark: new work takes smaller shares.
 	PressureHigh
-	// PressureCritical means use is past HardMark, which is the share the plan
-	// plays for. Nothing new is admitted until use falls back.
+	// Past HardMark: nothing new is admitted until use falls back.
 	PressureCritical
 )
 
@@ -37,57 +35,48 @@ func (p Pressure) String() string {
 }
 
 const (
-	// SoftMark is where back-pressure starts, leaving room to react before the
-	// plan's own share of the ceiling is spent.
+	// Back-pressure starts here, leaving room to react before the plan's share
+	// is spent.
 	SoftMark = 0.75
-	// HardMark is the share of the ceiling the plan plays for. Past it the
-	// remaining tenth is all that stands between minnow and the OOM killer, so
-	// it stops taking on work rather than spending it.
+	// Past this the remaining tenth is all that stands before the OOM killer.
 	HardMark = memlimit.Headroom
-	// releaseMargin is how far use has to fall below a mark before the level
-	// drops. Without it a signal sitting on a mark flaps every wake-up, and two
-	// builds starting a second apart get different thread counts for no reason.
+	// How far use must fall below a mark before the level drops, so a signal
+	// sitting on a mark does not flap.
 	releaseMargin = 0.05
-	// recoveryInterval is how often use is re-read while under pressure, to
-	// find out when it has passed. The kernel only reports crossing the mark
-	// upward, so coming back down is the one thing worth sampling for, and
-	// only while there is something to come back from.
+	// The kernel only reports crossing upward, so coming back down is the one
+	// thing worth sampling for.
 	recoveryInterval = 2 * time.Second
-	// minWakeInterval paces the loop while use sits over the mark. Every
-	// allocation past memory.high bumps the counter, so the kernel wakes us
-	// continuously and correctly; without a floor between wake-ups that is a
-	// spin. Costs nothing while healthy, because then there are no wake-ups.
+	// Sustained pressure wakes us continuously and correctly. Without a floor
+	// between wake-ups that is a spin.
 	minWakeInterval = 250 * time.Millisecond
 )
 
-// governor turns real memory use into back-pressure. The plan divides a budget,
-// but nothing in it can see the HNSW index the VSS extension builds outside
-// DuckDB's buffer manager, or any other cgo. Only the kernel counts those.
+// The kernel only reports stall, which starts at BackstopMark, above both marks.
+// Waiting on it alone would make the first reading critical. A var so tests can
+// drive the tick without waiting on it.
+var idleInterval = 5 * time.Second
+
+// governor turns real memory use into back-pressure. Nothing in the plan can
+// see the HNSW index or any other cgo allocation. Only the kernel counts those.
 //
-// It does not poll. Setting memory.high makes the kernel reclaim and throttle
-// at the mark itself, and writes to memory.events wake the watcher the moment
-// the mark is crossed, so a healthy process costs one blocked goroutine and no
-// cycles at all. Use is re-read only while pressure is on, to notice it lift.
+// It wakes on kernel pressure, and samples on a tick because pressure alone
+// arrives too late to shed work gently.
 type governor struct {
 	pressure atomic.Int32
 	usage    atomic.Int64
 	wakes    atomic.Int64
 	stop     context.CancelFunc
 	done     chan struct{}
-	// read and watch are seams for tests, which can neither allocate to order
-	// nor make the kernel report pressure.
+	// Seams for tests, which cannot make the kernel report pressure.
 	read  func() memlimit.Usage
 	watch func(string, int64) (memlimit.Notifier, error)
-	// enforced records that the kernel is throttling at the mark, not just
-	// telling us about it.
+	// The kernel throttles at the mark, not just reports it.
 	enforced atomic.Bool
 	source   atomic.Value
-	// onChange reports every transition. Silent degradation is the hardest
-	// kind to debug: throughput collapses and nothing says why.
+	// Silent degradation is the hardest kind to debug.
 	onChange func(from, to Pressure, usage memlimit.Usage)
 	dir      string
-	// armed closes once the watcher is up or has failed, so a caller can log
-	// which mechanism is in force instead of guessing.
+	// Closes once the watcher is up or has failed, so a caller can log which.
 	armed  chan struct{}
 	armErr atomic.Value
 }
@@ -202,8 +191,7 @@ func (g *governor) run(ctx context.Context, ceiling int64) {
 		close(g.armed)
 		return
 	}
-	// Teardown belongs to this goroutine alone. Interrupt only wakes Wait, so
-	// the descriptors cannot go away while it is still blocked on them.
+	// Teardown belongs to this goroutine alone.
 	defer func() { _ = watcher.Close() }()
 	g.enforced.Store(watcher.Enforced())
 	g.source.Store(watcher.Source())
@@ -216,9 +204,8 @@ func (g *governor) run(ctx context.Context, ceiling int64) {
 
 	handled := time.Now()
 	for {
-		// Blocked with no timeout while healthy; once pressure is on, wake to
-		// check whether it has lifted.
-		timeout := -1
+		// Faster under pressure, to catch the moment it lifts.
+		timeout := int(idleInterval / time.Millisecond)
 		if Pressure(g.pressure.Load()) != PressureNone {
 			timeout = int(recoveryInterval / time.Millisecond)
 		}

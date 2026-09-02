@@ -11,14 +11,23 @@ import (
 
 	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mikills/minnow/internal/budget"
+	"github.com/mikills/minnow/internal/memlimit"
 )
 
 func TestShardConnPoolBoundsEntries(t *testing.T) {
+	// A ceiling this tight cannot afford the full cache, so the plan lowers the
+	// count and the pool has to follow it rather than a constant of its own.
+	plan, err := memlimit.Limit{Ceiling: 3 << 30}.Divide(memlimit.Shape{Rows: 75000, Dimensions: 512}, 16, 0)
+	require.NoError(t, err)
+	m := budget.New(plan, true)
+	require.Less(t, m.CachedDatabases(), 16)
 	var pool shardConnPool
 	dir := t.TempDir()
-	for i := 0; i < maxShardConnPoolEntries+1; i++ {
+	for i := 0; i < m.CachedDatabases()+1; i++ {
 		path := filepath.Join(dir, fmt.Sprintf("pool-%03d.duckdb", i))
-		conn, err := pool.GetOrOpen(context.Background(), path, func(_ context.Context, p string) (*sql.DB, error) {
+		conn, err := pool.GetOrOpen(context.Background(), path, m.CachedDatabases(), func(_ context.Context, p string) (*sql.DB, error) {
 			return sql.Open("duckdb", p)
 		})
 		require.NoError(t, err)
@@ -28,8 +37,8 @@ func TestShardConnPoolBoundsEntries(t *testing.T) {
 
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
-	require.Len(t, pool.entries, maxShardConnPoolEntries)
-	require.Contains(t, pool.entries, filepath.Join(dir, fmt.Sprintf("pool-%03d.duckdb", maxShardConnPoolEntries)))
+	require.Len(t, pool.entries, m.CachedDatabases())
+	require.Contains(t, pool.entries, filepath.Join(dir, fmt.Sprintf("pool-%03d.duckdb", m.CachedDatabases())))
 }
 
 func TestShardConnPoolEvictionBlocksReopen(t *testing.T) {
@@ -41,7 +50,7 @@ func TestShardConnPoolEvictionBlocksReopen(t *testing.T) {
 	continueOpen := make(chan struct{})
 	result := make(chan error, 1)
 	go func() {
-		_, err := pool.GetOrOpen(context.Background(), path, func(_ context.Context, p string) (*sql.DB, error) {
+		_, err := pool.GetOrOpen(context.Background(), path, budget.CachedReaders, func(_ context.Context, p string) (*sql.DB, error) {
 			close(openStarted)
 			<-continueOpen
 			return sql.Open("duckdb", p)
@@ -61,7 +70,7 @@ func TestShardConnPoolEvictionBlocksReopen(t *testing.T) {
 	require.ErrorIs(t, <-result, errShardConnPoolEvicting)
 
 	opened := false
-	_, err := pool.GetOrOpen(context.Background(), path, func(context.Context, string) (*sql.DB, error) {
+	_, err := pool.GetOrOpen(context.Background(), path, budget.CachedReaders, func(context.Context, string) (*sql.DB, error) {
 		opened = true
 		return nil, nil
 	})
@@ -69,7 +78,7 @@ func TestShardConnPoolEvictionBlocksReopen(t *testing.T) {
 	require.False(t, opened)
 
 	release()
-	conn, err := pool.GetOrOpen(context.Background(), path, func(_ context.Context, p string) (*sql.DB, error) {
+	conn, err := pool.GetOrOpen(context.Background(), path, budget.CachedReaders, func(_ context.Context, p string) (*sql.DB, error) {
 		return sql.Open("duckdb", p)
 	})
 	require.NoError(t, err)
@@ -86,7 +95,7 @@ func TestShardConnPoolRejectsOpenThatSpansCompletedEviction(t *testing.T) {
 	continueOpen := make(chan struct{})
 	result := make(chan error, 1)
 	go func() {
-		_, err := pool.GetOrOpen(context.Background(), path, func(_ context.Context, p string) (*sql.DB, error) {
+		_, err := pool.GetOrOpen(context.Background(), path, budget.CachedReaders, func(_ context.Context, p string) (*sql.DB, error) {
 			close(openStarted)
 			<-continueOpen
 			return sql.Open("duckdb", p)
@@ -114,7 +123,7 @@ func TestShardConnPoolCloseByPrefix(t *testing.T) {
 	var pool shardConnPool
 	path := filepath.Join(t.TempDir(), "pool-test.duckdb")
 
-	conn, err := pool.GetOrOpen(context.Background(), path, func(_ context.Context, p string) (*sql.DB, error) {
+	conn, err := pool.GetOrOpen(context.Background(), path, budget.CachedReaders, func(_ context.Context, p string) (*sql.DB, error) {
 		return sql.Open("duckdb", p)
 	})
 	require.NoError(t, err)

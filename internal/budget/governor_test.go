@@ -69,6 +69,21 @@ func (f *fakeWatch) close() error {
 
 func (f *fakeWatch) signal() { f.wake <- struct{}{} }
 
+func TestGovernorSamplesWithoutAKernelSignal(t *testing.T) {
+	// The kernel only reports stall, and stall starts above both marks, so a
+	// governor that waited for it would never report anything but critical.
+	previous := idleInterval
+	idleInterval = 10 * time.Millisecond
+	t.Cleanup(func() { idleInterval = previous })
+
+	ceiling := int64(4) << 30
+	m, usage, watch := governed(t, ceiling)
+	usage.bytes.Store(int64(float64(ceiling) * 0.80))
+
+	waitPressure(t, m, PressureHigh)
+	require.Zero(t, len(watch.wake), "the tick, not a signal, is what had to find this")
+}
+
 func governed(t *testing.T, ceiling int64) (*Manager, *stubUsage, *fakeWatch) {
 	t.Helper()
 	m := New(planFor(t, ceiling), true)
@@ -124,7 +139,7 @@ func TestGovernor(t *testing.T) {
 		waitPressure(t, m, PressureCritical)
 		floored, release3 := m.OpenDatabase("256MB")
 		defer release3()
-		require.Equal(t, int64(memlimit.MinDuckDBPerDB>>20), parseMB(t, floored))
+		require.Equal(t, m.minPerDB()>>20, parseMB(t, floored))
 	})
 
 	t.Run("builds and embeds shed concurrency at critical", func(t *testing.T) {

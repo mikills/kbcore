@@ -13,59 +13,55 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// BackstopMark is where the kernel is asked to start reclaiming, above the
-// marks the governor acts on. Userspace sheds work first; the kernel throttles
-// only if that was not enough. Setting it at the governor's own mark would have
-// the kernel stalling allocations while the governor still reported calm,
-// because memory.high is policed against memory.current and the governor
-// measures the working set inside it.
+// BackstopMark sits above the marks the governor acts on, so userspace sheds
+// work first. It is policed against memory.current, which includes the page
+// cache the governor subtracts, so the two cannot share a mark.
 const BackstopMark = 0.95
 
-// Watcher blocks until the kernel reports memory pressure. It costs nothing
-// while idle: no timer, no sampling, the goroutine sits in epoll_wait.
+// Watcher blocks in epoll_wait until the kernel reports memory pressure.
 type Watcher struct {
 	epfd   int
 	wakefd int
 	file   *os.File
 	source string
-	// events is read after every wake. memory.events is level-triggered
-	// through kernfs, and the poll flag only clears when the file is read, so
-	// skipping this turns the watcher into a spin on one core.
+	// memory.events is level-triggered: the poll flag only clears on read, so
+	// skipping that turns the watcher into a spin.
 	events   bool
 	enforced bool
 
-	// restore puts memory.high back as it was. Left unwritten it ratchets: the
-	// next start reads our own mark as the ceiling and takes 90% of that.
+	// Left unrestored, the next start reads our own mark as the ceiling.
 	restore func()
 
-	closeOnce sync.Once
-	wakeOnce  sync.Once
+	// Orders Interrupt against Close. A late Interrupt would otherwise write to
+	// a descriptor the process has handed back.
+	mu     sync.Mutex
+	woken  bool
+	closed bool
 }
 
 func (w *Watcher) Source() string { return w.source }
 
-// Enforced is true when memory.high was set, so the kernel reclaims and
-// throttles on its own and this watcher only decides what work to shed.
+// Enforced means memory.high was set, so the kernel throttles on its own.
 func (w *Watcher) Enforced() bool { return w.enforced }
 
-// Watch arms kernel notification for the cgroup at dir, which must be the one
-// that supplied the ceiling.
+// Watch arms kernel notification for dir, which must be the cgroup that
+// supplied the ceiling. It sets memory.high where it can.
 //
-// It sets memory.high where it can, because that makes the kernel reclaim at
-// the mark rather than leaving minnow to notice afterwards.
-//
-// For notification it prefers memory.pressure over memory.events. The events
-// counter bumps on every allocation the kernel throttles, and memory.high is
-// policed against memory.current, so a process whose page cache sits at the
-// mark is woken continuously while nothing it can act on has changed. Pressure
-// stall is time actually lost to reclaim, which is the thing worth waking for.
+// It prefers memory.pressure to memory.events. The events counter bumps on
+// every throttled allocation, so a process whose page cache sits at the mark is
+// woken continuously. Stall time is the part worth waking for.
 func Watch(dir string, ceiling int64) (Notifier, error) {
 	own, err := ownCgroupDir()
 	if err != nil {
-		return nil, err
+		// No cgroup v2 controller. On a single-tenant VM machine-wide stall is
+		// this process's stall anyway.
+		if w, perr := watchPressure(globalPressurePath); perr == nil {
+			return w, nil
+		}
+		// Fly's kernel reports pressure but refuses triggers on it.
+		return newPollNotifier(), nil
 	}
-	// Only ever our own cgroup. Writing memory.high on an ancestor would
-	// throttle every sibling sharing it.
+	// Writing memory.high on an ancestor would throttle every sibling.
 	restore := func() {}
 	enforced := false
 	if dir == "" || dir == own {
@@ -73,7 +69,7 @@ func Watch(dir string, ceiling int64) (Notifier, error) {
 			restore, enforced = put, true
 		}
 	}
-	w, err := watchPressure(own)
+	w, err := watchPressure(filepath.Join(own, "memory.pressure"))
 	if err != nil {
 		w, err = watchEvents(own)
 	}
@@ -88,8 +84,7 @@ func Watch(dir string, ceiling int64) (Notifier, error) {
 
 // setHigh writes the backstop and returns the undo.
 func setHigh(dir string, mark int64) (func(), error) {
-	// Page aligned: the kernel rounds memory.high down to a page multiple, so
-	// an unaligned request lands somewhere other than where it was asked for.
+	// The kernel rounds memory.high down to a page multiple.
 	mark -= mark % int64(os.Getpagesize())
 	if mark <= 0 {
 		return nil, fmt.Errorf("memory.high needs a positive mark")
@@ -108,8 +103,7 @@ func setHigh(dir string, mark int64) (func(), error) {
 	}, nil
 }
 
-// watchEvents is the fallback where pressure stall is unavailable. It wakes far
-// more often than it needs to, which is why it is not the first choice.
+// watchEvents is the fallback where stall is unavailable. It over-wakes.
 func watchEvents(dir string) (*Watcher, error) {
 	file, err := os.Open(filepath.Join(dir, "memory.events"))
 	if err != nil {
@@ -118,18 +112,20 @@ func watchEvents(dir string) (*Watcher, error) {
 	return arm(file, "memory.events", true)
 }
 
-// watchPressure asks for a wake-up when this cgroup stalls on memory for 150ms
-// of any second, which means reclaim is already costing real time.
-func watchPressure(dir string) (*Watcher, error) {
-	file, err := os.OpenFile(filepath.Join(dir, "memory.pressure"), os.O_RDWR, 0)
+// globalPressurePath is machine-wide stall, for hosts with no cgroup v2.
+const globalPressurePath = "/proc/pressure/memory"
+
+// 150ms of stall in any second means reclaim is already costing real time.
+func watchPressure(path string) (*Watcher, error) {
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := file.WriteString("some 150000 1000000"); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("arm memory.pressure trigger: %w", err)
+		return nil, fmt.Errorf("arm pressure trigger on %s: %w", path, err)
 	}
-	return arm(file, "memory.pressure", false)
+	return arm(file, filepath.Base(path), false)
 }
 
 func arm(file *os.File, source string, events bool) (*Watcher, error) {
@@ -144,7 +140,7 @@ func arm(file *os.File, source string, events bool) (*Watcher, error) {
 		_ = w.Close()
 		return nil, err
 	}
-	// An eventfd in the same set is what lets Close interrupt a blocked wait.
+	// An eventfd in the same set lets Interrupt wake a blocked Wait.
 	wakefd, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
 	if err != nil {
 		_ = w.Close()
@@ -159,8 +155,7 @@ func arm(file *os.File, source string, events bool) (*Watcher, error) {
 	return w, nil
 }
 
-// Wait blocks until the kernel reports pressure, or timeoutMS elapses, or
-// Interrupt is called. A negative timeout blocks indefinitely at no cost.
+// Wait returns on pressure, on timeout, or on Interrupt.
 func (w *Watcher) Wait(timeoutMS int) error {
 	events := make([]unix.EpollEvent, 2)
 	for {
@@ -181,8 +176,7 @@ func (w *Watcher) Wait(timeoutMS int) error {
 	}
 }
 
-// drain re-reads memory.events so kernfs clears the poll flag. Without it the
-// next epoll_wait returns immediately, forever.
+// Re-read so kernfs clears the poll flag, or epoll_wait spins forever.
 func (w *Watcher) drain() {
 	if !w.events || w.file == nil {
 		return
@@ -193,33 +187,40 @@ func (w *Watcher) drain() {
 	_, _ = io.Copy(io.Discard, w.file)
 }
 
-// Interrupt wakes a blocked Wait without tearing anything down, so the waiter
-// can return before the descriptors go away.
+// Interrupt wakes a blocked Wait without tearing anything down.
 func (w *Watcher) Interrupt() {
-	w.wakeOnce.Do(func() {
-		var one [8]byte
-		one[7] = 1
-		_, _ = unix.Write(w.wakefd, one[:])
-	})
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.woken || w.closed {
+		return
+	}
+	w.woken = true
+	var one [8]byte
+	one[7] = 1
+	_, _ = unix.Write(w.wakefd, one[:])
 }
 
-// Close releases the descriptors and puts memory.high back. It must not run
-// while Wait is still blocked: call Interrupt, let Wait return, then Close.
+// Close must not run while Wait is blocked. Interrupt, let Wait return, then
+// Close. A later Interrupt is a no-op.
 func (w *Watcher) Close() error {
-	w.closeOnce.Do(func() {
-		if w.restore != nil {
-			w.restore()
-		}
-		if w.wakefd > 0 {
-			_ = unix.Close(w.wakefd)
-		}
-		if w.epfd > 0 {
-			_ = unix.Close(w.epfd)
-		}
-		if w.file != nil {
-			_ = w.file.Close()
-		}
-	})
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	if w.restore != nil {
+		w.restore()
+	}
+	if w.wakefd > 0 {
+		_ = unix.Close(w.wakefd)
+	}
+	if w.epfd > 0 {
+		_ = unix.Close(w.epfd)
+	}
+	if w.file != nil {
+		_ = w.file.Close()
+	}
 	return nil
 }
 

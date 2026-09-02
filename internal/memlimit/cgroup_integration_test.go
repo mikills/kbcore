@@ -113,4 +113,27 @@ func TestCgroupIntegration(t *testing.T) {
 		require.GreaterOrEqual(t, time.Since(start), 900*time.Millisecond,
 			"the watcher woke with no stall to report")
 	})
+
+	t.Run("an Interrupt after Close does not write to a released descriptor", func(t *testing.T) {
+		watcher, err := Watch(dir, Detect().Ceiling)
+		require.NoError(t, err)
+		require.NoError(t, watcher.Close())
+		watcher.Interrupt()
+		watcher.Interrupt()
+	})
+
+	t.Run("the real cgroup root has no memory.max and is not confinement", func(t *testing.T) {
+		// Against the kernel's own filesystem, not a fixture. A process in the
+		// v2 root used to read as confined, which cost it sizing and the
+		// governor both.
+		self := filepath.Join(t.TempDir(), "cgroup")
+		require.NoError(t, os.WriteFile(self, []byte("0::/\n"), 0o644))
+
+		_, err := os.Stat(filepath.Join(cgroupRoot, "memory.max"))
+		require.ErrorIs(t, err, os.ErrNotExist, "this test is meaningless if the root has a limit")
+
+		limit, _, confined := cgroupLimit(cgroupRoot, self)
+		require.Zero(t, limit)
+		require.False(t, confined)
+	})
 }

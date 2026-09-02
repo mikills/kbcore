@@ -14,9 +14,12 @@ import (
 	"github.com/mikills/minnow/internal/memlimit"
 )
 
+// testShard is the shape the measured index build floor came from.
+var testShard = memlimit.Shape{Rows: 75000, Dimensions: 512}
+
 func planFor(t *testing.T, ceiling int64) memlimit.Plan {
 	t.Helper()
-	plan, err := memlimit.Limit{Ceiling: ceiling, Source: "test"}.Divide(PlannedDatabases, 0)
+	plan, err := memlimit.Limit{Ceiling: ceiling, Source: "test"}.Divide(testShard, CachedReaders, 0)
 	require.NoError(t, err)
 	return plan
 }
@@ -26,22 +29,22 @@ func TestDatabaseShares(t *testing.T) {
 		m := New(planFor(t, 16<<30), true)
 		var releases []func()
 		issued := int64(0)
-		for i := 1; i <= PlannedDatabases*3; i++ {
+		for i := 1; i <= CachedReaders*3; i++ {
 			limit, release := m.OpenDatabase("256MB")
 			releases = append(releases, release)
 			require.Equal(t, int64(i), m.LiveDatabases())
 			issued += parseMB(t, limit) << 20
 		}
-		// Bytes against bytes. The total is the bound, and the 64MiB floor is
-		// the one documented way past it: every database beyond the planned
-		// count gets the floor once the total is spent.
-		overshoot := int64(PlannedDatabases*3-PlannedDatabases) * memlimit.MinDuckDBPerDB
+		// Bytes against bytes. The total is the bound, and the index build
+		// floor is the one documented way past it: every database beyond the
+		// planned count gets the floor once the total is spent.
+		overshoot := int64(CachedReaders*3-m.CachedDatabases()) * m.minPerDB()
 		require.LessOrEqual(t, issued, m.plan.DuckDBTotal+overshoot)
 		require.Greater(t, issued, m.plan.DuckDBTotal, "the floor should have been reached by 48")
 		// FormatMB floors, so DuckDB is always told slightly less than the
 		// manager reserved. Erring the other way would overcommit.
 		require.GreaterOrEqual(t, m.IssuedBytes(), issued, "duckdb was told more than was reserved")
-		require.Less(t, m.IssuedBytes()-issued, int64(PlannedDatabases*3)<<20)
+		require.Less(t, m.IssuedBytes()-issued, int64(CachedReaders*3)<<20)
 
 		for _, release := range releases {
 			release()
@@ -54,7 +57,7 @@ func TestDatabaseShares(t *testing.T) {
 		m := New(planFor(t, 16<<30), true)
 		first, release := m.OpenDatabase("256MB")
 		defer release()
-		for range PlannedDatabases * 4 {
+		for range CachedReaders * 4 {
 			_, r := m.OpenDatabase("256MB")
 			defer r()
 		}
@@ -71,7 +74,7 @@ func TestDatabaseShares(t *testing.T) {
 		}
 		limit, r := m.OpenDatabase("256MB")
 		defer r()
-		require.Equal(t, int64(memlimit.MinDuckDBPerDB>>20), parseMB(t, limit))
+		require.Equal(t, m.minPerDB()>>20, parseMB(t, limit))
 	})
 
 	t.Run("the first database does not take the whole total", func(t *testing.T) {
@@ -84,7 +87,7 @@ func TestDatabaseShares(t *testing.T) {
 
 	t.Run("a release lets the next open have the share back", func(t *testing.T) {
 		m := New(planFor(t, 16<<30), true)
-		for range PlannedDatabases * 8 {
+		for range CachedReaders * 8 {
 			_, r := m.OpenDatabase("256MB")
 			r()
 		}

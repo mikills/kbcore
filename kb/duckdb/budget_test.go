@@ -67,7 +67,7 @@ func TestFormatUsesBudget(t *testing.T) {
 	})
 
 	t.Run("an open database takes a share and gives it back", func(t *testing.T) {
-		plan, err := memlimit.Limit{Ceiling: 16 << 30}.Divide(budget.PlannedDatabases, 0)
+		plan, err := memlimit.Limit{Ceiling: 16 << 30}.Divide(memlimit.Shape{Rows: 75000, Dimensions: 512}, budget.CachedReaders, 0)
 		require.NoError(t, err)
 		m := budget.New(plan, true)
 		f := &DuckDBArtifactFormat{deps: DuckDBArtifactDeps{Budget: m, MemoryLimit: "256MB"}}

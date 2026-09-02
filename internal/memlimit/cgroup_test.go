@@ -95,12 +95,26 @@ func TestCgroupLimit(t *testing.T) {
 		require.False(t, confined, "an unconfined process may budget from physical memory")
 	})
 
-	t.Run("a mounted but unreadable cgroupfs is confinement", func(t *testing.T) {
-		// A cgroup namespace reports "0::/" whatever confines it, so only the
-		// mount tells us a limit exists that we cannot see.
-		got, _, confined := cgroupLimit(t.TempDir(), selfV2(t, "/"))
+	t.Run("a limit file that refuses us is confinement", func(t *testing.T) {
+		// A cgroup namespace reports "0::/" whatever confines it, so the path
+		// cannot say. A file that is there but will not open is what does.
+		if os.Geteuid() == 0 {
+			t.Skip("root reads through mode bits")
+		}
+		root := writeTree(t, map[string]string{"memory.max": "2147483648"})
+		require.NoError(t, os.Chmod(filepath.Join(root, "memory.max"), 0))
+
+		got, _, confined := cgroupLimit(root, selfV2(t, "/"))
 		require.Zero(t, got)
 		require.True(t, confined, "sizing for the host inside a small container is the bug this guards")
+	})
+
+	t.Run("the cgroup v2 root has no memory controller and is not confinement", func(t *testing.T) {
+		// A plain Linux box that never put minnow in a slice. Refusing to size
+		// here left it with no governor on the hosts that most need one.
+		got, _, confined := cgroupLimit(t.TempDir(), selfV2(t, "/"))
+		require.Zero(t, got)
+		require.False(t, confined)
 	})
 }
 

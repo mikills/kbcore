@@ -9,17 +9,15 @@ import (
 )
 
 func workingSet(dir string) (int64, bool) {
-	current, found := readCgroupValue(filepath.Join(dir, "memory.current"))
-	if !found || current <= 0 {
-		// A v1 hierarchy names it differently and has no equivalent breakdown
-		// worth trusting, so it falls through to this process's own resident
-		// pages rather than to a number inflated by cache.
+	current, _ := readCgroupValue(filepath.Join(dir, "memory.current"))
+	if current <= 0 {
+		// A v1 hierarchy has no breakdown worth trusting, so fall through to
+		// resident pages rather than a number inflated by cache.
 		return 0, false
 	}
 	inactiveFile, found := statField(filepath.Join(dir, "memory.stat"), "inactive_file")
 	if !found {
-		// Returning memory.current here is the bug this function exists to
-		// avoid: page cache would read as pressure the process cannot shed.
+		// memory.current alone reads page cache as pressure we cannot shed.
 		return 0, false
 	}
 	return max(current-inactiveFile, 0), true
@@ -47,8 +45,7 @@ func statField(path, name string) (int64, bool) {
 	return 0, false
 }
 
-// statmResident is the second field of /proc/self/statm, in pages. It is this
-// process only, so it misses siblings sharing the ceiling.
+// statmResident is this process only, so it misses siblings sharing the ceiling.
 func statmResident(path string) (int64, bool) {
 	raw, err := os.ReadFile(path)
 	if err != nil {

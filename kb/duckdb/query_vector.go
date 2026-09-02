@@ -471,7 +471,7 @@ func (f *DuckDBArtifactFormat) openCachedShardConn(
 			return nil, fmt.Errorf("ensure shard file %s: %w", shard.ShardID, err)
 		}
 		f.deps.Metrics.RecordShardCacheAccess(kbID, hit)
-		conn, err := f.pool.GetOrOpen(ctx, localPath, func(ctx context.Context, path string) (*sql.DB, error) {
+		conn, err := f.pool.GetOrOpen(ctx, localPath, f.budget().CachedDatabases(), func(ctx context.Context, path string) (*sql.DB, error) {
 			if _, statErr := os.Stat(path); statErr != nil {
 				return nil, statErr
 			}
