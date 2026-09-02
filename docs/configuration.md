@@ -264,6 +264,9 @@ count. 75k rows at 256 dimensions and 37.5k at 512 measure identically.
 | 75,000 x 512 | 146 MiB | 192MB | 1.31 |
 | 100,000 x 384 | 146 MiB | 192MB | 1.31 |
 
+Those are darwin/arm64. The `index-floor` CI job remeasures on linux/amd64,
+where every shape came in at the same ratio or lower.
+
 The ratio falls as a shard grows. The planner uses 1.6 times raw, above the
 worst measured, and never less than 64MiB. Getting this wrong does not always
 fail cleanly. An allocation past `memory_limit` can throw where nothing catches

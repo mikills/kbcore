@@ -46,7 +46,9 @@ jobs:
           sh -n install.sh
 
       - name: Test
-        run: go test ./... -count=1 -tags=long
+        # sim runs seeded scenarios for about six minutes, close enough to Go's
+        # ten minute default that a loaded runner trips it.
+        run: go test ./... -count=1 -tags=long -timeout 25m
 
       - name: Test codeindex
         run: go test ./codeindex/...
