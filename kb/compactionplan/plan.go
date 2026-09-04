@@ -60,9 +60,59 @@ func Fit(candidates []Shard, maxBytes int64) []Shard {
 	return candidates
 }
 
-// LiveBytes is what a shard contributes to a merge. Tombstoned rows are dropped
-// on the way in, so sizing by the file would refuse to compact the shards that
-// most need it, and would strand one at the cap with no way to shrink.
+// PartitionForReconstruct groups shards so each group's live bytes fit within
+// maxBytes, bounding the peak memory of a sequential grouped rebuild to one
+// group. Ordering is pinned to SortAndLimit order (tombstone ratio desc, size
+// asc, id asc), not manifest order, so packing is deterministic no matter how
+// the manifest lists shards. It reuses Fit's live-bytes semantics for sizing,
+// but that is a live-bytes bound, not a bound on copied bytes: the merge
+// (copyShardTables in reconstruct.go) copies all docs rows unfiltered and
+// never consults doc_tombstones, so a group whose shards carry nonzero
+// tombstone ratios can copy more than the cap. That is latent today: sealed
+// shards carry TombstoneRatio 0 (snapshot_shards.go, compaction.go),
+// inherited from Fit's live-bytes sizing.
+//
+// A single shard whose live bytes exceed maxBytes still forms its own group;
+// a shard cannot be split at this layer, so the caller merges it alone and
+// documents the over-cap peak. Live bytes, not file bytes, are capped: HNSW
+// and FTS overhead can push the file past the cap (see memlimit overhead).
+func PartitionForReconstruct(shards []Shard, maxBytes int64) [][]Shard {
+	if len(shards) == 0 {
+		return nil
+	}
+	if maxBytes <= 0 {
+		sorted := SortAndLimit(shards, 0)
+		out := make([]Shard, len(sorted))
+		copy(out, sorted)
+		return [][]Shard{out}
+	}
+	sorted := SortAndLimit(shards, 0)
+	var groups [][]Shard
+	current := make([]Shard, 0)
+	currentLive := int64(0)
+	for _, shard := range sorted {
+		live := LiveBytes(shard)
+		if len(current) > 0 && currentLive+live > maxBytes {
+			groups = append(groups, current)
+			current = make([]Shard, 0)
+			currentLive = 0
+		}
+		current = append(current, shard)
+		currentLive += live
+	}
+	if len(current) > 0 {
+		groups = append(groups, current)
+	}
+	return groups
+}
+
+// LiveBytes is what a shard contributes to group sizing: the file size
+// discounted by the tombstone ratio. It is a sizing estimate, not a merge
+// filter: the merge copies all docs rows unfiltered and never consults
+// doc_tombstones, so live bytes bound the copied group only when tombstone
+// ratios are 0, which holds for sealed shards today. Sizing by the raw file
+// would refuse to compact the shards that most need it, and would strand one
+// at the cap with no way to shrink.
 func LiveBytes(shard Shard) int64 {
 	ratio := min(max(shard.TombstoneRatio, 0), 1)
 	return int64(float64(shard.SizeBytes) * (1 - ratio))
