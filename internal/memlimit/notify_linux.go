@@ -82,7 +82,10 @@ func Watch(dir string, ceiling int64) (Notifier, error) {
 	return w, nil
 }
 
-// setHigh writes the backstop and returns the undo.
+// setHigh writes the backstop and returns the undo. It refuses to overwrite a
+// mark that is already set, because a kill -9 leaves ours behind and the next
+// start reads it as the ceiling. Overwriting would then walk the budget down on
+// every hard restart.
 func setHigh(dir string, mark int64) (func(), error) {
 	// The kernel rounds memory.high down to a page multiple.
 	mark -= mark % int64(os.Getpagesize())
@@ -91,6 +94,9 @@ func setHigh(dir string, mark int64) (func(), error) {
 	}
 	path := filepath.Join(dir, "memory.high")
 	previous, _ := os.ReadFile(path)
+	if strings.TrimSpace(string(previous)) != "max" {
+		return nil, fmt.Errorf("memory.high is already set to %q", strings.TrimSpace(string(previous)))
+	}
 	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", mark)), 0o644); err != nil {
 		return nil, fmt.Errorf("set memory.high: %w", err)
 	}

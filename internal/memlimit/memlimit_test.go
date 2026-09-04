@@ -6,38 +6,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// shard is a full default shard at a common embedding width.
-var shard = Shape{Rows: 75000, Dimensions: 512}
+// shard is the default sharding.max_shard_bytes.
+const shard = int64(64) << 20
 
 func TestMinDatabaseBytes(t *testing.T) {
-	t.Run("tracks raw vector bytes, not rows", func(t *testing.T) {
-		// Measured. Same vector bytes, same floor, so row count alone is not
-		// what sets it.
-		require.Equal(t,
-			Shape{Rows: 75000, Dimensions: 256}.MinDatabaseBytes(),
-			Shape{Rows: 37500, Dimensions: 512}.MinDatabaseBytes())
-	})
-
 	t.Run("covers every measured build", func(t *testing.T) {
+		// A shard file of this size holds raw/vectorCompression vector bytes,
+		// so the shape it was measured at is recoverable from the file size.
 		for _, c := range []struct {
-			rows, dim int
-			measured  int64
+			rawMiB   int64
+			measured int64
 		}{
-			{18750, 512, 56 << 20},
-			{37500, 512, 96 << 20},
-			{75000, 256, 96 << 20},
-			{37500, 768, 144 << 20},
-			{56250, 640, 176 << 20},
-			{75000, 512, 192 << 20},
-			{100000, 384, 192 << 20},
+			{36, 56 << 20},
+			{73, 96 << 20},
+			{109, 144 << 20},
+			{137, 176 << 20},
+			{146, 192 << 20},
 		} {
-			got := Shape{Rows: c.rows, Dimensions: c.dim}.MinDatabaseBytes()
-			require.GreaterOrEqualf(t, got, c.measured, "%dx%d built at %dMB", c.rows, c.dim, c.measured>>20)
+			file := int64(float64(c.rawMiB<<20) * vectorCompression)
+			require.GreaterOrEqualf(t, MinDatabaseBytes(file), c.measured,
+				"%d MiB of vectors built at %dMB", c.rawMiB, c.measured>>20)
 		}
 	})
 
-	t.Run("an unknown shape falls back to the smallest measured build", func(t *testing.T) {
-		require.Equal(t, int64(FloorDatabaseBytes), Shape{}.MinDatabaseBytes())
+	t.Run("a tiny cap still gets the smallest measured build", func(t *testing.T) {
+		require.Equal(t, int64(FloorDatabaseBytes), MinDatabaseBytes(1<<20))
+	})
+
+	t.Run("ShardBytesWithin is the inverse", func(t *testing.T) {
+		require.LessOrEqual(t, MinDatabaseBytes(ShardBytesWithin(512<<20)), int64(512)<<20)
 	})
 }
 
@@ -95,20 +92,27 @@ func TestDivide(t *testing.T) {
 		plan, err := Limit{Ceiling: 1968 << 20}.Divide(shard, 16, 768<<20)
 		require.NoError(t, err)
 		require.Less(t, plan.Databases, 16)
-		require.GreaterOrEqual(t, plan.DuckDBPerDB, shard.MinDatabaseBytes())
+		require.GreaterOrEqual(t, plan.DuckDBPerDB, MinDatabaseBytes(shard))
 	})
 
 	t.Run("a GOMEMLIMIT that starves DuckDB is refused, not rounded up", func(t *testing.T) {
 		// Starting on a share too small means dying at the first index build
 		// instead of at startup.
+		_, err := Limit{Ceiling: 16 << 30}.Divide(shard, 16, 14645<<20)
+		require.ErrorIs(t, err, ErrTooSmall)
+		require.ErrorContains(t, err, "max_shard_bytes", "the error must name what would fit")
+	})
+
+	t.Run("a GOMEMLIMIT larger than the budget blames the heap, not the shard", func(t *testing.T) {
+		// Advising a smaller max_shard_bytes here cannot fix anything: there is
+		// no DuckDB share left to divide at any shard size.
 		_, err := Limit{Ceiling: 16 << 30}.Divide(shard, 16, 15<<30)
 		require.ErrorIs(t, err, ErrTooSmall)
-		require.ErrorContains(t, err, "75000 rows at 512 dimensions")
-		require.ErrorContains(t, err, "max_vector_rows_per_shard", "the error must name what would fit")
+		require.ErrorContains(t, err, "lower GOMEMLIMIT")
 	})
 
 	t.Run("a ceiling too small for one database is refused", func(t *testing.T) {
-		_, err := Limit{Ceiling: 512 << 20}.Divide(shard, 16, 0)
+		_, err := Limit{Ceiling: 384 << 20}.Divide(shard, 16, 0)
 		require.ErrorIs(t, err, ErrTooSmall)
 	})
 

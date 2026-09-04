@@ -252,6 +252,7 @@ type ShardingConfig struct {
 	ShardTriggerBytes           *int64   `yaml:"shard_trigger_bytes,omitempty"               json:"shard_trigger_bytes,omitempty"`
 	ShardTriggerVectorRows      *int     `yaml:"shard_trigger_vector_rows,omitempty"         json:"shard_trigger_vector_rows,omitempty"`
 	TargetShardBytes            *int64   `yaml:"target_shard_bytes,omitempty"                json:"target_shard_bytes,omitempty"`
+	MaxShardBytes               *int64   `yaml:"max_shard_bytes,omitempty"                   json:"max_shard_bytes,omitempty"`
 	MaxVectorRowsPerShard       *int     `yaml:"max_vector_rows_per_shard,omitempty"         json:"max_vector_rows_per_shard,omitempty"`
 	QueryShardFanout            *int     `yaml:"query_shard_fanout,omitempty"                json:"query_shard_fanout,omitempty"`
 	QueryShardFanoutAdaptiveMax *int     `yaml:"query_shard_fanout_adaptive_max,omitempty"   json:"query_shard_fanout_adaptive_max,omitempty"`

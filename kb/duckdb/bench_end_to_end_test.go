@@ -193,7 +193,7 @@ func benchMemoryLimit() string {
 		return v
 	}
 	// A fixed default outgrew the runner it ran on. Size from the host instead.
-	if plan, err := memlimit.Detect().Divide(memlimit.Shape{Rows: 75000, Dimensions: 512}, budget.CachedReaders, 0); err == nil {
+	if plan, err := memlimit.Detect().Divide(128<<20, budget.CachedReaders, 0); err == nil {
 		return plan.MemoryLimit()
 	}
 	return "1GB"

@@ -22,18 +22,6 @@ func (c *Config) ShardingPolicy() kb.ShardingPolicy {
 	return c.Sharding.resolve()
 }
 
-// EmbeddingDimensions is the vector width the configured embedder produces, or
-// 0 when only the provider knows it.
-func (c *Config) EmbeddingDimensions() int {
-	switch {
-	case c.Embedder.Local != nil:
-		return c.Embedder.Local.Dim
-	case c.Embedder.OpenAICompatible != nil:
-		return c.Embedder.OpenAICompatible.Dimensions
-	}
-	return 0
-}
-
 // MediaGCConfig returns the kb.MediaGCConfig derived from media timings.
 func (c *Config) MediaGCConfig() kb.MediaGCConfig {
 	return kb.MediaGCConfig{

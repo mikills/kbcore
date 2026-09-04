@@ -23,13 +23,13 @@ var detect = memlimit.Detect
 
 // resolveMemoryLimit turns "auto" into a memory_limit and caps the Go heap with
 // what is left, so the two add up to a share of the ceiling.
-func resolveMemoryLimit(raw string, shape memlimit.Shape, logger *slog.Logger, dryRun bool) (string, error) {
+func resolveMemoryLimit(raw string, maxShardBytes int64, logger *slog.Logger, dryRun bool) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	requested := strings.EqualFold(trimmed, AutoMemoryLimit)
 	sizing := trimmed == "" || requested
 
 	limit := detect()
-	plan, err := limit.Divide(shape, budget.CachedReaders, presetGoHeap())
+	plan, err := limit.Divide(maxShardBytes, budget.CachedReaders, presetGoHeap())
 	sized := err == nil
 	if !sized && limit.Usable() == nil {
 		// Too small to divide, but a box that tight needs the governor most.
@@ -54,7 +54,7 @@ func resolveMemoryLimit(raw string, shape memlimit.Shape, logger *slog.Logger, d
 		// Below what most shapes need to index, hence a warning.
 		logger.Warn("sizing memory from the host is unavailable, using the fixed default",
 			"reason", err, "memory_limit", FallbackMemoryLimit,
-			"index_build_needs", memlimit.FormatMB(shape.MinDatabaseBytes()))
+			"index_build_needs", memlimit.FormatMB(memlimit.MinDatabaseBytes(maxShardBytes)))
 		return FallbackMemoryLimit, nil
 	}
 	logger.Info("sized memory from the host",
@@ -67,8 +67,7 @@ func resolveMemoryLimit(raw string, shape memlimit.Shape, logger *slog.Logger, d
 		"duckdb_per_db", plan.MemoryLimit(),
 		"databases", plan.Databases,
 		"min_per_db_mb", plan.MinPerDB>>20,
-		"shard_rows", shape.Rows,
-		"shard_dimensions", shape.Dimensions,
+		"max_shard_mb", maxShardBytes>>20,
 	)
 	return plan.MemoryLimit(), nil
 }

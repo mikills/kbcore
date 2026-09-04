@@ -14,8 +14,8 @@ import (
 	"github.com/mikills/minnow/internal/memlimit"
 )
 
-// testShard is the shape the measured index build floor came from.
-var testShard = memlimit.Shape{Rows: 75000, Dimensions: 512}
+// testShard is the default sharding.max_shard_bytes.
+const testShard = int64(64) << 20
 
 func planFor(t *testing.T, ceiling int64) memlimit.Plan {
 	t.Helper()

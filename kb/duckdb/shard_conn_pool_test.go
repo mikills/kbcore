@@ -19,7 +19,7 @@ import (
 func TestShardConnPoolBoundsEntries(t *testing.T) {
 	// A ceiling this tight cannot afford the full cache, so the plan lowers the
 	// count and the pool has to follow it rather than a constant of its own.
-	plan, err := memlimit.Limit{Ceiling: 3 << 30}.Divide(memlimit.Shape{Rows: 75000, Dimensions: 512}, 16, 0)
+	plan, err := memlimit.Limit{Ceiling: 3 << 30}.Divide(512<<20, 16, 0)
 	require.NoError(t, err)
 	m := budget.New(plan, true)
 	require.Less(t, m.CachedDatabases(), 16)

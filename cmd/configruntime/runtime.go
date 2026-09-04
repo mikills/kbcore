@@ -104,11 +104,8 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 
 	// Before buildKB: a config-shaped error should not tear down a live KB, and
 	// the Go limit should be in force for the first allocations, not after.
-	shape := memlimit.Shape{
-		Rows:       cfg.ShardingPolicy().MaxVectorRowsPerShard,
-		Dimensions: cfg.EmbeddingDimensions(),
-	}
-	memoryLimit, err := resolveMemoryLimit(cfg.Format.DuckDB.MemoryLimit, shape, logger, opts.DryRun)
+	maxShardBytes := kb.NormalizeShardingPolicy(cfg.ShardingPolicy()).MaxShardBytes
+	memoryLimit, err := resolveMemoryLimit(cfg.Format.DuckDB.MemoryLimit, maxShardBytes, logger, opts.DryRun)
 	if err != nil {
 		return nil, err
 	}

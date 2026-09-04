@@ -221,7 +221,7 @@ In a cgroup that is the tightest limit in the ancestry, from `memory.max`,
 budget    = 90% of ceiling
 Go heap   = 30% of budget, or your GOMEMLIMIT if you set one
 DuckDB    = budget - Go heap
-databases = min(16, DuckDB / what one index build needs)
+databases = min(16, DuckDB / what indexing max_shard_bytes needs)
 ```
 
 `memory_limit` bounds only DuckDB's buffer manager. Documents and embeddings in
@@ -238,21 +238,18 @@ that is a 14.4 GiB budget, a 4.3 GiB Go heap, and `645MB` per database.
 Sixteen is a ceiling on that divisor, not a fixed one. A host that cannot give
 sixteen databases enough to finish an index build keeps fewer instead, and the
 reader cache is bounded by the same number, so the cache and the budget cannot
-drift apart. A 2 GiB box with a 768MiB `GOMEMLIMIT` runs four databases of
-`250MB` rather than sixteen of `62MB`, none of which could seal a shard.
+drift apart. A 2 GiB box with a 768MiB `GOMEMLIMIT` runs nine databases of
+`119MB` rather than sixteen of `62MB`, none of which could seal a shard.
 
 This costs something. A tight host caches fewer shard readers, so a fanout
 query across more shards than the cache holds reopens databases it just closed.
-Wide vectors make it worse. At 1536 dimensions a 4 GiB host affords three
-databases, where at 512 it affords eleven. If `sharding.query_shard_fanout`
-exceeds the `databases` count logged at startup, lower
-`sharding.max_vector_rows_per_shard` or add memory. A bigger cache would only
-overcommit.
+Raising `sharding.max_shard_bytes` makes it worse: at 128MB the same 2 GiB box
+affords four readers, under its own `query_shard_fanout_adaptive_max`. If the
+`databases` count logged at startup is below your fanout, lower
+`sharding.max_shard_bytes` or add memory. A bigger cache would only overcommit.
 
 What one index build needs is measured, not assumed. `TestIndexBuildMemoryFloor`
 walks `memory_limit` down until an HNSW build over a full shard stops finishing.
-The floor tracks raw vector bytes, `rows x dimensions x 4`, rather than row
-count. 75k rows at 256 dimensions and 37.5k at 512 measure identically.
 
 | rows x dimensions | raw vectors | floor | ratio |
 | --- | --- | --- | --- |
@@ -267,90 +264,43 @@ count. 75k rows at 256 dimensions and 37.5k at 512 measure identically.
 Those are darwin/arm64. The `index-floor` CI job remeasures on linux/amd64,
 where every shape came in at the same ratio or lower.
 
-The ratio falls as a shard grows. The planner uses 1.6 times raw, above the
-worst measured, and never less than 64MiB. Getting this wrong does not always
-fail cleanly. An allocation past `memory_limit` can throw where nothing catches
-it and abort the process. The shard shape comes from
-`sharding.max_vector_rows_per_shard` and your embedder's dimensions. Where only
-the provider knows the width, the 64MiB bound applies.
+The floor tracks raw vector bytes, not row count. 75k rows at 256 dimensions and
+37.5k at 512 measure identically, as do 75k x 512 and 100k x 384. The ratio
+falls as a shard grows, so the planner uses 1.6 times raw, above the worst
+measured, and never less than 64MiB.
 
-Ingest,
-sealing, and compaction open their own short-lived databases on top of it, so
-minnow tracks how much of the DuckDB total it has already handed out and gives
-each new database the planned share or whatever is left, whichever is smaller.
-Databases that close return their share.
+Neither the row count nor the embedder's width is an input, because both cancel.
+DuckDB stores a float vector at 0.87 times its raw size, measured at 256 through
+1024 dimensions, so a shard file of a given size holds the same raw vector bytes
+whatever the embedder:
 
-Nothing blocks waiting for a share, which matters because these opens nest: a
-database waiting on a slot could be waiting on one its own caller holds.
+```
+rows per shard   = max_shard_bytes / (0.87 x dim x 4)
+raw vector bytes = rows x dim x 4 = max_shard_bytes / 0.87
+```
 
-That floor is also the one way the sum exceeds the total. Once the total is
-spent every further database still gets the floor, so a host running far more
-databases than the cache holds can issue more `memory_limit` in aggregate than
-it planned for. Shrinking below it would trade one failure for a worse one.
+At the 64MB default that is 73 MiB of vectors and a 117MB floor. Documents
+with text hold fewer vectors in the same bytes, so vectors-only is the worst
+case and the one the planner sizes for.
 
-No plan can see everything. The HNSW index the VSS extension builds is
-allocated outside DuckDB's buffer manager, DuckDB has non-buffer allocations
-`memory_limit` does not cover, and `GOMEMLIMIT` bounds no cgo at all.
+Getting this wrong does not always fail cleanly. An allocation past
+`memory_limit` can throw where nothing catches it and abort the process.
 
-So on Linux minnow also asks the kernel. It writes `memory.high` on its own
-cgroup at 95% of the ceiling, which makes the kernel reclaim and throttle there
-instead of letting the process run to the OOM killer. The mark sits above the
-ones below, so userspace sheds work first and the kernel is the backstop. The
-previous value is restored on shutdown. Where the cgroup is not writable, which
-is usual under a container runtime that owns it, nothing is enforced and only
-the shedding below applies.
+### Why shards have a maximum
 
-For notification it waits on `memory.pressure`, the time this cgroup actually
-lost to reclaim, with a trigger at 150ms in any second. Not `memory.events`:
-that counter bumps on every allocation the kernel throttles, and `memory.high`
-is policed against `memory.current`, so a process whose page cache sits at the
-mark is woken continuously while nothing it can act on has changed. Stall time
-is the part worth waking for.
+`max_shard_bytes` is what makes the floor computable. Compaction merges the
+densest size tier and never re-splits, so without a cap each round multiplies
+the largest shard by the fan-in. Driving the real planner with 32MB seals used
+to reach 128 MiB after 8 shards, 1.5 GiB after 67, and 63 GiB after 4000, at
+which point the whole corpus sits in one file that no host can index and
+sharding has stopped doing anything.
 
-There are four sources, tried in this order. This cgroup's `memory.pressure`,
-then its `memory.events`, then machine-wide `/proc/pressure/memory` on a host
-with no cgroup v2 memory controller, then a 2-second poll. The poll exists for
-one case, a Firecracker VM whose kernel reports pressure but refuses triggers on
-it. There the choice is a slow read of one small file or no back-pressure at
-all. Startup logs which source is in force.
-
-The kernel alone tells us too late. Stall only starts once reclaim is already
-running at 95%, above both marks below, so the first thing minnow heard would be
-critical. It also samples every 5 seconds while healthy, and every 2 seconds
-under pressure to catch the moment it lifts. Kernel wake-ups are paced to four a
-second, since sustained pressure reports continuously and correctly. On each
-sample minnow reads the working set of the cgroup that set the ceiling,
-`memory.current` minus `inactive_file`, and sheds work:
-
-| use | what changes |
-| --- | --- |
-| under 75% | budgets apply as planned |
-| 75% to 90% | new databases get half the planned share, embedding batches in flight halve |
-| over 90% | new shard seals and compactions are refused, new databases get the index build floor, index builds drop to one thread, embedding runs one batch at a time, and the GC runs harder |
-
-Reclaimable page cache is subtracted deliberately. Counting it would leave any
-process that writes shard files sitting at its own limit, throttled for good by
-cache the kernel would drop on demand.
-
-A level holds until use falls five points clear of its mark, so a process
-sitting on a threshold does not flap between settings.
-
-What this cannot do is reach a build that has already started. Its
-`memory_limit` and thread count are fixed when it opens, and DuckDB takes one
-connection at a time, so a later `SET` would queue behind the very build it
-needed to reach. Refusing to start the next seal or compaction is the lever that
-works, and it bounds the peak rather than smearing it.
-
-All of this runs whether or not `memory_limit` was chosen for you. Pinning a
-size keeps your number and still gets back-pressure and admission control.
-Startup logs which mechanism is in force, or warns that none is.
-
-On every platform but Linux the static plan is all you get.
-
-Startup logs the ceiling, its source, and every share. `auto` fails at startup
-rather than guessing when the platform has no readable ceiling, when a cgroup
-filesystem is mounted but its limits cannot be read, and when what is left
-cannot give even one database enough to finish an index build.
+The cap defaults to 64MB, twice `target_shard_bytes`. Raising it raises the
+memory every cached reader needs and lowers how many fit, and 64MB is the
+largest cap that still leaves the 2 GiB deployment in `deploy/fly` caching more
+readers than its own `query_shard_fanout_adaptive_max`. Lowering it leaves more
+shards behind instead. A shard at the cap also stops merging, so tombstones
+inside it are only reclaimed if it falls back under.
 
 ### `embedder`
 
@@ -563,8 +513,9 @@ Presence of a key means "explicit"; omit a key to accept the default.
 | ----------------------------------- | ------- | ---------- | ------------------------------------------------------ |
 | `shard_trigger_bytes`               | int     | `67108864` | > 0 when set.                                          |
 | `shard_trigger_vector_rows`         | int     | `150000`   | > 0 when set.                                          |
-| `target_shard_bytes`                | int     | `33554432` | > 0 when set.                                          |
-| `max_vector_rows_per_shard`         | int     | `75000`    | > 0 when set.                                          |
+| `target_shard_bytes`                | int     | `33554432` | > 0 when set. What a fresh seal aims for.              |
+| `max_shard_bytes`                   | int     | `67108864` | > 0 when set. Caps compaction. See above.              |
+| `max_vector_rows_per_shard`         | int     | `75000`    | > 0 when set. Accepted but not enforced.               |
 | `query_shard_fanout`                | int     | `4`        | > 0 and ≤ 64.                                          |
 | `query_shard_fanout_adaptive_max`   | int     | `6`        | ≤ 64 and ≥ `query_shard_fanout`.                       |
 | `query_shard_parallelism`           | int     | `4`        | > 0 when set.                                          |

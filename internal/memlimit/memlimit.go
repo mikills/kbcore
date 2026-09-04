@@ -19,28 +19,27 @@ const (
 	// Measured peak over raw vector bytes: 1.53 at the smallest shard, 1.28 at
 	// the largest. Overshooting can abort the process, so this sits above both.
 	buildOverhead = 1.6
+	// DuckDB stores a float vector at 0.87 times its raw size, measured at
+	// 256, 384, 512, 768 and 1024 dimensions. Dimension cancels out of the two
+	// together: a shard file of a given size holds the same raw vector bytes
+	// whatever the embedder, so the floor needs no row count and no width.
+	vectorCompression = 0.87
 )
 
-// Shape is the largest shard an index build has to fit.
-type Shape struct {
-	Rows       int
-	Dimensions int
-}
-
 // MinDatabaseBytes is the smallest memory_limit that can finish an index build
-// over this shape. Measured against raw vector bytes, not row count.
-func (s Shape) MinDatabaseBytes() int64 {
-	raw := int64(s.Rows) * int64(s.Dimensions) * 4
-	return max(int64(float64(raw)*buildOverhead), FloorDatabaseBytes)
+// over the largest shard sharding.max_shard_bytes allows.
+func MinDatabaseBytes(maxShardBytes int64) int64 {
+	raw := float64(maxShardBytes) / vectorCompression
+	return max(int64(raw*buildOverhead), FloorDatabaseBytes)
 }
 
-// RowsWithin is the largest shard this many bytes could index, for telling an
-// operator what would fit.
-func (s Shape) RowsWithin(bytes int64) int {
-	if s.Dimensions <= 0 || bytes <= 0 {
+// ShardBytesWithin is the largest shard this many bytes could index, for
+// telling an operator what would fit.
+func ShardBytesWithin(bytes int64) int64 {
+	if bytes <= 0 {
 		return 0
 	}
-	return int(float64(bytes) / (buildOverhead * float64(s.Dimensions) * 4))
+	return int64(float64(bytes) * vectorCompression / buildOverhead)
 }
 
 var (
@@ -96,7 +95,7 @@ type Plan struct {
 
 // Divide splits the ceiling. presetGoHeap is an effective GOMEMLIMIT or 0.
 // maxDBs is a cap, lowered to what the ceiling can give each instance.
-func (l Limit) Divide(shape Shape, maxDBs int, presetGoHeap int64) (Plan, error) {
+func (l Limit) Divide(maxShardBytes int64, maxDBs int, presetGoHeap int64) (Plan, error) {
 	if err := l.Usable(); err != nil {
 		return Plan{}, err
 	}
@@ -110,15 +109,20 @@ func (l Limit) Divide(shape Shape, maxDBs int, presetGoHeap int64) (Plan, error)
 		goHeap, preset = max(int64(float64(budget)*GoHeapShare), minGoHeap), false
 	}
 	duckTotal := budget - goHeap
-	minPerDB := shape.MinDatabaseBytes()
+	if duckTotal <= 0 {
+		return Plan{}, fmt.Errorf(
+			"%w: a %s Go heap leaves nothing of a %s ceiling for DuckDB; lower GOMEMLIMIT",
+			ErrTooSmall, formatMiB(goHeap), formatMiB(l.Ceiling),
+		)
+	}
+	minPerDB := MinDatabaseBytes(maxShardBytes)
 	// The count gives way, not the share.
 	dbs := int(duckTotal / minPerDB)
 	if dbs < 1 {
 		return Plan{}, fmt.Errorf(
-			"%w: a %s ceiling leaves %s for DuckDB after a %s Go heap, and one database needs %s to index %d rows at %d dimensions; %s would fit sharding.max_vector_rows_per_shard of %d",
+			"%w: a %s ceiling leaves %s for DuckDB after a %s Go heap, and indexing a %s shard needs %s; set sharding.max_shard_bytes to %s or less",
 			ErrTooSmall, formatMiB(l.Ceiling), formatMiB(duckTotal), formatMiB(goHeap),
-			formatMiB(minPerDB), shape.Rows, shape.Dimensions,
-			formatMiB(duckTotal), shape.RowsWithin(duckTotal),
+			formatMiB(maxShardBytes), formatMiB(minPerDB), formatMiB(ShardBytesWithin(duckTotal)),
 		)
 	}
 	dbs = min(dbs, maxDBs)

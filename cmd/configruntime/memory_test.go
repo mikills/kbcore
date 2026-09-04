@@ -17,8 +17,8 @@ import (
 	"github.com/mikills/minnow/kb/config"
 )
 
-// shard is the shape the measured index build floor came from.
-var shard = memlimit.Shape{Rows: 75000, Dimensions: 512}
+// shard is the default sharding.max_shard_bytes.
+const shard = int64(64) << 20
 
 // The grammar DuckDB's memory_limit accepts.
 var duckDBSize = regexp.MustCompile(`^\d+(B|KB|MB|GB|TB)$`)
@@ -72,7 +72,7 @@ func TestResolveMemoryLimit(t *testing.T) {
 		// Nobody asked for auto here, so an unreadable ceiling must not stop
 		// a deployment that would have run on the fixed default.
 		stubDetect(t, memlimit.Limit{})
-		got, err := resolveMemoryLimit("", memlimit.Shape{}, quietLogger(), true)
+		got, err := resolveMemoryLimit("", 1<<20, quietLogger(), true)
 		require.NoError(t, err)
 		require.Equal(t, FallbackMemoryLimit, got)
 	})
@@ -89,7 +89,7 @@ func TestResolveMemoryLimit(t *testing.T) {
 		plan, sizes := budget.Process().Plan()
 		require.True(t, sizes)
 		require.Less(t, plan.Databases, 16)
-		require.GreaterOrEqual(t, parseSizeMB(t, got), shard.MinDatabaseBytes()>>20,
+		require.GreaterOrEqual(t, parseSizeMB(t, got), memlimit.MinDatabaseBytes(shard)>>20,
 			"the shipped default could not finish an index build")
 	})
 
@@ -141,9 +141,9 @@ func TestGoMemLimit(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, operator, debug.SetMemoryLimit(-1), "minnow overrode a limit it did not set")
 
-		// Four databases of 268MB, not sixteen of 67MB: the Go heap is taken
-		// out first and what is left has to still finish an index build.
-		require.Equal(t, "268MB", got, "DuckDB was sized as if the Go heap were free")
+		// Nine databases of 119MB, not sixteen of 67MB. The Go heap comes out
+		// first, and what is left still has to finish an index build.
+		require.Equal(t, "119MB", got, "DuckDB was sized as if the Go heap were free")
 	})
 
 	t.Run("a second Build does not ratchet the budget down", func(t *testing.T) {

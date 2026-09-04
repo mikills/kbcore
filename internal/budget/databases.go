@@ -19,8 +19,7 @@ func (m *Manager) OpenDatabase(configured string) (limit string, release func())
 		m.issued.Add(0)
 		return configured, m.releaser(0)
 	}
-	share := m.databaseShare()
-	m.issued.Add(share)
+	share := m.claimShare()
 	return memlimit.FormatMB(share), m.releaser(share)
 }
 
@@ -41,8 +40,20 @@ func (m *Manager) releaser(share int64) func() {
 //
 // The index build floor is the one way past the total. Shrinking below it would
 // trade one failure for a worse one.
-func (m *Manager) databaseShare() int64 {
-	remaining := m.plan.DuckDBTotal - m.issued.Load()
+// claimShare reserves a share against the total. Compare and swap because two
+// opens reading the same remainder would both issue it.
+func (m *Manager) claimShare() int64 {
+	for {
+		issued := m.issued.Load()
+		share := m.databaseShare(issued)
+		if m.issued.CompareAndSwap(issued, issued+share) {
+			return share
+		}
+	}
+}
+
+func (m *Manager) databaseShare(issued int64) int64 {
+	remaining := m.plan.DuckDBTotal - issued
 	planned := m.plan.DuckDBTotal / int64(m.CachedDatabases())
 	// Use has already outrun the plan, so the planned share is the wrong one.
 	switch m.Pressure() {

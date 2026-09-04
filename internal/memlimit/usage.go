@@ -19,7 +19,8 @@ func Current(dir string) Usage { return currentUsage(dir) }
 // Notifier blocks until the kernel reports memory pressure.
 type Notifier interface {
 	// Wait returns on pressure, on timeout, or with an error once closed. A
-	// negative timeout blocks indefinitely and costs nothing while it does.
+	// negative timeout means the caller has nothing to wake for, so a watcher
+	// blocks; a poller still returns on its own interval.
 	Wait(timeoutMS int) error
 	// Interrupt wakes a blocked Wait without releasing anything, so the waiter
 	// returns before Close runs.

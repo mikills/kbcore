@@ -604,6 +604,7 @@ func validateShardingPositiveFields(cfg ShardingConfig) error {
 		checkPositive64("shard_trigger_bytes", cfg.ShardTriggerBytes),
 		checkPositive("shard_trigger_vector_rows", cfg.ShardTriggerVectorRows),
 		checkPositive64("target_shard_bytes", cfg.TargetShardBytes),
+		checkPositive64("max_shard_bytes", cfg.MaxShardBytes),
 		checkPositive("max_vector_rows_per_shard", cfg.MaxVectorRowsPerShard),
 		checkPositive("query_shard_fanout", cfg.QueryShardFanout),
 		checkPositive("query_shard_fanout_adaptive_max", cfg.QueryShardFanoutAdaptiveMax),
@@ -773,6 +774,7 @@ func (s ShardingConfig) resolve() kb.ShardingPolicy {
 	applyInt64Ptr(&p.ShardTriggerBytes, s.ShardTriggerBytes)
 	applyIntPtr(&p.ShardTriggerVectorRows, s.ShardTriggerVectorRows)
 	applyInt64Ptr(&p.TargetShardBytes, s.TargetShardBytes)
+	applyInt64Ptr(&p.MaxShardBytes, s.MaxShardBytes)
 	applyIntPtr(&p.MaxVectorRowsPerShard, s.MaxVectorRowsPerShard)
 	applyIntPtr(&p.QueryShardFanout, s.QueryShardFanout)
 	applyIntPtr(&p.QueryShardFanoutAdaptiveMax, s.QueryShardFanoutAdaptiveMax)

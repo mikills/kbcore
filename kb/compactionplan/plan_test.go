@@ -1,6 +1,7 @@
 package compactionplan
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/mikills/minnow/kb/sharding"
@@ -52,4 +53,59 @@ func TestPlan(t *testing.T) {
 		require.False(t, ShouldCompact(policy, []Shard{{ShardID: "s1"}}))
 		require.True(t, ShouldCompact(policy, []Shard{{ShardID: "s1", TombstoneRatio: 0.25}, {ShardID: "s2"}}))
 	})
+}
+
+func TestCompactionHasACeiling(t *testing.T) {
+	// Merging never re-splits, so the densest tier used to compound: 4000
+	// sealed shards produced a single 63 GiB one, which no host can index.
+	policy := sharding.DefaultPolicy()
+	const sealed = int64(32) << 20
+
+	var shards []Shard
+	next, largest := 0, int64(0)
+	for range 500 {
+		shards = append(shards, Shard{ShardID: fmt.Sprintf("s%d", next), SizeBytes: sealed})
+		next++
+		for {
+			picked := Select(policy, shards)
+			if len(picked) < 2 {
+				break
+			}
+			merged, chosen := int64(0), map[string]bool{}
+			for _, p := range picked {
+				chosen[p.ShardID] = true
+				merged += p.SizeBytes
+			}
+			keep := make([]Shard, 0, len(shards))
+			for _, s := range shards {
+				if !chosen[s.ShardID] {
+					keep = append(keep, s)
+				}
+			}
+			shards = append(keep, Shard{ShardID: fmt.Sprintf("s%d", next), SizeBytes: merged})
+			next++
+			largest = max(largest, merged)
+		}
+	}
+	require.LessOrEqual(t, largest, policy.MaxShardBytes, "compaction outgrew the cap")
+	require.Greater(t, largest, sealed, "nothing merged, so the cap proves nothing")
+}
+
+func TestTombstonedShardsAtTheCapStillCompact(t *testing.T) {
+	// Sizing the merge by the file refused exactly the shards worth merging: a
+	// pair at the cap that is mostly dead rows fits easily once they are gone.
+	policy := sharding.DefaultPolicy()
+	full := policy.MaxShardBytes
+	shards := []Shard{
+		{ShardID: "a", SizeBytes: full, TombstoneRatio: 0.9},
+		{ShardID: "b", SizeBytes: full, TombstoneRatio: 0.9},
+	}
+	picked := Select(policy, shards)
+	require.Len(t, picked, 2, "a shard at the cap could never shed its tombstones")
+
+	merged := int64(0)
+	for _, p := range picked {
+		merged += LiveBytes(p)
+	}
+	require.LessOrEqual(t, merged, policy.MaxShardBytes)
 }

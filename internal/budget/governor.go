@@ -157,9 +157,9 @@ func (m *Manager) StopGovernor() {
 	debug.SetGCPercent(baseGCPercent())
 }
 
-// baseGCPercent is GOGC as the process started, read once. Reading it means
-// briefly disabling the collector, so doing it per governor would race two
-// managers into leaving it off for good.
+// baseGCPercent is GOGC before the governor touched it, read once. It has to be
+// forced before the first sample: read lazily, the first read happens on the way
+// back down from critical and memoizes the pressed value as the base.
 var baseGCPercent = sync.OnceValue(func() int {
 	previous := debug.SetGCPercent(-1)
 	debug.SetGCPercent(previous)
@@ -193,6 +193,7 @@ func (g *governor) run(ctx context.Context, ceiling int64) {
 	}
 	// Teardown belongs to this goroutine alone.
 	defer func() { _ = watcher.Close() }()
+	baseGCPercent()
 	g.enforced.Store(watcher.Enforced())
 	g.source.Store(watcher.Source())
 	close(g.armed)
