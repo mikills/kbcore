@@ -49,11 +49,25 @@ The p50 is lower on synthetic (simpler query plan on uniform vectors), but the p
 
 Ingest throughput with a real embedder is dominated by embedding cost: 38 docs/s with Ollama `nomic-embed-text`, 921 docs/s with the in-repo `LocalEmbedder`.
 
-To regenerate the corpus (runs once, ~18s):
+To regenerate the built-in corpus, 20 companies and about 15,800 chunks (~18s):
 
 ```bash
 go run ./scripts/fetch_corpus/
 ```
+
+`-index` reads every EDGAR filer instead, 10,391 of them at roughly 790 chunks
+each, so about 8M chunks are reachable. `-target` stops once that many chunks
+exist on disk and `-resume` skips a company already fetched, so a large pull can
+be interrupted and continued:
+
+```bash
+go run ./scripts/fetch_corpus/ -index -target 1000000 -ua "you you@example.com"
+```
+
+SEC asks for contact details in the User-Agent, so set `-ua`. 1M chunks needs
+roughly 1,270 companies. Budget a couple of hours rather than the throttle
+alone: each company is two requests and a 10-K is often 5-15 MB of HTML that
+still has to be stripped to text. Chunks average 662 characters.
 
 The 768-dim real case requires Ollama running with `nomic-embed-text` pulled (`ollama pull nomic-embed-text`). The bench skips cleanly if Ollama is unavailable.
 
@@ -129,6 +143,9 @@ Or name the cases, which is the only way to reach a size the suite does not list
 | `MINNOW_BENCH_MEMORY_LIMIT` | `16GB` | DuckDB `memory_limit` for the run. |
 | `MINNOW_BENCH_TEMP_DIR` | unset | Where DuckDB spills. Unset spills beside the shard. |
 | `MINNOW_BENCH_JSON` | unset | Appends one JSON line per case. |
+| `MINNOW_BENCH_CORPUS_DIR` | `testdata/corpus/10k-filings` | Where `_real_` cases read chunks from. |
+| `OPEN_AI_EMBEDDING_KEY_MINNOW` | unset | Embeds `_real_` cases through OpenAI at the case's dimension. |
+| `MINNOW_BENCH_OPENAI_MODEL` | `text-embedding-3-small` | Model for the above. |
 
 ```bash
 MINNOW_BENCH_CASES=2M_dim512,5M_dim512 \
@@ -140,10 +157,11 @@ MINNOW_BENCH_JSON=results.jsonl \
 ### On CI
 
 The `Benchmark` workflow runs the same cases on a runner instead of a
-workstation. Dispatch it from the Actions tab or with:
+workstation. Dispatch it from the Actions tab, or from any branch without
+merging first:
 
 ```bash
-gh workflow run Benchmark -f cases=1M_dim512,2M_dim512 \
+gh workflow run Benchmark --ref my-branch -f cases=1M_dim512,2M_dim512 \
   -f runner=ubuntu-latest -f memory_limit=10GB -f timeout_minutes=350
 ```
 
@@ -151,10 +169,29 @@ Each case gets its own job, and one summary table reports them in corpus order
 with peak RSS. A case that runs out of memory or disk keeps its row with the
 reason, so the table shows where the limit is rather than omitting it.
 
-A hosted runner has 16 GB of RAM, caps a job at 6 hours, and needs the scratch
-volume chosen for it; the workflow picks the larger of `/mnt` and `RUNNER_TEMP`
-and points both the corpus and the DuckDB spill there. Corpora past roughly 2M
-want a self-hosted runner, which caps at 5 days.
+A hosted runner has 15 GB of RAM and caps a job at 6 hours, so memory binds
+before disk does. The workflow points the corpus and the DuckDB spill at
+whichever of `/mnt` and `RUNNER_TEMP` has more room and reports both the choice
+and the free space, so a run records its own headroom rather than assuming it.
+Corpora past roughly 2M spill hard enough to want a self-hosted runner, which
+caps at 5 days.
+
+A push to a `bench/**` branch, or the `benchmark` label on a pull request, runs
+`100k_dim512` alone. The four-case sweep is dispatch-only, so a label cannot
+start a multi-hour job.
+
+A `_real_` case downloads `corpus.tar.gz` from the release named by the
+`corpus_tag` input rather than fetching SEC on every run. Build that asset once
+with the `Corpus` workflow, which takes a chunk target and a User-Agent. With
+`OPEN_AI_EMBEDDING_KEY_MINNOW` set in repository secrets those cases embed
+through OpenAI at the case's dimension, so `10k_real_dim512` is real text and
+real embeddings end to end.
+
+Embedding is the slow part, not indexing. At roughly 165 tokens per chunk,
+`text-embedding-3-small` costs about $3.30 per million chunks, but a 1M run
+spends hours inside OpenAI's rate limit before indexing starts and will not fit
+the 6 hour hosted cap. Keep hosted real runs at 100k or below, or use a
+self-hosted runner.
 
 ## Tuning notes
 

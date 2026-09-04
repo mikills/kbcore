@@ -2,12 +2,17 @@ name: Test
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "bench/**"
+      - "feat/**"
+      - "fix/**"
     tags:
       - "v*"
       - "codeindex/v*"
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -41,7 +46,9 @@ jobs:
           sh -n install.sh
 
       - name: Test
-        run: go test ./... -count=1 -tags=long
+        # sim runs seeded scenarios for about six minutes, close enough to Go's
+        # ten minute default that a loaded runner trips it.
+        run: go test ./... -count=1 -tags=long -timeout 25m
 
       - name: Test codeindex
         run: go test ./codeindex/...
@@ -61,6 +68,75 @@ jobs:
         env:
           GOWORK: off
         run: go test ./...
+
+  index-floor:
+    name: index build memory floor on linux/amd64
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rows: 75000
+            dim: 512
+          - rows: 18750
+            dim: 512
+          - rows: 56250
+            dim: 640
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # memlimit.buildOverhead is derived from these numbers, and they were
+      # taken on darwin/arm64. This is where they are checked on the platform
+      # that actually runs the thing.
+      - name: Measure
+        env:
+          MINNOW_MEASURE_INDEX_FLOOR: "1"
+          MINNOW_FLOOR_ROWS: ${{ matrix.rows }}
+          MINNOW_FLOOR_DIM: ${{ matrix.dim }}
+        run: go test ./kb/duckdb/ -run TestIndexBuildMemoryFloor -v -timeout 85m
+
+  cgroup:
+    name: memory governor on a real cgroup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check the runner has cgroup v2
+        run: |
+          test -f /sys/fs/cgroup/cgroup.controllers
+          grep -q memory /sys/fs/cgroup/cgroup.controllers
+
+      - name: Build the test binary
+        run: go test -c -o /tmp/memlimit.test ./internal/memlimit/
+
+      # The package's kernel-facing paths cannot run on a developer machine, so
+      # this is the only place memory.high, epoll and the working set are ever
+      # executed. A cgroup with a real limit is what makes them meaningful.
+      - name: Run inside a limited cgroup
+        run: |
+          sudo mkdir -p /sys/fs/cgroup/minnow-test
+          echo "+memory" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null
+          echo $((2 * 1024 * 1024 * 1024)) | sudo tee /sys/fs/cgroup/minnow-test/memory.max > /dev/null
+          echo max | sudo tee /sys/fs/cgroup/minnow-test/memory.high > /dev/null
+          sudo sh -c 'echo $$ > /sys/fs/cgroup/minnow-test/cgroup.procs; \
+            exec env MINNOW_CGROUP_IT=1 /tmp/memlimit.test -test.v -test.count=1 -test.run TestCgroupIntegration'
+
+      - name: Confirm memory.high was put back
+        if: always()
+        run: |
+          value=$(sudo cat /sys/fs/cgroup/minnow-test/memory.high 2>/dev/null || echo max)
+          echo "memory.high after the run: $value"
+          test "$value" = "max"
 
   container:
     needs: test
@@ -134,7 +210,11 @@ jobs:
 
   publish-container:
     needs: [test, container]
-    if: ${{ github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/codeindex/') }}
+    # Only main and release tags. Feature branches run the tests; they have no
+    # business pushing an image to the registry.
+    if: ${{ github.event_name == 'push'
+      && !startsWith(github.ref, 'refs/tags/codeindex/')
+      && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

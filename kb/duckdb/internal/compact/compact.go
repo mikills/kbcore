@@ -65,7 +65,7 @@ func SelectCandidatesWithReason(
 
 	tiers := make(map[int][]kb.SnapshotShardMetadata)
 	for _, shard := range manifest.Shards {
-		if shard.SizeBytes <= 0 {
+		if shard.SizeBytes <= 0 || liveShardBytes(shard) >= policy.MaxShardBytes {
 			continue
 		}
 		tier := shardSizeTier(shard.SizeBytes, policy.TargetShardBytes)
@@ -73,20 +73,46 @@ func SelectCandidatesWithReason(
 	}
 
 	if tier, ok := densestTier(tiers); ok && len(tiers[tier]) >= 2 {
-		return sortAndLimitCompactionCandidates(tiers[tier], maxCompactionCandidates), "size_tier"
+		picked := fitWithinMaxShard(sortAndLimitCompactionCandidates(tiers[tier], maxCompactionCandidates), policy.MaxShardBytes)
+		if len(picked) >= 2 {
+			return picked, "size_tier"
+		}
 	}
 
 	pressure := make([]kb.SnapshotShardMetadata, 0, len(manifest.Shards))
 	for _, shard := range manifest.Shards {
-		if shard.TombstoneRatio >= policy.CompactionTombstoneRatio {
+		if liveShardBytes(shard) < policy.MaxShardBytes && shard.TombstoneRatio >= policy.CompactionTombstoneRatio {
 			pressure = append(pressure, shard)
 		}
 	}
-	if len(pressure) < 2 {
+	picked := fitWithinMaxShard(sortAndLimitCompactionCandidates(pressure, maxCompactionCandidates), policy.MaxShardBytes)
+	if len(picked) < 2 {
 		return nil, "insufficient_candidates"
 	}
 
-	return sortAndLimitCompactionCandidates(pressure, maxCompactionCandidates), "tombstone_pressure"
+	return picked, "tombstone_pressure"
+}
+
+// fitWithinMaxShard stops before the merged shard outgrows what a host can
+// index. Compaction never re-splits, so without it the densest tier merges
+// forever.
+func fitWithinMaxShard(candidates []kb.SnapshotShardMetadata, maxBytes int64) []kb.SnapshotShardMetadata {
+	merged := int64(0)
+	for i, candidate := range candidates {
+		if merged+liveShardBytes(candidate) > maxBytes {
+			return candidates[:i]
+		}
+		merged += liveShardBytes(candidate)
+	}
+	return candidates
+}
+
+// liveShardBytes is what a shard contributes to a merge. Tombstoned rows are
+// dropped on the way in, so sizing by the file would strand a shard at the cap
+// with no way to shrink.
+func liveShardBytes(shard kb.SnapshotShardMetadata) int64 {
+	ratio := min(max(shard.TombstoneRatio, 0), 1)
+	return int64(float64(shard.SizeBytes) * (1 - ratio))
 }
 
 func shouldCompact(policy kb.ShardingPolicy, manifest *kb.SnapshotShardManifest) bool {

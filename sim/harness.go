@@ -118,10 +118,13 @@ func New(t *testing.T, opts ...Option) *Harness {
 	loader.EventInbox = eventInbox
 
 	format, err := duckdb.NewArtifactFormat(duckdb.DuckDBArtifactDeps{
-		BlobStore:                  blobs,
-		ManifestStore:              manifest,
-		CacheDir:                   cacheDir,
-		MemoryLimit:                "256MB",
+		BlobStore:     blobs,
+		ManifestStore: manifest,
+		CacheDir:      cacheDir,
+		MemoryLimit:   "256MB",
+		// Parallel HNSW construction inserts into one shared graph, so shard
+		// bytes and their checksums stop being reproducible across runs.
+		BuildThreads:               1,
 		ShardingPolicy:             loader.ShardingPolicy,
 		Embed:                      loader.Embed,
 		GraphBuilder:               harnessGraphBuilder(loader),

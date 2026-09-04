@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+
+	"github.com/duckdb/duckdb-go/v2"
 )
 
 const DefaultExtensionDir = "extensions"
@@ -37,6 +40,9 @@ type Config struct {
 	TempDir      string
 	OfflineExt   bool
 	Threads      int
+	// OnClose runs when sql.DB.Close closes the connector, which is how the
+	// process budget learns a database is no longer holding its share.
+	OnClose func()
 }
 
 func Open(ctx context.Context, dbPath string, cfg Config) (*sql.DB, error) {
@@ -52,10 +58,11 @@ func Open(ctx context.Context, dbPath string, cfg Config) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("duckdb", dbPath)
+	connector, err := duckdb.NewConnector(dbPath, nil)
 	if err != nil {
 		return nil, err
 	}
+	db := sql.OpenDB(&closingConnector{Connector: connector, onClose: cfg.OnClose})
 	// Callers serialize each shard DB through shardConn.mu. Keep database/sql
 	// from opening additional native DuckDB connections behind that lock.
 	db.SetMaxOpenConns(1)
@@ -70,6 +77,23 @@ func Open(ctx context.Context, dbPath string, cfg Config) (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+// closingConnector reports a close to the budget. sql.DB closes the connector
+// it was opened with, so this fires exactly once per database.
+type closingConnector struct {
+	*duckdb.Connector
+	onClose func()
+	once    sync.Once
+}
+
+func (c *closingConnector) Close() error {
+	c.once.Do(func() {
+		if c.onClose != nil {
+			c.onClose()
+		}
+	})
+	return c.Connector.Close()
 }
 
 func Configure(ctx context.Context, db *sql.DB, cfg Config) error {

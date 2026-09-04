@@ -188,24 +188,119 @@ storage:
 format:
   duckdb:
     memory_limit: 64MB
+    build_threads: 1 # index builds hold memory too
 sharding:
   query_shard_fanout: 2
   query_shard_fanout_adaptive_max: 2
   query_shard_parallelism: 1
 ```
 
-Set `GOMEMLIMIT` in the service environment as an additional Go-heap guard.
-It does not include DuckDB native memory, so retain an OS/cgroup memory limit.
+`memory_limit: auto` derives all of this from the host instead. Set `GOMEMLIMIT`
+yourself only if you want a specific Go-heap figure; `auto` then sizes DuckDB
+around it rather than on top of it.
 
 ### `format`
 
 | Field                  | Type   | Default         | Notes                              |
 | ---------------------- | ------ | --------------- | ---------------------------------- |
 | `kind`                 | string | `duckdb`        | Only `duckdb` is supported today.  |
-| `duckdb.memory_limit`  | string | `128MB`         | Passed to DuckDB verbatim. `MINNOW_DUCKDB_MEMORY_LIMIT` overrides it at startup, for deployments whose config is baked into an image. |
+| `duckdb.memory_limit`  | string | sized from the host | A size such as `4GB`, passed to DuckDB verbatim. Unset sizes from the host (see below), falling back to `128MB` where the ceiling cannot be read. `auto` is the same sizing but fails rather than falling back. `MINNOW_DUCKDB_MEMORY_LIMIT` overrides it at startup, for deployments whose config is baked into an image. |
+| `duckdb.build_threads` | int    | `min(GOMAXPROCS, 4)` | DuckDB threads while sealing or compacting a shard, capped at 256. Queries stay at one thread per shard because several are probed at once. Halves index build time on a 75k row shard at 512 dim; the gain flattens past four. All concurrent builds share one budget sized to the machine's cores, and each build is also held to the current GOMAXPROCS, which Go re-reads from the cgroup CPU quota about once a second. Raising a container's CPU limit therefore widens builds without a restart. Each thread raises DuckDB's per-operator memory reservation, so lower it alongside a small `memory_limit`. |
+| `duckdb.embed_parallelism` | int | `4` | Embedding batches in flight during one upsert, capped at 16. A remote embedder spends each request waiting, so running several at once cuts the wall clock. All upserts share a process budget of 64, so raising this does not multiply across concurrent ingests. |
 | `duckdb.temp_directory` | path  | unset           | Where DuckDB spills once a query exceeds `memory_limit`. Created if missing. Unset spills to a `.tmp` directory beside each shard, so the spill lands on whichever volume holds `storage.cache.dir`. Set it when that volume is smaller than the working set. |
 | `duckdb.extension_dir` | path   | `./extensions`  | Relative to YAML file.             |
 | `duckdb.offline`       | bool   | `false`         | If true, disables extension fetch. |
+
+#### Sizing memory from the host
+
+`memory_limit: auto` reads the ceiling this process runs under and divides it.
+In a cgroup that is the tightest limit in the ancestry, from `memory.max`,
+`memory.high`, or v1's `memory.limit_in_bytes`. Otherwise it is physical memory.
+
+```
+budget    = 90% of ceiling
+Go heap   = 30% of budget, or your GOMEMLIMIT if you set one
+DuckDB    = budget - Go heap
+databases = min(16, DuckDB / what indexing max_shard_bytes needs)
+```
+
+`memory_limit` bounds only DuckDB's buffer manager. Documents and embeddings in
+flight are Go allocations it never sees, so the Go heap needs its own share.
+When the computed Go share falls below 256MiB the floor applies instead; a
+`GOMEMLIMIT` you set is used as-is.
+
+The divisor is the part to understand. `memory_limit` binds one database, not
+the process, and minnow holds up to 16 shard readers open at once. A fanout
+query across six shards runs six buffer managers, each entitled to the full
+setting. So the budget is divided before it becomes a setting. On a 16 GiB host
+that is a 14.4 GiB budget, a 4.3 GiB Go heap, and `645MB` per database.
+
+Sixteen is a ceiling on that divisor, not a fixed one. A host that cannot give
+sixteen databases enough to finish an index build keeps fewer instead, and the
+reader cache is bounded by the same number, so the cache and the budget cannot
+drift apart. A 2 GiB box with a 768MiB `GOMEMLIMIT` runs nine databases of
+`119MB` rather than sixteen of `62MB`, none of which could seal a shard.
+
+This costs something. A tight host caches fewer shard readers, so a fanout
+query across more shards than the cache holds reopens databases it just closed.
+Raising `sharding.max_shard_bytes` makes it worse: at 128MB the same 2 GiB box
+affords four readers, under its own `query_shard_fanout_adaptive_max`. If the
+`databases` count logged at startup is below your fanout, lower
+`sharding.max_shard_bytes` or add memory. A bigger cache would only overcommit.
+
+What one index build needs is measured, not assumed. `TestIndexBuildMemoryFloor`
+walks `memory_limit` down until an HNSW build over a full shard stops finishing.
+
+| rows x dimensions | raw vectors | floor | ratio |
+| --- | --- | --- | --- |
+| 18,750 x 512 | 36 MiB | 56MB | 1.53 |
+| 37,500 x 512 | 73 MiB | 96MB | 1.31 |
+| 75,000 x 256 | 73 MiB | 96MB | 1.31 |
+| 37,500 x 768 | 109 MiB | 144MB | 1.31 |
+| 56,250 x 640 | 137 MiB | 176MB | 1.28 |
+| 75,000 x 512 | 146 MiB | 192MB | 1.31 |
+| 100,000 x 384 | 146 MiB | 192MB | 1.31 |
+
+Those are darwin/arm64. The `index-floor` CI job remeasures on linux/amd64,
+where every shape came in at the same ratio or lower.
+
+The floor tracks raw vector bytes, not row count. 75k rows at 256 dimensions and
+37.5k at 512 measure identically, as do 75k x 512 and 100k x 384. The ratio
+falls as a shard grows, so the planner uses 1.6 times raw, above the worst
+measured, and never less than 64MiB.
+
+Neither the row count nor the embedder's width is an input, because both cancel.
+DuckDB stores a float vector at 0.87 times its raw size, measured at 256 through
+1024 dimensions, so a shard file of a given size holds the same raw vector bytes
+whatever the embedder:
+
+```
+rows per shard   = max_shard_bytes / (0.87 x dim x 4)
+raw vector bytes = rows x dim x 4 = max_shard_bytes / 0.87
+```
+
+At the 64MB default that is 73 MiB of vectors and a 117MB floor. Documents
+with text hold fewer vectors in the same bytes, so vectors-only is the worst
+case and the one the planner sizes for.
+
+Getting this wrong does not always fail cleanly. An allocation past
+`memory_limit` can throw where nothing catches it and abort the process.
+
+### Why shards have a maximum
+
+`max_shard_bytes` is what makes the floor computable. Compaction merges the
+densest size tier and never re-splits, so without a cap each round multiplies
+the largest shard by the fan-in. Driving the real planner with 32MB seals used
+to reach 128 MiB after 8 shards, 1.5 GiB after 67, and 63 GiB after 4000, at
+which point the whole corpus sits in one file that no host can index and
+sharding has stopped doing anything.
+
+The cap defaults to 64MB, twice `target_shard_bytes`. Raising it raises the
+memory every cached reader needs and lowers how many fit, and 64MB is the
+largest cap that still leaves the 2 GiB deployment in `deploy/fly` caching more
+readers than its own `query_shard_fanout_adaptive_max`. Lowering it leaves more
+shards behind instead. A shard at the cap also stops merging, so tombstones
+inside it are only reclaimed if it falls back under.
 
 ### `embedder`
 
@@ -418,8 +513,9 @@ Presence of a key means "explicit"; omit a key to accept the default.
 | ----------------------------------- | ------- | ---------- | ------------------------------------------------------ |
 | `shard_trigger_bytes`               | int     | `67108864` | > 0 when set.                                          |
 | `shard_trigger_vector_rows`         | int     | `150000`   | > 0 when set.                                          |
-| `target_shard_bytes`                | int     | `33554432` | > 0 when set.                                          |
-| `max_vector_rows_per_shard`         | int     | `75000`    | > 0 when set.                                          |
+| `target_shard_bytes`                | int     | `33554432` | > 0 when set. What a fresh seal aims for.              |
+| `max_shard_bytes`                   | int     | `67108864` | > 0 when set. Caps compaction. See above.              |
+| `max_vector_rows_per_shard`         | int     | `75000`    | > 0 when set. Accepted but not enforced.               |
 | `query_shard_fanout`                | int     | `4`        | > 0 and ≤ 64.                                          |
 | `query_shard_fanout_adaptive_max`   | int     | `6`        | ≤ 64 and ≥ `query_shard_fanout`.                       |
 | `query_shard_parallelism`           | int     | `4`        | > 0 when set.                                          |

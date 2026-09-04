@@ -18,8 +18,8 @@ storage:
 format:
   kind: duckdb
   duckdb:
-    # MINNOW_DUCKDB_MEMORY_LIMIT overrides this without rebuilding the image.
-    memory_limit: 128MB
+    # Unset: sized from the machine's own memory, falling back to 128MB where
+    # that cannot be read. MINNOW_DUCKDB_MEMORY_LIMIT pins it without a rebuild.
     extension_dir: /opt/minnow/extensions
     offline: true
 

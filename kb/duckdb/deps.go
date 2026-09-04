@@ -2,6 +2,7 @@ package duckdb
 
 import (
 	"context"
+	"github.com/mikills/minnow/internal/budget"
 	"time"
 
 	kb "github.com/mikills/minnow/kb"
@@ -13,6 +14,30 @@ type DepOption func(*DuckDBArtifactDeps)
 // WithMemoryLimit sets the DuckDB per-connection memory limit (e.g. "128MB").
 func WithMemoryLimit(limit string) DepOption {
 	return func(d *DuckDBArtifactDeps) { d.MemoryLimit = limit }
+}
+
+func batchEmbedFromKB(k *kb.KB) func(context.Context, []string) ([][]float32, error) {
+	batcher, ok := k.Embedder.(kb.BatchEmbedder)
+	if !ok {
+		return nil
+	}
+	return batcher.EmbedBatch
+}
+
+// WithBuildThreads sets the thread count for sealing and compacting a shard.
+// Zero picks a default that leaves headroom for concurrent queries.
+func WithBuildThreads(threads int) DepOption {
+	return func(d *DuckDBArtifactDeps) { d.BuildThreads = threads }
+}
+
+// WithEmbedParallelism bounds embedding batches in flight during an upsert.
+func WithEmbedParallelism(n int) DepOption {
+	return func(d *DuckDBArtifactDeps) { d.EmbedParallelism = n }
+}
+
+// WithBudget wires the process-wide limits. Nil uses the shared manager.
+func WithBudget(m *budget.Manager) DepOption {
+	return func(d *DuckDBArtifactDeps) { d.Budget = m }
 }
 
 // WithTempDir sets where DuckDB spills. Empty spills beside the shard.
@@ -42,6 +67,7 @@ func NewDepsFromKB(k *kb.KB, opts ...DepOption) DuckDBArtifactDeps {
 		OfflineExt:                 true,
 		ShardingPolicy:             k.ShardingPolicy,
 		Embed:                      k.Embed,
+		EmbedBatch:                 batchEmbedFromKB(k),
 		GraphBuilder:               graphBuilderFromKB(k),
 		EvictCacheIfNeeded:         k.EvictCacheIfNeeded,
 		ReserveCache:               k.ReserveCache,

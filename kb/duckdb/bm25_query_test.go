@@ -72,8 +72,8 @@ func TestBM25Search(t *testing.T) {
 
 	t.Run("bm25_missing_query_text_errors", func(t *testing.T) {
 		_, err := loader.Search(ctx, kbID, nil, &kb.SearchOptions{
-			Mode:  kb.SearchModeBM25,
-			TopK:  5,
+			Mode: kb.SearchModeBM25,
+			TopK: 5,
 		})
 		require.Error(t, err)
 	})

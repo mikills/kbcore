@@ -4,6 +4,7 @@ type Policy struct {
 	ShardTriggerBytes           int64   `json:"shard_trigger_bytes"`
 	ShardTriggerVectorRows      int     `json:"shard_trigger_vector_rows"`
 	TargetShardBytes            int64   `json:"target_shard_bytes"`
+	MaxShardBytes               int64   `json:"max_shard_bytes"`
 	MaxVectorRowsPerShard       int     `json:"max_vector_rows_per_shard"`
 	QueryShardFanout            int     `json:"query_shard_fanout"`
 	QueryShardFanoutAdaptiveMax int     `json:"query_shard_fanout_adaptive_max"`
@@ -26,6 +27,7 @@ func DefaultPolicy() Policy {
 		ShardTriggerBytes:           67108864,
 		ShardTriggerVectorRows:      150000,
 		TargetShardBytes:            33554432,
+		MaxShardBytes:               67108864,
 		MaxVectorRowsPerShard:       75000,
 		QueryShardFanout:            defaultQueryShardFanout,
 		QueryShardFanoutAdaptiveMax: 6,
@@ -48,6 +50,11 @@ func NormalizePolicy(policy Policy) Policy {
 		defaults.CompactionEnabled = policy.CompactionEnabled
 	}
 	defaults.CompactionEnabledSet = policy.CompactionEnabledSet
+	// A shard nobody capped grows without limit: compaction merges the densest
+	// tier and never re-splits, so each round multiplies by the fan-in.
+	if defaults.MaxShardBytes < defaults.TargetShardBytes {
+		defaults.MaxShardBytes = defaults.TargetShardBytes
+	}
 	return defaults
 }
 
@@ -55,6 +62,7 @@ func applyPositiveOverrides(defaults *Policy, policy Policy) {
 	applyPositiveInt64(&defaults.ShardTriggerBytes, policy.ShardTriggerBytes)
 	applyPositiveInt(&defaults.ShardTriggerVectorRows, policy.ShardTriggerVectorRows)
 	applyPositiveInt64(&defaults.TargetShardBytes, policy.TargetShardBytes)
+	applyPositiveInt64(&defaults.MaxShardBytes, policy.MaxShardBytes)
 	applyPositiveInt(&defaults.MaxVectorRowsPerShard, policy.MaxVectorRowsPerShard)
 	applyPositiveInt(&defaults.QueryShardFanout, policy.QueryShardFanout)
 	applyPositiveInt(&defaults.QueryShardFanoutAdaptiveMax, policy.QueryShardFanoutAdaptiveMax)

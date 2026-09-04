@@ -20,6 +20,8 @@ type Embedder interface {
 	Embed(ctx context.Context, input string) ([]float32, error)
 }
 
+// BatchEmbedder embeds many inputs in one call. Implementations must be safe
+// for concurrent use, since ingest sends several batches at once.
 type BatchEmbedder interface {
 	EmbedBatch(ctx context.Context, inputs []string) ([][]float32, error)
 }

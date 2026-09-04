@@ -1,0 +1,67 @@
+name: Corpus
+
+# Builds the EDGAR corpus once and attaches it to a release, so benchmark runs
+# download it instead of hitting SEC on every run.
+on:
+  workflow_dispatch:
+    inputs:
+      target_chunks:
+        description: "Stop once this many chunks exist"
+        required: true
+        default: "1000000"
+      tag:
+        description: "Release tag to hold the asset"
+        required: true
+        default: "corpus/v1"
+      user_agent:
+        description: "SEC User-Agent. They ask for a name and contact address."
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Fetch filings
+        env:
+          GOWORK: off
+          TARGET: ${{ inputs.target_chunks }}
+          UA: ${{ inputs.user_agent }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in ''|*[!0-9]*) echo "target must be a number" >&2; exit 1 ;; esac
+          go run ./scripts/fetch_corpus/ -index -target "$TARGET" -ua "$UA"
+
+      - name: Package
+        id: pack
+        run: |
+          set -euo pipefail
+          chunks=$(cat testdata/corpus/10k-filings/*.jsonl | wc -l | tr -d ' ')
+          tar -czf corpus.tar.gz -C testdata/corpus 10k-filings
+          size=$(du -m corpus.tar.gz | cut -f1)
+          echo "chunks=$chunks" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Corpus"
+            echo
+            echo "$chunks chunks, ${size} MB compressed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          CHUNKS: ${{ steps.pack.outputs.chunks }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --title "Corpus $TAG" \
+              --notes "EDGAR 10-K chunks for the vector benchmark. $CHUNKS chunks."
+          gh release upload "$TAG" corpus.tar.gz --clobber

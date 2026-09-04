@@ -21,6 +21,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	appcmd "github.com/mikills/minnow/cmd"
+	"github.com/mikills/minnow/internal/budget"
+	"github.com/mikills/minnow/internal/memlimit"
 	"github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/kb/blobstore"
 	"github.com/mikills/minnow/kb/blobstore/journal"
@@ -62,6 +64,7 @@ type Runtime struct {
 	cleanups          []func(context.Context) error
 	warmCancel        context.CancelFunc
 	warmDone          chan struct{}
+	budget            *budget.Manager
 	tieredStore       *tiered.Store
 	customJournal     journal.Store
 	backgroundStarted bool
@@ -99,6 +102,14 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 
 	rt := &Runtime{cfg: cfg, logger: logger, dryRun: opts.DryRun, customJournal: opts.ReplicationJournal}
 
+	// Before buildKB: a config-shaped error should not tear down a live KB, and
+	// the Go limit should be in force for the first allocations, not after.
+	maxShardBytes := kb.NormalizeShardingPolicy(cfg.ShardingPolicy()).MaxShardBytes
+	memoryLimit, err := resolveMemoryLimit(cfg.Format.DuckDB.MemoryLimit, maxShardBytes, logger, opts.DryRun)
+	if err != nil {
+		return nil, err
+	}
+
 	k, err := rt.buildKB(ctx, cfg)
 	if err != nil {
 		rt.cleanupBuildFailure(ctx)
@@ -107,8 +118,10 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 	rt.kb = k
 
 	af, err := kbduckdb.NewArtifactFormat(kbduckdb.NewDepsFromKB(k,
-		kbduckdb.WithMemoryLimit(cfg.Format.DuckDB.MemoryLimit),
+		kbduckdb.WithMemoryLimit(memoryLimit),
 		kbduckdb.WithTempDir(cfg.Format.DuckDB.TempDir),
+		kbduckdb.WithBuildThreads(cfg.Format.DuckDB.BuildThreads),
+		kbduckdb.WithEmbedParallelism(cfg.Format.DuckDB.EmbedParallelism),
 		kbduckdb.WithExtensionDir(cfg.Format.DuckDB.ExtensionDir),
 		kbduckdb.WithOfflineExt(cfg.Format.DuckDB.Offline),
 	))
@@ -129,6 +142,43 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 		return nil, err
 	}
 	return rt, nil
+}
+
+// logMemoryGovernor says which mechanism is holding the line, or that none is.
+// A deployment whose cgroup is read-only otherwise gets no back-pressure and no
+// hint that it does not.
+func (r *Runtime) logMemoryGovernor() {
+	source, enforced, err := r.budget.Armed()
+	if err != nil {
+		r.logger.Warn("no memory back-pressure", "reason", err.Error())
+		return
+	}
+	r.logger.Info("memory back-pressure armed", "source", source, "kernel_enforced", enforced)
+}
+
+// stopGovernor releases the governor and puts memory.high back.
+func (r *Runtime) stopGovernor() {
+	if r.budget != nil {
+		r.budget.StopGovernor()
+		r.budget = nil
+	}
+}
+
+// logMemoryPressure records every transition. A process that silently drops to
+// one build thread and floor-sized databases is the hardest kind of slow to
+// diagnose.
+func (r *Runtime) logMemoryPressure(from, to budget.Pressure, usage memlimit.Usage) {
+	level := slog.LevelInfo
+	if to > from {
+		level = slog.LevelWarn
+	}
+	r.logger.Log(context.Background(), level, "memory pressure changed",
+		"from", from.String(),
+		"to", to.String(),
+		"usage_mb", usage.Bytes>>20,
+		"source", usage.Source,
+		"kernel_enforced", r.budget != nil && r.budget.MemoryEnforced(),
+	)
 }
 
 func (r *Runtime) cleanupBuildFailure(ctx context.Context) {
@@ -295,6 +345,12 @@ func (r *Runtime) start(ctx context.Context, withHTTP bool) (err error) {
 		return kb.ErrAlreadyStarted
 	}
 	r.started = true
+	// Held on the runtime, not looked up again at stop: a second Build swaps
+	// the shared manager, and stopping whichever one is current then leaves the
+	// first governor running with nothing able to reach it.
+	r.budget = budget.Process()
+	r.budget.StartGovernor(context.WithoutCancel(ctx), r.logMemoryPressure)
+	r.logMemoryGovernor()
 	tieredStarted := false
 	if r.cfg.Storage.Blob.Kind == "local" {
 		if err = os.MkdirAll(r.cfg.Storage.Blob.Root, 0o755); err != nil {
@@ -353,6 +409,9 @@ func (r *Runtime) start(ctx context.Context, withHTTP bool) (err error) {
 	retryableEarlyFailure := err != nil && !tieredStarted && !r.backgroundStarted
 	if retryableEarlyFailure {
 		r.started = false
+		// This path returns without Stop, so the governor has to be released
+		// here or it stays parked with memory.high still written.
+		r.stopGovernor()
 	}
 	r.lifecycleMu.Unlock()
 	if err == nil {
@@ -463,6 +522,9 @@ func (r *Runtime) Stop(ctx context.Context) error {
 			stopErr = errors.Join(stopErr, pool.StopContext(ctx))
 		}
 	}
+	// After the pools, not before: the drain is when in-flight seals finish
+	// allocating, which is exactly when back-pressure still has a job to do.
+	r.stopGovernor()
 	if r.warmDone != nil {
 		select {
 		case <-r.warmDone:

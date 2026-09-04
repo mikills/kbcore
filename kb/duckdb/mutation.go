@@ -15,6 +15,7 @@ import (
 
 	kb "github.com/mikills/minnow/kb"
 	graph "github.com/mikills/minnow/kb/duckdb/internal/graph"
+	"golang.org/x/sync/errgroup"
 )
 
 func (f *DuckDBArtifactFormat) Ingest(ctx context.Context, req kb.IngestUpsertRequest) (kb.IngestResult, error) {
@@ -932,29 +933,112 @@ func (f *DuckDBArtifactFormat) prepareDocsForUpsert(
 	docs []kb.Document,
 ) ([]preparedUpsertDoc, error) {
 	prepared := make([]preparedUpsertDoc, 0, len(docs))
-	for _, doc := range docs {
+	needed := make([]int, 0, len(docs))
+	for i, doc := range docs {
 		if strings.TrimSpace(doc.ID) == "" {
 			return nil, fmt.Errorf("doc id cannot be empty")
 		}
-		var vec []float32
-		if len(doc.Embedding) > 0 {
-			vec = doc.Embedding
-		} else {
+		if len(doc.Embedding) == 0 {
 			if strings.TrimSpace(doc.Text) == "" {
 				return nil, fmt.Errorf("doc %q: text or embedding is required", doc.ID)
 			}
-			var err error
-			vec, err = f.deps.Embed(ctx, doc.Text)
-			if err != nil {
-				return nil, fmt.Errorf("embed doc %q: %w", doc.ID, err)
-			}
-			if len(vec) == 0 {
-				return nil, fmt.Errorf("embed doc %q: empty embedding", doc.ID)
-			}
+			needed = append(needed, i)
 		}
-		prepared = append(prepared, preparedUpsertDoc{Doc: doc, Embedding: vec})
+		prepared = append(prepared, preparedUpsertDoc{Doc: doc, Embedding: doc.Embedding})
+	}
+
+	vectors, err := f.embedTexts(ctx, docs, needed)
+	if err != nil {
+		return nil, err
+	}
+	for n, i := range needed {
+		if len(vectors[n]) == 0 {
+			return nil, fmt.Errorf("embed doc %q: empty embedding", docs[i].ID)
+		}
+		prepared[i].Embedding = vectors[n]
 	}
 	return prepared, nil
+}
+
+// One request is bounded by both: some compatible endpoints cap inputs well
+// below 32, and a large batch is what pushes a request past its timeout.
+const (
+	upsertEmbedBatchSize  = 32
+	upsertEmbedBatchBytes = 256 << 10
+)
+
+// embedTexts embeds the documents at idx. Batches run concurrently: each writes
+// its own span of out, so only the embedder's own limits are at stake.
+func (f *DuckDBArtifactFormat) embedTexts(
+	ctx context.Context,
+	docs []kb.Document,
+	idx []int,
+) ([][]float32, error) {
+	out := make([][]float32, len(idx))
+	if len(idx) == 0 {
+		return out, nil
+	}
+	if f.deps.EmbedBatch == nil {
+		for n, i := range idx {
+			vec, err := f.deps.Embed(ctx, docs[i].Text)
+			if err != nil {
+				return nil, fmt.Errorf("embed doc %q: %w", docs[i].ID, err)
+			}
+			out[n] = vec
+		}
+		return out, nil
+	}
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(f.embedParallelism())
+	for start := 0; start < len(idx) && groupCtx.Err() == nil; {
+		// Fixed here: the loop advances start before the goroutine reads it.
+		from, to := start, batchEnd(docs, idx, start)
+		group.Go(func() error {
+			release, err := f.budget().AcquireEmbed(groupCtx)
+			if err != nil {
+				return err
+			}
+			defer release()
+			inputs := make([]string, 0, to-from)
+			for _, i := range idx[from:to] {
+				inputs = append(inputs, docs[i].Text)
+			}
+			vectors, err := f.deps.EmbedBatch(groupCtx, inputs)
+			if err != nil {
+				return fmt.Errorf("embed docs %q..%q: %w", docs[idx[from]].ID, docs[idx[to-1]].ID, err)
+			}
+			if len(vectors) != len(inputs) {
+				return fmt.Errorf("batch embed returned %d vectors for %d documents", len(vectors), len(inputs))
+			}
+			copy(out[from:to], vectors)
+			return nil
+		})
+		start = to
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	// The loop stops scheduling on cancellation, so an early exit can leave out
+	// half filled with a nil error behind it.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// batchEnd stops at whichever limit comes first, always taking one document so
+// a single oversized one cannot stall the loop.
+func batchEnd(docs []kb.Document, idx []int, start int) int {
+	total := 0
+	for end := start; end < len(idx); end++ {
+		size := len(docs[idx[end]].Text)
+		if end > start && (end-start >= upsertEmbedBatchSize || total+size > upsertEmbedBatchBytes) {
+			return end
+		}
+		total += size
+	}
+	return len(idx)
 }
 
 func (f *DuckDBArtifactFormat) applyUpsert(

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/mikills/minnow/internal/budget"
 	"sort"
 	"strings"
 	"sync"
@@ -29,17 +30,29 @@ type DuckDBArtifactFormat struct {
 }
 
 type DuckDBArtifactDeps struct {
-	BlobStore      kb.BlobStore
-	ManifestStore  kb.ManifestStore
-	CacheDir       string
-	MemoryLimit    string
-	TempDir        string
-	ExtensionDir   string
-	OfflineExt     bool
-	DuckDBThreads  int
+	BlobStore     kb.BlobStore
+	ManifestStore kb.ManifestStore
+	CacheDir      string
+	MemoryLimit   string
+	TempDir       string
+	ExtensionDir  string
+	OfflineExt    bool
+	DuckDBThreads int
+	// BuildThreads applies while sealing or compacting a shard. Queries want
+	// one thread per shard because several run at once; an index build is
+	// alone and single-threaded leaves most of the machine idle.
+	BuildThreads   int
 	ShardingPolicy kb.ShardingPolicy
 
-	Embed        func(context.Context, string) ([]float32, error)
+	Embed func(context.Context, string) ([]float32, error)
+	// EmbedBatch is optional. Without it every document costs one round trip,
+	// which a remote embedder makes the dominant cost of an ingest.
+	// EmbedBatch must be safe for concurrent use: batches are sent in parallel.
+	EmbedBatch func(context.Context, []string) ([][]float32, error)
+	// EmbedParallelism bounds batches in flight. Zero picks a default.
+	EmbedParallelism int
+	// Budget holds the process-wide limits. Nil uses the shared manager.
+	Budget       *budget.Manager
 	GraphBuilder func() *kb.GraphBuilder
 
 	EvictCacheIfNeeded         func(context.Context, string) error

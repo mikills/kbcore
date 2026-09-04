@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -345,10 +346,48 @@ func (c *Config) validateFormat() error {
 	if c.Format.Kind != "duckdb" {
 		return fmt.Errorf("format.kind %q is not supported (only \"duckdb\")", c.Format.Kind)
 	}
-	if err := requireNonEmptyString("format.duckdb.memory_limit", c.Format.DuckDB.MemoryLimit); err != nil {
+	if c.Format.DuckDB.BuildThreads < 0 {
+		return fmt.Errorf("format.duckdb.build_threads must be >= 0, got %d", c.Format.DuckDB.BuildThreads)
+	}
+	if c.Format.DuckDB.BuildThreads > maxConfiguredBuildThreads {
+		return fmt.Errorf(
+			"format.duckdb.build_threads must be <= %d, got %d",
+			maxConfiguredBuildThreads, c.Format.DuckDB.BuildThreads,
+		)
+	}
+	if c.Format.DuckDB.EmbedParallelism < 0 || c.Format.DuckDB.EmbedParallelism > maxConfiguredEmbedParallelism {
+		return fmt.Errorf(
+			"format.duckdb.embed_parallelism must be between 0 and %d, got %d",
+			maxConfiguredEmbedParallelism, c.Format.DuckDB.EmbedParallelism,
+		)
+	}
+	if err := validateMemoryLimit(c.Format.DuckDB.MemoryLimit); err != nil {
 		return err
 	}
 	return nil
+}
+
+const maxConfiguredBuildThreads = 256
+
+// Matches the ceiling the artifact format clamps to.
+const maxConfiguredEmbedParallelism = 16
+
+var memoryLimitSize = regexp.MustCompile(`(?i)^\s*(\d+)\s*(b|kb|mb|gb|tb)\s*$`)
+
+// validateMemoryLimit rejects a bad size here rather than at the first query,
+// and accepts "auto", which the runtime resolves from the host's ceiling.
+func validateMemoryLimit(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || strings.EqualFold(trimmed, "auto") {
+		return nil
+	}
+	if match := memoryLimitSize.FindStringSubmatch(trimmed); match != nil {
+		if strings.Trim(match[1], "0") == "" {
+			return fmt.Errorf("format.duckdb.memory_limit must be greater than zero, got %q", raw)
+		}
+		return nil
+	}
+	return fmt.Errorf(`format.duckdb.memory_limit must be a size such as 4GB or "auto", got %q`, raw)
 }
 
 func (c *Config) validateEmbedder() error {
@@ -565,6 +604,7 @@ func validateShardingPositiveFields(cfg ShardingConfig) error {
 		checkPositive64("shard_trigger_bytes", cfg.ShardTriggerBytes),
 		checkPositive("shard_trigger_vector_rows", cfg.ShardTriggerVectorRows),
 		checkPositive64("target_shard_bytes", cfg.TargetShardBytes),
+		checkPositive64("max_shard_bytes", cfg.MaxShardBytes),
 		checkPositive("max_vector_rows_per_shard", cfg.MaxVectorRowsPerShard),
 		checkPositive("query_shard_fanout", cfg.QueryShardFanout),
 		checkPositive("query_shard_fanout_adaptive_max", cfg.QueryShardFanoutAdaptiveMax),
@@ -734,6 +774,7 @@ func (s ShardingConfig) resolve() kb.ShardingPolicy {
 	applyInt64Ptr(&p.ShardTriggerBytes, s.ShardTriggerBytes)
 	applyIntPtr(&p.ShardTriggerVectorRows, s.ShardTriggerVectorRows)
 	applyInt64Ptr(&p.TargetShardBytes, s.TargetShardBytes)
+	applyInt64Ptr(&p.MaxShardBytes, s.MaxShardBytes)
 	applyIntPtr(&p.MaxVectorRowsPerShard, s.MaxVectorRowsPerShard)
 	applyIntPtr(&p.QueryShardFanout, s.QueryShardFanout)
 	applyIntPtr(&p.QueryShardFanoutAdaptiveMax, s.QueryShardFanoutAdaptiveMax)
