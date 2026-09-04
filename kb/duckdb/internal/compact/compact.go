@@ -6,6 +6,7 @@ import (
 	"time"
 
 	kb "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/compactionplan"
 )
 
 const maxCompactionCandidates = 1 << 2
@@ -107,9 +108,61 @@ func fitWithinMaxShard(candidates []kb.SnapshotShardMetadata, maxBytes int64) []
 	return candidates
 }
 
-// liveShardBytes is what a shard contributes to a merge. Tombstoned rows are
-// dropped on the way in, so sizing by the file would strand a shard at the cap
-// with no way to shrink.
+// PartitionForReconstruct groups shards so each group's live bytes fit within
+// maxBytes, bounding a sequential grouped rebuild to one resident group at a
+// time. This is a thin delegate over compactionplan.PartitionForReconstruct,
+// the single source of truth for grouping semantics: ordering is pinned to
+// SortAndLimit order (tombstone ratio desc, size asc, shard id asc), not
+// manifest order, so packing is deterministic no matter how the manifest
+// lists shards. Sizing uses live bytes (see liveShardBytes), which is a
+// live-bytes bound, not a bound on copied bytes: the merge copies all docs
+// rows unfiltered and never consults doc_tombstones, so a group whose shards
+// carry nonzero tombstone ratios can copy more than the cap. That is latent
+// today: sealed shards carry TombstoneRatio 0 (snapshot_shards.go,
+// compaction.go), inherited from Fit's live-bytes sizing.
+//
+// A single shard over the cap still forms its own group: a shard cannot be
+// split here, so the caller merges it alone. Live bytes, not file bytes, are
+// capped; HNSW/FTS overhead can push the file past the cap.
+func PartitionForReconstruct(shards []kb.SnapshotShardMetadata, maxBytes int64) [][]kb.SnapshotShardMetadata {
+	if len(shards) == 0 {
+		return nil
+	}
+	planShards := make([]compactionplan.Shard, len(shards))
+	for i, shard := range shards {
+		planShards[i] = compactionplan.Shard{
+			ShardID:        shard.ShardID,
+			SizeBytes:      shard.SizeBytes,
+			TombstoneRatio: shard.TombstoneRatio,
+		}
+	}
+	groups := compactionplan.PartitionForReconstruct(planShards, maxBytes)
+	// Map back to the original metadata. ShardIDs are unique IDs in practice
+	// (compaction_test.go:176-182 asserts no dups); FIFO best-effort otherwise.
+	pending := make(map[string][]kb.SnapshotShardMetadata, len(shards))
+	for _, shard := range shards {
+		pending[shard.ShardID] = append(pending[shard.ShardID], shard)
+	}
+	out := make([][]kb.SnapshotShardMetadata, len(groups))
+	for i, group := range groups {
+		mapped := make([]kb.SnapshotShardMetadata, len(group))
+		for j, planned := range group {
+			queue := pending[planned.ShardID]
+			mapped[j] = queue[0]
+			pending[planned.ShardID] = queue[1:]
+		}
+		out[i] = mapped
+	}
+	return out
+}
+
+// liveShardBytes is what a shard contributes to group sizing: the file size
+// discounted by the tombstone ratio. It is a sizing estimate, not a merge
+// filter: the merge copies all docs rows unfiltered (reconstruct
+// MergeShardIntoDB never reads doc_tombstones), so live bytes bound the
+// group only when tombstone ratios are 0, which holds for sealed shards
+// today. Sizing by the raw file would strand a mostly-tombstoned shard at
+// the cap with no way to shrink, so live bytes are used instead.
 func liveShardBytes(shard kb.SnapshotShardMetadata) int64 {
 	ratio := min(max(shard.TombstoneRatio, 0), 1)
 	return int64(float64(shard.SizeBytes) * (1 - ratio))

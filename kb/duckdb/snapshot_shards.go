@@ -12,6 +12,7 @@ import (
 
 	kb "github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/kb/duckdb/internal/centroid"
+	"github.com/mikills/minnow/kb/duckdb/internal/compact"
 	"github.com/mikills/minnow/kb/duckdb/internal/reconstruct"
 	"github.com/mikills/minnow/kb/duckdb/internal/shardbuild"
 	"github.com/mikills/minnow/kb/duckdb/internal/shardcache"
@@ -341,6 +342,16 @@ func (f *DuckDBArtifactFormat) downloadSnapshotFromShards(
 		return nil, err
 	}
 
+	// Group-bounded rebuild: partition shards by live bytes so each group's
+	// merge fits within MaxShardBytes. Groups merge sequentially into the
+	// single dest DB (single mutable DB design), one group resident at a
+	// time, so ingest peak scales with one group, not the corpus.
+	maxBytes := f.reconstructMaxBytes()
+	groups := compact.PartitionForReconstruct(manifest.Shards, maxBytes)
+	if len(groups) == 0 {
+		return nil, fmt.Errorf("manifest has no shards")
+	}
+
 	tmpDir, err := os.MkdirTemp("", "minnow-shard-download-*")
 	if err != nil {
 		return nil, err
@@ -360,10 +371,22 @@ func (f *DuckDBArtifactFormat) downloadSnapshotFromShards(
 	defer releaseThreads()
 	defer db.Close()
 
-	if err := f.mergeManifestShards(ctx, db, tmpDir, manifest.Shards); err != nil {
+	if err := f.mergeManifestShards(ctx, db, tmpDir, groups); err != nil {
 		return nil, logDuckDBMemoryOnError(ctx, db, "merge_manifest_shards", err)
 	}
-	if err := finalizeReconstructedSnapshot(ctx, db); err != nil {
+	// A corpus-wide HNSW/FTS build over the merged dest would reintroduce
+	// the unbounded peak this grouping removes: index memory scales with the
+	// full corpus, not one group. The mutable DB never serves queries
+	// (reads go via ManifestStore + openCachedShardConn per shard; only
+	// writers open vectors.duckdb and re-split via the seal path, which
+	// builds per-shard indexes), so a multi-group rebuild skips the
+	// corpus-wide index and still converges: the next seal re-splits through
+	// buildShardDBFromSourceRange + buildShardIndexes + collectShardMediaIDs.
+	// A single group stays under MaxShardBytes (live bytes; file bytes may
+	// exceed it by HNSW/FTS overhead), so building its indexes preserves the
+	// existing small-corpus behavior that direct-open tests rely on.
+	buildIndexes := len(groups) == 1
+	if err := finalizeReconstructedSnapshot(ctx, db, buildIndexes); err != nil {
 		return nil, logDuckDBMemoryOnError(ctx, db, "finalize_snapshot", err)
 	}
 	if err := os.Rename(tmpDest, dest); err != nil {
@@ -402,19 +425,57 @@ func (f *DuckDBArtifactFormat) downloadSourceManifest(
 	return manifest, nil
 }
 
+// reconstructMaxBytes bounds one reconstruct group. Normalized policy always
+// carries a positive cap; the fallback keeps a zero policy from collapsing
+// every corpus into one unbounded group.
+func (f *DuckDBArtifactFormat) reconstructMaxBytes() int64 {
+	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
+	if policy.MaxShardBytes > 0 {
+		return policy.MaxShardBytes
+	}
+	return kb.DefaultShardingPolicy().MaxShardBytes
+}
+
 func (f *DuckDBArtifactFormat) mergeManifestShards(
 	ctx context.Context,
 	db *sql.DB,
 	tmpDir string,
-	shards []kb.SnapshotShardMetadata,
+	groups [][]kb.SnapshotShardMetadata,
 ) error {
-	for i, shard := range shards {
-		partPath := filepath.Join(tmpDir, fmt.Sprintf("part-%05d.duckdb", i))
-		if err := f.downloadAndVerifyShardPart(ctx, shard, partPath); err != nil {
-			return err
-		}
-		if err := reconstruct.MergeShardIntoDB(ctx, db, reconstruct.MergeOptions{Alias: fmt.Sprintf("s%d", i), PartPath: partPath, IsFirst: i == 0, EnsureGraphTables: EnsureGraphTables}); err != nil {
-			return err
+	// Sequential per-group merge into the single dest DB. Each part is
+	// downloaded, merged (ATTACH + INSERT + DETACH inside MergeShardIntoDB),
+	// then removed before the next part, so at most one downloaded part file
+	// plus one group's INSERT batch is resident at a time. The dest file
+	// itself grows on disk across groups, but merge memory per step is
+	// bounded by the group's live bytes (each group <= MaxShardBytes, except
+	// an unsplittable oversize singleton which merges alone). That is a
+	// live-bytes bound, not a bound on copied bytes: the merge copies all
+	// docs rows unfiltered and never consults doc_tombstones, so a group
+	// whose shards carry nonzero tombstone ratios can copy more than the
+	// cap. That is latent today (sealed shards carry TombstoneRatio 0, set
+	// at snapshot_shards.go build time and on compaction replacements, and
+	// inherited from Fit's live-bytes sizing); merge behavior is
+	// deliberately unchanged and preserves pre-change copy-all semantics.
+	global := 0
+	for _, group := range groups {
+		for _, shard := range group {
+			partPath := filepath.Join(tmpDir, fmt.Sprintf("part-%05d.duckdb", global))
+			if err := f.downloadAndVerifyShardPart(ctx, shard, partPath); err != nil {
+				return err
+			}
+			if err := reconstruct.MergeShardIntoDB(ctx, db, reconstruct.MergeOptions{Alias: fmt.Sprintf("s%d", global), PartPath: partPath, IsFirst: global == 0, EnsureGraphTables: EnsureGraphTables}); err != nil {
+				return err
+			}
+			// DETACH has run inside MergeShardIntoDB, so the part file is
+			// unreferenced; remove it before the next download so disk and
+			// page-cache pressure also track one group, not the corpus. A
+			// removal failure only logs: the deferred tmpDir RemoveAll is
+			// the backstop that reclaims the file.
+			if err := os.Remove(partPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				slog.Default().WarnContext(ctx, "failed to remove merged shard part file",
+					"shard_id", shard.ShardID, "path", partPath, logKeyError, err)
+			}
+			global++
 		}
 	}
 	return nil
@@ -430,9 +491,16 @@ func (f *DuckDBArtifactFormat) downloadAndVerifyShardPart(
 	}
 	return shardcache.VerifyDownloaded(ctx, shard, partPath)
 }
-func finalizeReconstructedSnapshot(ctx context.Context, db *sql.DB) error {
+func finalizeReconstructedSnapshot(ctx context.Context, db *sql.DB, buildIndexes bool) error {
 	if err := ensureDocTombstonesTable(ctx, db); err != nil {
 		return err
+	}
+	// buildIndexes is true only for a single group (small corpus). A
+	// multi-group rebuild skips the corpus-wide HNSW/FTS build to keep peak
+	// bounded by one group; the mutable DB is writer-only (queries serve from
+	// per-shard conns) and the next seal rebuilds per-shard indexes.
+	if !buildIndexes {
+		return CheckpointAndCloseDB(ctx, db, "close reconstructed shard snapshot")
 	}
 	if err := createDocsVectorIndex(ctx, db); err != nil {
 		return err

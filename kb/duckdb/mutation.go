@@ -404,6 +404,18 @@ func (f *DuckDBArtifactFormat) CommitPrepared(ctx context.Context, kbID string) 
 }
 
 // PrepareAndOpenDB prepares the working state and opens the DB for direct access.
+//
+// The returned handle points at the writer-owned mutable DB
+// (vectors.duckdb), which is also what a multi-group reconstruct leaves
+// behind. Index-less dest convention: a rebuild that spans more than one
+// reconstruct group deliberately skips the corpus-wide HNSW/FTS build (see
+// downloadSnapshotFromShards/finalizeReconstructedSnapshot), so the dest may
+// carry no docs_vec_idx and no FTS index. That is safe because the mutable
+// DB never serves queries directly: reads go via ManifestStore +
+// per-shard connections, and the next seal re-splits through
+// buildShardDBFromSourceRange + buildShardIndexes + collectShardMediaIDs,
+// which rebuilds per-shard indexes. Callers must not assume HNSW/FTS
+// indexes exist on this handle.
 func (f *DuckDBArtifactFormat) PrepareAndOpenDB(ctx context.Context, kbID string) (*sql.DB, error) {
 	lock := f.lockFor(kbID)
 	lock.Lock()
