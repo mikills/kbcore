@@ -9,7 +9,7 @@ import (
 	kb "github.com/mikills/minnow/kb"
 )
 
-// TestBackupParity exercises the Phase 1 byte-copy clone end to end: ingest
+// TestBackupParity exercises the byte-copy clone end to end: ingest
 // into a source KB, capture a backup, clone to a new KB, and require the
 // clone to answer the same query with the same top hit.
 func TestBackupParity(t *testing.T) {

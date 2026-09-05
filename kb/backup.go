@@ -1,6 +1,6 @@
-// Phase 1 automated backups and constant-time KB branching.
+// Automated backups and snapshots for knowledge bases.
 //
-// What Phase 1 provides:
+// What this file provides:
 //   - Immutable backup descriptors (v1 JSON) stored at
 //     <kb>.backups/<backup-id>.backup.json via CreateOnly semantics.
 //   - Same-KB snapshots: a manifest copy under the same KBID prefix
@@ -10,7 +10,7 @@
 //     target KB prefix, then a CreateOnly manifest publish with
 //     verify-before-publish. The source KB is never mutated. Pointer
 //     sharing (referencing source shard keys from the clone manifest) is
-//     explicitly NOT done here; it is deferred to Phase 2.
+//     explicitly NOT done here; see branch.go.
 //
 // Format migration note (v1 -> v2):
 // manifests read through manifest/blob.go applyManifestReadDefaults default
@@ -21,7 +21,7 @@
 // this file REJECT v1 manifests with ErrBackupLegacyFormat instead of
 // silently migrating them. Operators migrate by re-ingesting/re-sealing,
 // which rebuilds every shard and publishes a v2 manifest. No automatic
-// migration happens in Phase 1.
+// migration happens here.
 //
 // SHA256 population prerequisite:
 // the seal path (kb/duckdb/snapshot_shards.go buildAndUploadOneSnapshotShard)
@@ -33,10 +33,10 @@
 // on the clone path re-checks Head size and re-hashes downloaded bytes, so
 // a corrupt object fails the restore before any manifest is published.
 //
-// Deferred to Phase 2 (not implemented here): zero-copy clones via
-// pointer-sharing, a server-side Store.Copy primitive, reachability GC that
-// understands shared shard references, and retention automation beyond the
-// SelectForRetention helper.
+// Related work lives elsewhere: zero-copy clones via pointer-sharing
+// (branch.go), a server-side Store.Copy primitive (kb/blobstore), GC that
+// understands shared shard references (shard_gc.go), and retention
+// automation beyond the SelectForRetention helper below (retention.go).
 package kb
 
 import (
@@ -57,10 +57,10 @@ import (
 )
 
 const (
-	// BackupDescriptorVersion is the only descriptor version Phase 1 writes.
+	// BackupDescriptorVersion is the only descriptor version currently written.
 	BackupDescriptorVersion = 1
 	// BackupMinReader advertises the minimum reader that understands v1.
-	BackupMinReader = "minnow>=phase1-backup-v1"
+	BackupMinReader = "minnow>=backup-v1"
 	// BackupSupportedFormatVersion is the only manifest format_version the
 	// backup/restore path accepts. See the package note on v1 -> v2.
 	BackupSupportedFormatVersion = 2
@@ -85,7 +85,7 @@ var (
 	// ErrBackupNotFound is returned when a named backup or snapshot is absent.
 	ErrBackupNotFound = errors.New("backup not found")
 	// ErrBackupLegacyFormat is returned when a manifest predates the
-	// supported format version. Re-ingest/re-seal to migrate; Phase 1 does
+	// supported format version. Re-ingest/re-seal to migrate; this path does
 	// not auto-migrate.
 	ErrBackupLegacyFormat = errors.New("manifest uses a legacy format version; re-ingest to migrate")
 	// ErrBackupCorrupt is returned when stored bytes fail validation.
@@ -137,7 +137,8 @@ type CloneOriginRecord struct {
 	RecordVersion   int       `json:"record_version"`
 	KBID            string    `json:"kb_id"`
 	SourceKBID      string    `json:"source_kb_id"`
-	SourceBackupID  string    `json:"source_backup_id"`
+	SourceBackupID  string    `json:"source_backup_id,omitempty"`
+	SourceBranchID  string    `json:"source_branch_id,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	ManifestVersion string    `json:"manifest_version"`
 }
@@ -343,11 +344,18 @@ func snapshotRecordChecksum(rec *SnapshotRecord) (string, error) {
 //   - S3 / tiered: native UploadBytesIfNotExists (If-None-Match *) is atomic,
 //     so concurrent creators across processes resolve to exactly one winner.
 //   - Local: O_EXCL create via UploadIfNotExists is atomic on one host.
-//   - Generic Store fallback: Head-then-put is serialized with the KB key
-//     stripe, so concurrent creators in this process resolve to one winner.
-//     Concurrent creators in other processes can still race past the Head and
-//     the second put silently overwrites (last-writer-wins); generic stores
-//     therefore must not be relied on for cross-process CreateOnly fencing.
+//   - Generic Store fallback: Head-then-put fenced by the per-key write lease
+//     (AcquireWriteLease around Head-then-put) plus the in-process key stripe,
+//     so concurrent creators sharing the store AND the lease manager resolve
+//     to one winner across processes. A lease conflict itself reports
+//     ErrBackupExists (a rival is creating the same key).
+//
+// Residual risk: stores with neither a conditional put nor a shared
+// cross-process lease manager keep a Head-then-put race: two creators in
+// different processes (or sharing only the store, not the lease manager) can
+// both miss the Head and the second put silently overwrites (last-writer-
+// wins). Such stores must not be relied on for cross-process CreateOnly
+// fencing; pair them with a shared lease manager (file/S3/Redis) instead.
 //
 // Every ErrBackupExists returned here wraps ErrBlobVersionMismatch, so
 // errors.Is(err, ErrBackupExists) and errors.Is(err, ErrBlobVersionMismatch)
@@ -396,9 +404,43 @@ func (l *KB) uploadBytesCreateOnly(ctx context.Context, key string, data []byte)
 		}
 		return info, nil
 	}
-	// Serialize in-process creators for this key so two goroutines that both
-	// miss the Head cannot both put (which would silently let the second
-	// overwrite the first).
+	// Generic Store fallback: lease-fenced Head-then-put. The write lease
+	// serializes creators that share the lease manager (cross-process when
+	// the manager itself is shared, e.g. file/S3/Redis); the key stripe
+	// additionally serializes threads sharing this process. See the doc
+	// comment above for the residual risk without a shared lease.
+	mgr, lease, leaseErr := l.AcquireWriteLease(ctx, "backup-createonly/"+key)
+	if leaseErr != nil {
+		if errors.Is(leaseErr, ErrWriteLeaseConflict) {
+			return nil, fmt.Errorf("%w: %s: %w", ErrBackupExists, key, ErrBlobVersionMismatch)
+		}
+		// No lease available: degrade to the legacy in-process stripe
+		// rather than failing the write outright.
+		return l.uploadBytesCreateOnlyStriped(ctx, key, data)
+	}
+	defer func() { _ = mgr.Release(context.Background(), lease) }()
+	mu := l.LockFor("backup-createonly/" + key)
+	mu.Lock()
+	defer mu.Unlock()
+	if _, err := l.BlobStore.Head(ctx, key); err == nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrBackupExists, key, ErrBlobVersionMismatch)
+	} else if !errors.Is(err, ErrBlobNotFound) && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	info, err := l.BlobStore.UploadBytesIfMatch(ctx, key, data, "")
+	if err != nil {
+		if errors.Is(err, ErrBlobVersionMismatch) {
+			return nil, fmt.Errorf("%w: %s: %w", ErrBackupExists, key, err)
+		}
+		return nil, err
+	}
+	return info, nil
+}
+
+// uploadBytesCreateOnlyStriped is the legacy in-process-only fallback used
+// when no write lease can be acquired: safe against threads sharing this KB
+// instance, last-writer-wins across processes.
+func (l *KB) uploadBytesCreateOnlyStriped(ctx context.Context, key string, data []byte) (*BlobObjectInfo, error) {
 	mu := l.LockFor("backup-createonly/" + key)
 	mu.Lock()
 	defer mu.Unlock()
@@ -753,15 +795,16 @@ func (l *KB) DeleteSnapshot(ctx context.Context, kbID, snapshotID string) error 
 	return l.BlobStore.Delete(ctx, SnapshotRecordKey(kbID, snapshotID))
 }
 
-// HasBackupsOrBranches reports whether a KB owns backup descriptors or
-// snapshot records. DeleteKnowledgeBase refuses while this is true.
+// HasBackupsOrBranches reports whether a KB owns backup descriptors,
+// snapshot records, or branch markers. DeleteKnowledgeBase refuses while
+// this is true.
 //
 // This is a guard, not a fence: it runs before DeleteKnowledgeBase deletes
-// the manifest, so a concurrent CreateBackup/CreateSnapshot that lands between
-// the check and the delete is not stopped (guard→delete TOCTOU). Likewise a
-// direct ManifestStore.Delete bypasses this guard entirely — only
-// DeleteKnowledgeBase enforces it. Callers that need a hard guarantee must
-// quiesce backup/snapshot writers first.
+// the manifest, so a concurrent CreateBackup/CreateSnapshot/BranchKB that
+// lands between the check and the delete is not stopped (guard→delete
+// TOCTOU). Likewise a direct ManifestStore.Delete bypasses this guard
+// entirely — only DeleteKnowledgeBase enforces it. Callers that need a hard
+// guarantee must quiesce backup/snapshot/branch writers first.
 func (l *KB) HasBackupsOrBranches(ctx context.Context, kbID string) (bool, error) {
 	if err := validateKBID(kbID); err != nil {
 		return false, err
@@ -785,7 +828,14 @@ func (l *KB) HasBackupsOrBranches(ctx context.Context, kbID string) (bool, error
 	if err != nil {
 		return false, fmt.Errorf("list snapshots for %q: %w", kbID, err)
 	}
-	return len(snapshots) > 0, nil
+	if len(snapshots) > 0 {
+		return true, nil
+	}
+	branches, err := l.BlobStore.List(ctx, BranchPrefix(kbID))
+	if err != nil {
+		return false, fmt.Errorf("list branches for %q: %w", kbID, err)
+	}
+	return len(branches) > 0, nil
 }
 
 func remapShardKey(srcKBID, dstKBID, srcKey string) string {
@@ -802,9 +852,10 @@ func remapShardKey(srcKBID, dstKBID, srcKey string) string {
 }
 
 // backupPinnedShardKeys returns every shard key referenced by a KB's backup
-// descriptors and snapshot records. Shard GC must treat these as live: backups
-// and zero-copy snapshots pin shard bytes by key, and deleting a pinned shard
-// would corrupt restores long after the live manifest stopped referencing it.
+// descriptors, snapshot records, and branch markers. Shard GC must treat
+// these as live: backups and zero-copy snapshots/branches pin shard bytes
+// by key, and deleting a pinned shard would corrupt restores long after the
+// live manifest stopped referencing it.
 //
 // List failures are returned (the caller retries the GC entry) while single
 // unreadable markers are skipped best-effort: one corrupt descriptor must not
@@ -816,7 +867,7 @@ func (l *KB) backupPinnedShardKeys(ctx context.Context, kbID string) (map[string
 		return pinned, nil
 	}
 	markerKeys := make([]string, 0)
-	for _, prefix := range []string{BackupPrefix(kbID), SnapshotPrefix(kbID)} {
+	for _, prefix := range []string{BackupPrefix(kbID), SnapshotPrefix(kbID), BranchPrefix(kbID)} {
 		objects, err := l.BlobStore.List(ctx, prefix)
 		if err != nil {
 			return nil, fmt.Errorf("list backup markers for shard gc %q: %w", kbID, err)
@@ -910,6 +961,9 @@ func (l *KB) CloneKBFromBackup(ctx context.Context, srcKBID, backupID, dstKBID s
 	if err := checkManifestFormatSupported(&desc.ManifestSnapshot); err != nil {
 		return err
 	}
+	if err := l.rejectTombstonedTarget(ctx, dstKBID); err != nil {
+		return err
+	}
 	// Pre-publish fencing: refuse a target namespace that already holds a
 	// manifest or any staged/leftover object. The manifest CreateOnly put
 	// below remains the atomic commit point; this check is the fast path
@@ -948,29 +1002,21 @@ func (l *KB) CloneKBFromBackup(ctx context.Context, srcKBID, backupID, dstKBID s
 		return errors.Join(errs...)
 	}
 	for _, ref := range desc.Shards {
-		raw, err := l.BlobStore.DownloadBytes(ctx, ref.Key)
-		if err != nil {
-			if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
-				return fail(fmt.Errorf("%w: source shard %s is missing: %w", ErrBackupCorrupt, ref.Key, err))
-			}
-			return fail(fmt.Errorf("download source shard %s: %w", ref.Key, err))
-		}
-		if int64(len(raw)) != ref.SizeBytes {
-			return fail(fmt.Errorf("%w: source shard %s size %d does not match backup %d",
-				ErrBackupCorrupt, ref.Key, len(raw), ref.SizeBytes))
-		}
-		if got := blobstore.BytesSHA256(raw); got != ref.SHA256 {
-			return fail(fmt.Errorf("%w: source shard %s failed sha256 verification", ErrBackupCorrupt, ref.Key))
-		}
 		dstKey := remapShardKey(srcKBID, dstKBID, ref.Key)
-		// CreateOnly: a concurrent clone staging the same target loses here
-		// with ErrBackupExists instead of overwriting our bytes later.
-		info, err := l.uploadBytesCreateOnly(ctx, dstKey, raw)
+		// Server-side copy with CreateOnly: a concurrent clone staging the
+		// same target loses here with ErrBackupExists instead of
+		// overwriting our bytes later. Staged bytes are still re-hashed by
+		// verifyStagedClone below, so a corrupt source fails the restore
+		// before any manifest is published.
+		info, err := l.copyShardCreateOnly(ctx, ref.Key, dstKey)
 		if err != nil {
 			if errors.Is(err, ErrBackupExists) {
 				return fail(fmt.Errorf("%w: clone target %q is already being staged: %w", ErrBackupExists, dstKBID, ErrBlobVersionMismatch))
 			}
-			return fail(fmt.Errorf("upload target shard %s: %w", dstKey, err))
+			if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
+				return fail(fmt.Errorf("%w: source shard %s is missing: %w", ErrBackupCorrupt, ref.Key, err))
+			}
+			return fail(fmt.Errorf("copy source shard %s: %w", ref.Key, err))
 		}
 		copiedKeys = append(copiedKeys, dstKey)
 		copied = append(copied, SnapshotShardMetadata{
@@ -1103,10 +1149,21 @@ func (l *KB) publishCloneManifestCreateOnly(ctx context.Context, dstKBID string,
 			}
 			return nil
 		}
-		// Generic blob-backed manifest store: stripe-serialized Head-then-put.
-		// Safe against in-process rivals; a cross-process rival can still win
-		// the race, in which case the put below must surface the conflict
-		// instead of overwriting.
+		// Generic blob-backed manifest store: lease-fenced Head-then-put.
+		// The write lease serializes publishers sharing the lease manager
+		// (cross-process when the manager is shared); the stripe covers
+		// threads sharing this process. A cross-process rival can still win
+		// the race without a shared lease, in which case the put below must
+		// surface the conflict instead of overwriting (same residual as
+		// uploadBytesCreateOnly).
+		mgr, lease, leaseErr := l.AcquireWriteLease(ctx, "backup-createonly/"+key)
+		if leaseErr != nil {
+			if errors.Is(leaseErr, ErrWriteLeaseConflict) {
+				return fmt.Errorf("%w: target manifest %q already exists: %w", ErrBackupExists, dstKBID, ErrBlobVersionMismatch)
+			}
+			return fmt.Errorf("acquire publish lease for %q: %w", dstKBID, leaseErr)
+		}
+		defer func() { _ = mgr.Release(context.Background(), lease) }()
 		mu := l.LockFor("backup-createonly/" + key)
 		mu.Lock()
 		defer mu.Unlock()

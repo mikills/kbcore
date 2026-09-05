@@ -397,6 +397,8 @@ func (f *DuckDBArtifactFormat) querySingleShardTopK(
 	shard kb.SnapshotShardMetadata,
 	in shardQueryInput,
 ) ([]kb.QueryResult, error) {
+	f.pinShardForRead(kbID, shard.Key)
+	defer f.unpinShardForRead(kbID, shard.Key)
 	conn, err := f.openCachedShardConn(ctx, kbID, shard)
 	if err != nil {
 		return nil, err
@@ -417,6 +419,8 @@ func (f *DuckDBArtifactFormat) querySingleShardTopKRefs(
 	shard kb.SnapshotShardMetadata,
 	in shardQueryInput,
 ) ([]rankedDocRef, error) {
+	f.pinShardForRead(kbID, shard.Key)
+	defer f.unpinShardForRead(kbID, shard.Key)
 	conn, err := f.openCachedShardConn(ctx, kbID, shard)
 	if err != nil {
 		return nil, err
@@ -437,6 +441,8 @@ func (f *DuckDBArtifactFormat) hydrateShardRankedResults(
 	shard kb.SnapshotShardMetadata,
 	refs []rankedDocRef,
 ) ([]kb.QueryResult, error) {
+	f.pinShardForRead(kbID, shard.Key)
+	defer f.unpinShardForRead(kbID, shard.Key)
 	conn, err := f.openCachedShardConn(ctx, kbID, shard)
 	if err != nil {
 		return nil, err
@@ -502,4 +508,20 @@ func (f *DuckDBArtifactFormat) ensureLocalShardFile(
 		EvictCacheIfNeeded: f.deps.EvictCacheIfNeeded,
 		ReserveCache:       f.deps.ReserveCache,
 	}.EnsureLocalFile(ctx, kbID, shard)
+}
+
+// pinShardForRead holds a shard live across a per-shard query. Nil-safe:
+// deps without pin hooks run without explicit pins.
+func (f *DuckDBArtifactFormat) pinShardForRead(kbID, shardKey string) {
+	if f.deps.PinShardForRead == nil || kbID == "" || shardKey == "" {
+		return
+	}
+	f.deps.PinShardForRead(kbID, shardKey)
+}
+
+func (f *DuckDBArtifactFormat) unpinShardForRead(kbID, shardKey string) {
+	if f.deps.UnpinShardForRead == nil || kbID == "" || shardKey == "" {
+		return
+	}
+	f.deps.UnpinShardForRead(kbID, shardKey)
 }

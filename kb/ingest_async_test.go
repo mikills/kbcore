@@ -9,6 +9,7 @@ import (
 	"time"
 
 	. "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/blobstore"
 
 	"github.com/stretchr/testify/require"
 )
@@ -356,6 +357,10 @@ func (f *failingDeleteBlobStore) UploadIfNotExists(ctx context.Context, key, src
 }
 func (f *failingDeleteBlobStore) Delete(ctx context.Context, key string) error {
 	return f.deleteErr
+}
+
+func (f *failingDeleteBlobStore) Copy(ctx context.Context, srcKey, dstKey string, opts blobstore.CopyOptions) (*BlobObjectInfo, error) {
+	return f.inner.Copy(ctx, srcKey, dstKey, opts)
 }
 func (f *failingDeleteBlobStore) List(ctx context.Context, prefix string) ([]BlobObjectInfo, error) {
 	return f.inner.List(ctx, prefix)

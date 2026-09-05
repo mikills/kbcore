@@ -657,6 +657,73 @@ func (m *memoryRemote) Delete(_ context.Context, key string) error {
 	m.ops = append(m.ops, "delete:"+key)
 	return nil
 }
+
+func (m *memoryRemote) Copy(_ context.Context, srcKey, dstKey string, opts blobstore.CopyOptions) (*blobstore.ObjectInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(srcKey) == "" || strings.TrimSpace(dstKey) == "" || srcKey == dstKey {
+		return nil, errors.New("memory remote: copy keys must be non-empty and distinct")
+	}
+	src, found := m.objects[srcKey]
+	if !found {
+		return nil, blobstore.ErrNotFound
+	}
+	if current, exists := m.objects[dstKey]; exists {
+		if opts.CreateOnly {
+			return nil, blobstore.ErrVersionMismatch
+		}
+		if opts.ExpectedVersion != "" && current.version != opts.ExpectedVersion {
+			return nil, blobstore.ErrVersionMismatch
+		}
+	} else if opts.ExpectedVersion != "" {
+		return nil, blobstore.ErrVersionMismatch
+	}
+	return m.putLocked(dstKey, src.data)
+}
+
+func (m *memoryRemote) CopyReplica(_ context.Context, request blobstore.ReplicaCopy) (*blobstore.ReplicaInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(request.SrcKey) == "" || strings.TrimSpace(request.DstKey) == "" || request.SrcKey == request.DstKey {
+		return nil, errors.New("memory remote: replica copy keys must be non-empty and distinct")
+	}
+	if strings.TrimSpace(request.OperationID) == "" {
+		return nil, errors.New("memory remote: replica copy requires an operation ID")
+	}
+	src, found := m.objects[request.SrcKey]
+	if !found {
+		return nil, blobstore.ErrNotFound
+	}
+	if current, exists := m.objects[request.DstKey]; exists {
+		if request.CreateOnly {
+			return nil, blobstore.ErrVersionMismatch
+		}
+		if request.ExpectedVersion == "" || current.version != request.ExpectedVersion {
+			return nil, blobstore.ErrVersionMismatch
+		}
+	} else if !request.CreateOnly {
+		return nil, blobstore.ErrVersionMismatch
+	}
+	checksum := request.Checksum
+	if checksum == "" {
+		checksum = src.checksum
+	}
+	m.versions++
+	dst := memoryObject{data: append([]byte(nil), src.data...), version: fmt.Sprintf("v%d", m.versions), updated: time.Now().UTC(), operationID: request.OperationID, checksum: checksum}
+	m.objects[request.DstKey] = dst
+	m.ops = append(m.ops, "copy:"+request.DstKey)
+	return &blobstore.ReplicaInfo{
+		ObjectInfo:  blobstore.ObjectInfo{Key: request.DstKey, Version: dst.version, UpdatedAt: dst.updated, Size: int64(len(dst.data))},
+		OperationID: request.OperationID,
+		Checksum:    checksum,
+	}, nil
+}
 func (m *memoryRemote) List(_ context.Context, prefix string) ([]blobstore.ObjectInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

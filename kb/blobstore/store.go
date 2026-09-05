@@ -28,6 +28,18 @@ type Store interface {
 	UploadIfMatch(ctx context.Context, key string, src string, expectedVersion string) (*ObjectInfo, error)
 	Delete(ctx context.Context, key string) error
 	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
+	// Copy server-side copies srcKey to dstKey without routing bytes
+	// through the caller. opts.CreateOnly fails with ErrVersionMismatch
+	// when dstKey exists; otherwise opts.ExpectedVersion is an If-Match
+	// precondition on the destination (empty means unconditional).
+	// A missing srcKey reports ErrNotFound.
+	Copy(ctx context.Context, srcKey, dstKey string, opts CopyOptions) (*ObjectInfo, error)
+}
+
+// CopyOptions fences a server-side copy destination.
+type CopyOptions struct {
+	ExpectedVersion string
+	CreateOnly      bool
 }
 
 // ReplicaPut carries an idempotency identity and an explicit remote
@@ -50,6 +62,17 @@ type ReplicaInfo struct {
 	Checksum    string
 }
 
+// ReplicaCopy is a fenced server-side copy on the remote. Exactly one of
+// CreateOnly and ExpectedVersion should be set, mirroring ReplicaPut.
+type ReplicaCopy struct {
+	SrcKey          string
+	DstKey          string
+	ExpectedVersion string
+	CreateOnly      bool
+	OperationID     string
+	Checksum        string
+}
+
 // ReplicationStore is the stronger remote contract required by tiered storage.
 // OperationID must be persisted atomically with the object and returned by
 // HeadReplica so an uncertain response can be reconciled without confusing an
@@ -60,6 +83,10 @@ type ReplicationStore interface {
 	PutReplica(ctx context.Context, request ReplicaPut) (*ReplicaInfo, error)
 	HeadReplica(ctx context.Context, key string) (*ReplicaInfo, error)
 	DeleteReplica(ctx context.Context, key, expectedVersion string) error
+	// CopyReplica server-side copies srcKey to dstKey on the remote with
+	// the same fencing as PutReplica. Checksum may be empty, in which case
+	// the remote reuses the source object's checksum.
+	CopyReplica(ctx context.Context, request ReplicaCopy) (*ReplicaInfo, error)
 	// ClaimReplicationOwner creates a non-expiring prefix owner record or
 	// resumes it when the stored ownerID matches. A different owner must fail.
 	ClaimReplicationOwner(ctx context.Context, key, ownerID string) (version string, err error)
