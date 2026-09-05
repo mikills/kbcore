@@ -213,6 +213,14 @@ func (l *KB) sweepShardGCEntry(
 		return
 	}
 	if reason != "" {
+		if reason == "tombstoned" {
+			// Drop: ownership is uncertain until the operator clears the
+			// tombstone, and retrying every 10s forever wedges the queue.
+			// Reconcile re-derives the orphans after ClearTombstone.
+			slog.Default().
+				InfoContext(ctx, "deferred shard GC dropped tombstoned shard", logKeyKBID, entry.KBID, logKeyReason, reason, "shard_key", entry.Shard.Key)
+			return
+		}
 		slog.Default().
 			InfoContext(ctx, "deferred shard GC skipped shard", logKeyKBID, entry.KBID, logKeyReason, reason, "shard_key", entry.Shard.Key)
 		state.retry(entry, now, nil)
@@ -233,11 +241,14 @@ func (l *KB) sweepShardGCEntry(
 // may be. Content-addressed keys make a republish byte-identical, so only a
 // fresh manifest read and the object's write time can tell them apart.
 //
-// Backup descriptors and zero-copy snapshots pin shard bytes by key: a shard
-// referenced by any backup/snapshot marker is never deletable even when the
-// live manifest no longer names it, so the pinned set is consulted before the
-// object-age check. Marker list failures are returned (the entry is retried);
-// single unreadable markers are skipped best-effort by backupPinnedShardKeys.
+// The live set is the union of the fresh live manifest, marker pins
+// (backup descriptors, snapshot records, branch markers), journal pendings,
+// and reader pins: a shard named by any of them is never deletable even when
+// the live manifest no longer names it, so the pin set is consulted before
+// the object-age check. A tombstoned KB is never deletable through GC:
+// ownership is uncertain until the operator clears the tombstone. Marker
+// list failures are returned (the entry is retried); single unreadable
+// markers are skipped best-effort by backupPinnedShardKeys.
 func (l *KB) confirmShardDeletable(
 	ctx context.Context,
 	entry delayedShardGCEntry,
@@ -245,6 +256,13 @@ func (l *KB) confirmShardDeletable(
 	cache map[string]map[string]struct{},
 	pinnedCache map[string]map[string]struct{},
 ) (string, error) {
+	tombstoned, err := l.IsTombstoned(ctx, entry.KBID)
+	if err != nil {
+		return "", fmt.Errorf("confirm tombstone for shard gc: %w", err)
+	}
+	if tombstoned {
+		return "tombstoned", nil
+	}
 	freshKeys, ok := cache[entry.KBID]
 	if !ok {
 		doc, err := l.ManifestStore.Get(ctx, entry.KBID)
@@ -306,8 +324,17 @@ func (l *KB) activeShardKeysForGC(
 	}
 	doc, err := l.ManifestStore.Get(ctx, entry.KBID)
 	if errors.Is(err, ErrManifestNotFound) {
-		cache[entry.KBID] = map[string]struct{}{}
-		return cache[entry.KBID], nil
+		// No manifest does NOT mean no live shards once shared references
+		// exist: a deleted or not-yet-published KB whose bytes are still
+		// pinned by backup/branch markers, journal pendings, or reader pins
+		// keeps those pins live. Fall through to the pin set instead of an
+		// empty set.
+		pinned, perr := l.pinnedKeysForGC(ctx, entry.KBID, pinnedCache)
+		if perr != nil {
+			return nil, perr
+		}
+		cache[entry.KBID] = pinned
+		return pinned, nil
 	}
 	if err != nil {
 		slog.Default().
@@ -328,25 +355,124 @@ func (l *KB) activeShardKeysForGC(
 	return activeKeys, nil
 }
 
-// pinnedKeysForGC returns the cached backup/snapshot pin set for a KB,
-// fetching it once per sweep.
+// pinnedKeysForGC returns the cached reachability pin set for a KB, fetching
+// it once per sweep. The live set is the union of marker pins (backup
+// descriptors, snapshot records, branch markers), journal pendings
+// (unreplicated tiered bytes), and reader pins (in-flight reads). Marker or
+// journal list failures are returned so the entry retries; single unreadable
+// markers are skipped best-effort inside backupPinnedShardKeys.
 func (l *KB) pinnedKeysForGC(
 	ctx context.Context,
 	kbID string,
 	cache map[string]map[string]struct{},
 ) (map[string]struct{}, error) {
-	if cache == nil {
-		return l.backupPinnedShardKeys(ctx, kbID)
-	}
-	if pinned, ok := cache[kbID]; ok {
-		return pinned, nil
+	if cache != nil {
+		if pinned, ok := cache[kbID]; ok {
+			return pinned, nil
+		}
 	}
 	pinned, err := l.backupPinnedShardKeys(ctx, kbID)
 	if err != nil {
 		return nil, err
 	}
-	cache[kbID] = pinned
+	for key := range l.readerPinnedKeys(kbID) {
+		pinned[key] = struct{}{}
+	}
+	pending, err := l.journalPendingKeys(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	for key := range pending {
+		pinned[key] = struct{}{}
+	}
+	if cache != nil {
+		cache[kbID] = pinned
+	}
 	return pinned, nil
+}
+
+// PinShardForRead holds a shard key live across a read. It is an opt-in
+// in-process API: the DuckDB query path pins each shard for the duration of
+// its per-shard query (see DuckDBArtifactDeps PinShardForRead), and the GC
+// live set unions pins, so a sweep never deletes a pinned shard at any age.
+// Production protection for unpinned readers is the 2m grace window plus the
+// pin-aware confirm re-check. Pins are re-entrant by count.
+func (l *KB) PinShardForRead(kbID, shardKey string) {
+	if kbID == "" || shardKey == "" {
+		return
+	}
+	l.pinMu.Lock()
+	defer l.pinMu.Unlock()
+	if l.readerPins == nil {
+		l.readerPins = make(map[string]map[string]int)
+	}
+	held := l.readerPins[kbID]
+	if held == nil {
+		held = make(map[string]int)
+		l.readerPins[kbID] = held
+	}
+	held[shardKey]++
+}
+
+// UnpinShardForRead releases one hold previously taken by PinShardForRead.
+func (l *KB) UnpinShardForRead(kbID, shardKey string) {
+	if kbID == "" || shardKey == "" {
+		return
+	}
+	l.pinMu.Lock()
+	defer l.pinMu.Unlock()
+	held := l.readerPins[kbID]
+	if held == nil {
+		return
+	}
+	if held[shardKey] <= 1 {
+		delete(held, shardKey)
+	} else {
+		held[shardKey]--
+	}
+	if len(held) == 0 {
+		delete(l.readerPins, kbID)
+	}
+}
+
+// readerPinnedKeys snapshots the held read pins for a KB.
+func (l *KB) readerPinnedKeys(kbID string) map[string]struct{} {
+	l.pinMu.Lock()
+	defer l.pinMu.Unlock()
+	out := make(map[string]struct{}, len(l.readerPins[kbID]))
+	for key := range l.readerPins[kbID] {
+		out[key] = struct{}{}
+	}
+	return out
+}
+
+// journalPendingKeys returns unreplicated tiered-store bytes under a KB's
+// shard prefixes. Stores without a replication journal (local, S3) have no
+// pendings and report an empty set. A journal list failure is returned so
+// the GC entry retries rather than collecting a shard still awaiting upload.
+func (l *KB) journalPendingKeys(ctx context.Context, kbID string) (map[string]struct{}, error) {
+	out := make(map[string]struct{})
+	if l.BlobStore == nil {
+		return out, nil
+	}
+	provider, ok := l.BlobStore.(interface {
+		UnreplicatedKeys(ctx context.Context, prefix string) ([]string, error)
+	})
+	if !ok {
+		return out, nil
+	}
+	for _, prefix := range shardBlobPrefixes(kbID) {
+		keys, err := provider.UnreplicatedKeys(ctx, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("read journal pendings for shard gc %q: %w", kbID, err)
+		}
+		for _, key := range keys {
+			if key != "" {
+				out[key] = struct{}{}
+			}
+		}
+	}
+	return out, nil
 }
 
 func activeShardKeys(shards []SnapshotShardMetadata) map[string]struct{} {
@@ -367,8 +493,21 @@ func (l *KB) shardGCPendingCount() int {
 	return len(l.shardGC)
 }
 
-// Shards upload before the manifest naming them, so this must exceed the
-// slowest publish.
+// GC timers, all engine-driven (FakeClock-compatible; no wall-clock sleeps):
+//   - Orphaned shards wait DefaultOrphanedShardGracePeriod (1h) past their
+//     object write time before they may be queued.
+//   - Replaced shards wait DefaultShardGCGraceWindow (2m) past replacement
+//     via the queue entry's NotBefore, letting in-flight readers finish.
+//   - DefaultShardGCRetryDelay (10s) is a requeue delay, NOT a TTL: an entry
+//     that cannot be deleted is retried, never expired.
+//
+// Live pins (live manifests, backup descriptors, branch markers, journal
+// pendings, reader pins) exempt a shard from deletion at any age: the sweep
+// re-checks pins on every attempt, so a re-pinned shard is spared however
+// old it is.
+//
+// Shards upload before the manifest naming them, so the orphan grace must
+// exceed the slowest publish.
 const DefaultOrphanedShardGracePeriod = time.Hour
 
 // Listing storage is the expensive part, so an orphan can wait one extra
@@ -472,11 +611,19 @@ func (l *KB) reconcileShardBlobs(
 	now time.Time,
 ) error {
 	cutoff := now.Add(-DefaultOrphanedShardGracePeriod)
-	// Backups and zero-copy snapshots pin shard bytes after the live manifest
-	// drops them; reconcile must not queue pinned shards as orphans. A marker
-	// list failure fails this reconcile (nothing is queued) rather than
-	// risking pinned data.
-	pinned, err := l.backupPinnedShardKeys(ctx, kbID)
+	// Tombstoned KBIDs are skipped: leftover blobs are delete-pending but
+	// ownership is uncertain until the operator clears the tombstone.
+	if tombstoned, err := l.IsTombstoned(ctx, kbID); err != nil {
+		l.recordShardReconcileFailure(kbID)
+		return fmt.Errorf("read tombstone for shard gc %q: %w", kbID, err)
+	} else if tombstoned {
+		return nil
+	}
+	// Backups, snapshots, and zero-copy branches pin shard bytes after the
+	// live manifest drops them; reconcile must not queue pinned shards as
+	// orphans. A marker list failure fails this reconcile (nothing is queued)
+	// rather than risking pinned data.
+	pinned, err := l.pinnedKeysForGC(ctx, kbID, nil)
 	if err != nil {
 		l.recordShardReconcileFailure(kbID)
 		return fmt.Errorf("read pinned shards for shard gc %q: %w", kbID, err)
@@ -555,7 +702,15 @@ func (l *KB) ReconcileShardBlobsForAllKBs(ctx context.Context, now time.Time) er
 
 // reconcileOneKB skips the per-KB throttle. The scan is already throttled, and
 // checking twice would let one recent publish waste the whole listing.
+// Tombstoned KBIDs are skipped entirely (hands off until the operator clears
+// the tombstone); the skip is silent and does not consume an error.
 func (l *KB) reconcileOneKB(ctx context.Context, kbID string, now time.Time) error {
+	if tombstoned, err := l.IsTombstoned(ctx, kbID); err != nil {
+		l.recordShardReconcileFailure(kbID)
+		return fmt.Errorf("read tombstone for shard gc %q: %w", kbID, err)
+	} else if tombstoned {
+		return nil
+	}
 	active, err := l.activeShardsForReconcile(ctx, kbID)
 	if err != nil {
 		l.recordShardReconcileFailure(kbID)
@@ -564,12 +719,24 @@ func (l *KB) reconcileOneKB(ctx context.Context, kbID string, now time.Time) err
 	return l.reconcileShardBlobs(ctx, kbID, active, now)
 }
 
-// A deleted KB loses its manifest before its blobs, so no manifest means no
-// live shards rather than nothing to do.
+// A deleted KB loses its manifest before its blobs, so a missing manifest
+// once meant no live shards. With shared references that is wrong: a
+// manifestless KB whose bytes are still pinned by backup/branch markers,
+// journal pendings, or reader pins reports those pins as live so neither the
+// sweep nor the reconcile treats them as empty. Only a manifestless KB with
+// no pins at all is collectible.
 func (l *KB) activeShardsForReconcile(ctx context.Context, kbID string) ([]SnapshotShardMetadata, error) {
 	doc, err := l.ManifestStore.Get(ctx, kbID)
 	if errors.Is(err, ErrManifestNotFound) {
-		return nil, nil
+		pinned, perr := l.pinnedKeysForGC(ctx, kbID, nil)
+		if perr != nil {
+			return nil, perr
+		}
+		active := make([]SnapshotShardMetadata, 0, len(pinned))
+		for key := range pinned {
+			active = append(active, SnapshotShardMetadata{Key: key})
+		}
+		return active, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read manifest %s for shard gc: %w", kbID, err)

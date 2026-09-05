@@ -97,15 +97,28 @@ type KB struct {
 	defaultFormatKind string
 	initErr           error
 
-	mu              sync.Mutex
-	lockStripes     [256]sync.Mutex
-	scopeCacheMu    sync.RWMutex
-	scopeCache      map[string]Scope
-	scopeLocks      [256]sync.Mutex
+	mu           sync.Mutex
+	lockStripes  [256]sync.Mutex
+	scopeCacheMu sync.RWMutex
+	scopeCache   map[string]Scope
+	scopeLocks   [256]sync.Mutex
+	// shardGC is the in-memory delayed-delete queue for replaced/orphaned
+	// shards. Crash-loss window: entries not yet swept are lost on process
+	// crash, but nothing is deleted without a sweep, so the loss only
+	// delays collection. The hourly ReconcileShardBlobsForAllKBs scan
+	// re-derives orphans from storage, bounding the loss window to one
+	// reconcile interval (1h) plus the replaced-shard grace (2m). See
+	// TestReachability/crash_recovery.
 	shardGC         []delayedShardGCEntry
 	shardReconciled map[string]time.Time
 	shardScannedAt  time.Time
 	shardScanAfter  string
+	// readerPins tracks live read holds: map from KB id to shard key to
+	// hold count. Pinned keys are part of the GC live set and are exempt
+	// from every GC timer (orphan grace, replaced grace, requeue delay):
+	// a sweep never deletes a pinned shard at any age.
+	pinMu      sync.Mutex
+	readerPins map[string]map[string]int
 }
 
 type KBOption func(*KB)

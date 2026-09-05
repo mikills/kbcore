@@ -135,6 +135,79 @@ func (s *ReplicaStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+func (s *ReplicaStore) Copy(ctx context.Context, srcKey, dstKey string, opts blobstore.CopyOptions) (*blobstore.ObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.availableLocked(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(srcKey) == "" || strings.TrimSpace(dstKey) == "" || srcKey == dstKey {
+		return nil, errors.New("sim: copy keys must be non-empty and distinct")
+	}
+	src, found := s.objects[srcKey]
+	if !found {
+		return nil, blobstore.ErrNotFound
+	}
+	if current, exists := s.objects[dstKey]; exists {
+		if opts.CreateOnly {
+			return nil, blobstore.ErrVersionMismatch
+		}
+		if opts.ExpectedVersion != "" && current.version != opts.ExpectedVersion {
+			return nil, blobstore.ErrVersionMismatch
+		}
+	} else if opts.ExpectedVersion != "" {
+		return nil, blobstore.ErrVersionMismatch
+	}
+	object := s.putLocked(src.data, "", blobstore.BytesSHA256(src.data))
+	s.objects[dstKey] = object
+	return objectInfo(dstKey, object), nil
+}
+
+func (s *ReplicaStore) CopyReplica(ctx context.Context, request blobstore.ReplicaCopy) (*blobstore.ReplicaInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.availableLocked(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(request.SrcKey) == "" || strings.TrimSpace(request.DstKey) == "" || request.SrcKey == request.DstKey {
+		return nil, errors.New("sim: replica copy keys must be non-empty and distinct")
+	}
+	if strings.TrimSpace(request.OperationID) == "" {
+		return nil, errors.New("sim: replica copy requires an operation ID")
+	}
+	src, found := s.objects[request.SrcKey]
+	if !found {
+		return nil, blobstore.ErrNotFound
+	}
+	if current, exists := s.objects[request.DstKey]; exists {
+		if request.CreateOnly {
+			return nil, blobstore.ErrVersionMismatch
+		}
+		if request.ExpectedVersion == "" || current.version != request.ExpectedVersion {
+			return nil, blobstore.ErrVersionMismatch
+		}
+	} else if !request.CreateOnly {
+		return nil, blobstore.ErrVersionMismatch
+	}
+	checksum := request.Checksum
+	if checksum == "" {
+		checksum = src.checksum
+	}
+	object := s.putLocked(src.data, request.OperationID, checksum)
+	s.objects[request.DstKey] = object
+	return &blobstore.ReplicaInfo{
+		ObjectInfo:  *objectInfo(request.DstKey, object),
+		OperationID: object.operationID,
+		Checksum:    object.checksum,
+	}, nil
+}
+
 func (s *ReplicaStore) List(ctx context.Context, prefix string) ([]blobstore.ObjectInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

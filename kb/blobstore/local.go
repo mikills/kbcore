@@ -200,6 +200,106 @@ func (l *LocalBlobStore) UploadIfNotExists(ctx context.Context, key, src string)
 	return &ObjectInfo{Key: key, Version: srcHash, UpdatedAt: info.ModTime().UTC(), Size: info.Size()}, nil
 }
 
+// Copy duplicates srcKey to dstKey without routing bytes through the
+// caller. CreateOnly uses O_EXCL so concurrent creators resolve to exactly
+// one winner on a single host; otherwise ExpectedVersion is a CAS
+// precondition on the destination (empty means unconditional overwrite).
+// A missing source reports an error joining ErrNotFound with os.ErrNotExist.
+func (l *LocalBlobStore) Copy(ctx context.Context, srcKey, dstKey string, opts CopyOptions) (*ObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(srcKey) == "" || strings.TrimSpace(dstKey) == "" {
+		return nil, errors.New("copy source and destination keys are required")
+	}
+	if srcKey == dstKey {
+		return nil, errors.New("copy source and destination must differ")
+	}
+	if opts.CreateOnly && opts.ExpectedVersion != "" {
+		return nil, errors.New("copy requires exactly one of create-only or an expected version")
+	}
+	// Lock in stripe-index order so concurrent copies in opposite directions
+	// cannot deadlock. Key string order can disagree with stripe order on
+	// hash crossover, so the order key is the stripe index (pointer order
+	// equivalent). Striping can map both keys to one mutex; lock once
+	// in that case since sync.Mutex is not reentrant.
+	srcIdx, dstIdx := l.lockIndexForKey(srcKey), l.lockIndexForKey(dstKey)
+	first, second := l.lockForKey(srcKey), l.lockForKey(dstKey)
+	if srcIdx == dstIdx {
+		first.Lock()
+		defer first.Unlock()
+	} else {
+		if srcIdx > dstIdx {
+			first, second = second, first
+		}
+		first.Lock()
+		second.Lock()
+		defer first.Unlock()
+		defer second.Unlock()
+	}
+
+	src := filepath.Join(l.Root, srcKey)
+	if _, err := os.Stat(src); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: copy source %s: %w", ErrNotFound, srcKey, err)
+		}
+		return nil, err
+	}
+	dest := filepath.Join(l.Root, dstKey)
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return nil, err
+	}
+	if opts.CreateOnly {
+		if err := copyFileExcl(src, dest); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := l.checkUploadVersion(ctx, dstKey, opts.ExpectedVersion); err != nil {
+			return nil, err
+		}
+		if err := replaceFileWithCopy(src, dest); err != nil {
+			return nil, err
+		}
+	}
+	version, err := FileContentSHA256(ctx, dest)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(dest)
+	if err != nil {
+		return nil, err
+	}
+	return &ObjectInfo{Key: dstKey, Version: version, UpdatedAt: info.ModTime().UTC(), Size: info.Size()}, nil
+}
+
+// copyFileExcl copies src to dest failing with ErrVersionMismatch when dest
+// already exists. The O_EXCL create and the copy share the key lock, so
+// in-process creators resolve to one winner and the loser never truncates.
+func copyFileExcl(src, dest string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("%w: object already exists at %s", ErrVersionMismatch, dest)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dest)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dest)
+		return err
+	}
+	return nil
+}
+
 func (l *LocalBlobStore) checkUploadVersion(ctx context.Context, key string, expectedVersion string) error {
 	if expectedVersion == "" {
 		return nil
@@ -214,15 +314,23 @@ func (l *LocalBlobStore) checkUploadVersion(ctx context.Context, key string, exp
 	return nil
 }
 
-// lockForKey uses fixed striping to serialize writes to the same key without
-// retaining attacker- or workload-controlled blob keys for the process lifetime.
-func (l *LocalBlobStore) lockForKey(key string) *sync.Mutex {
+// lockIndexForKey maps a key to its stripe index. lockForKey and Copy's
+// two-lock ordering both derive from it so the lock order never depends on
+// key string comparison (which can disagree with stripe order and deadlock
+// opposite-direction copies on hash crossover).
+func (l *LocalBlobStore) lockIndexForKey(key string) uint32 {
 	var hash uint32 = 2166136261
 	for i := 0; i < len(key); i++ {
 		hash ^= uint32(key[i])
 		hash *= 16777619
 	}
-	return &l.keyLocks[hash%uint32(len(l.keyLocks))]
+	return hash % uint32(len(l.keyLocks))
+}
+
+// lockForKey uses fixed striping to serialize writes to the same key without
+// retaining attacker- or workload-controlled blob keys for the process lifetime.
+func (l *LocalBlobStore) lockForKey(key string) *sync.Mutex {
+	return &l.keyLocks[l.lockIndexForKey(key)]
 }
 
 func (l *LocalBlobStore) Delete(ctx context.Context, key string) error {

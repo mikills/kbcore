@@ -137,7 +137,8 @@ type CloneOriginRecord struct {
 	RecordVersion   int       `json:"record_version"`
 	KBID            string    `json:"kb_id"`
 	SourceKBID      string    `json:"source_kb_id"`
-	SourceBackupID  string    `json:"source_backup_id"`
+	SourceBackupID  string    `json:"source_backup_id,omitempty"`
+	SourceBranchID  string    `json:"source_branch_id,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	ManifestVersion string    `json:"manifest_version"`
 }
@@ -753,15 +754,16 @@ func (l *KB) DeleteSnapshot(ctx context.Context, kbID, snapshotID string) error 
 	return l.BlobStore.Delete(ctx, SnapshotRecordKey(kbID, snapshotID))
 }
 
-// HasBackupsOrBranches reports whether a KB owns backup descriptors or
-// snapshot records. DeleteKnowledgeBase refuses while this is true.
+// HasBackupsOrBranches reports whether a KB owns backup descriptors,
+// snapshot records, or branch markers. DeleteKnowledgeBase refuses while
+// this is true.
 //
 // This is a guard, not a fence: it runs before DeleteKnowledgeBase deletes
-// the manifest, so a concurrent CreateBackup/CreateSnapshot that lands between
-// the check and the delete is not stopped (guard→delete TOCTOU). Likewise a
-// direct ManifestStore.Delete bypasses this guard entirely — only
-// DeleteKnowledgeBase enforces it. Callers that need a hard guarantee must
-// quiesce backup/snapshot writers first.
+// the manifest, so a concurrent CreateBackup/CreateSnapshot/BranchKB that
+// lands between the check and the delete is not stopped (guard→delete
+// TOCTOU). Likewise a direct ManifestStore.Delete bypasses this guard
+// entirely — only DeleteKnowledgeBase enforces it. Callers that need a hard
+// guarantee must quiesce backup/snapshot/branch writers first.
 func (l *KB) HasBackupsOrBranches(ctx context.Context, kbID string) (bool, error) {
 	if err := validateKBID(kbID); err != nil {
 		return false, err
@@ -785,7 +787,14 @@ func (l *KB) HasBackupsOrBranches(ctx context.Context, kbID string) (bool, error
 	if err != nil {
 		return false, fmt.Errorf("list snapshots for %q: %w", kbID, err)
 	}
-	return len(snapshots) > 0, nil
+	if len(snapshots) > 0 {
+		return true, nil
+	}
+	branches, err := l.BlobStore.List(ctx, BranchPrefix(kbID))
+	if err != nil {
+		return false, fmt.Errorf("list branches for %q: %w", kbID, err)
+	}
+	return len(branches) > 0, nil
 }
 
 func remapShardKey(srcKBID, dstKBID, srcKey string) string {
@@ -802,9 +811,10 @@ func remapShardKey(srcKBID, dstKBID, srcKey string) string {
 }
 
 // backupPinnedShardKeys returns every shard key referenced by a KB's backup
-// descriptors and snapshot records. Shard GC must treat these as live: backups
-// and zero-copy snapshots pin shard bytes by key, and deleting a pinned shard
-// would corrupt restores long after the live manifest stopped referencing it.
+// descriptors, snapshot records, and branch markers. Shard GC must treat
+// these as live: backups and zero-copy snapshots/branches pin shard bytes
+// by key, and deleting a pinned shard would corrupt restores long after the
+// live manifest stopped referencing it.
 //
 // List failures are returned (the caller retries the GC entry) while single
 // unreadable markers are skipped best-effort: one corrupt descriptor must not
@@ -816,7 +826,7 @@ func (l *KB) backupPinnedShardKeys(ctx context.Context, kbID string) (map[string
 		return pinned, nil
 	}
 	markerKeys := make([]string, 0)
-	for _, prefix := range []string{BackupPrefix(kbID), SnapshotPrefix(kbID)} {
+	for _, prefix := range []string{BackupPrefix(kbID), SnapshotPrefix(kbID), BranchPrefix(kbID)} {
 		objects, err := l.BlobStore.List(ctx, prefix)
 		if err != nil {
 			return nil, fmt.Errorf("list backup markers for shard gc %q: %w", kbID, err)
@@ -910,6 +920,9 @@ func (l *KB) CloneKBFromBackup(ctx context.Context, srcKBID, backupID, dstKBID s
 	if err := checkManifestFormatSupported(&desc.ManifestSnapshot); err != nil {
 		return err
 	}
+	if err := l.rejectTombstonedTarget(ctx, dstKBID); err != nil {
+		return err
+	}
 	// Pre-publish fencing: refuse a target namespace that already holds a
 	// manifest or any staged/leftover object. The manifest CreateOnly put
 	// below remains the atomic commit point; this check is the fast path
@@ -948,29 +961,21 @@ func (l *KB) CloneKBFromBackup(ctx context.Context, srcKBID, backupID, dstKBID s
 		return errors.Join(errs...)
 	}
 	for _, ref := range desc.Shards {
-		raw, err := l.BlobStore.DownloadBytes(ctx, ref.Key)
-		if err != nil {
-			if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
-				return fail(fmt.Errorf("%w: source shard %s is missing: %w", ErrBackupCorrupt, ref.Key, err))
-			}
-			return fail(fmt.Errorf("download source shard %s: %w", ref.Key, err))
-		}
-		if int64(len(raw)) != ref.SizeBytes {
-			return fail(fmt.Errorf("%w: source shard %s size %d does not match backup %d",
-				ErrBackupCorrupt, ref.Key, len(raw), ref.SizeBytes))
-		}
-		if got := blobstore.BytesSHA256(raw); got != ref.SHA256 {
-			return fail(fmt.Errorf("%w: source shard %s failed sha256 verification", ErrBackupCorrupt, ref.Key))
-		}
 		dstKey := remapShardKey(srcKBID, dstKBID, ref.Key)
-		// CreateOnly: a concurrent clone staging the same target loses here
-		// with ErrBackupExists instead of overwriting our bytes later.
-		info, err := l.uploadBytesCreateOnly(ctx, dstKey, raw)
+		// Server-side copy with CreateOnly: a concurrent clone staging the
+		// same target loses here with ErrBackupExists instead of
+		// overwriting our bytes later. Staged bytes are still re-hashed by
+		// verifyStagedClone below, so a corrupt source fails the restore
+		// before any manifest is published.
+		info, err := l.copyShardCreateOnly(ctx, ref.Key, dstKey)
 		if err != nil {
 			if errors.Is(err, ErrBackupExists) {
 				return fail(fmt.Errorf("%w: clone target %q is already being staged: %w", ErrBackupExists, dstKBID, ErrBlobVersionMismatch))
 			}
-			return fail(fmt.Errorf("upload target shard %s: %w", dstKey, err))
+			if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
+				return fail(fmt.Errorf("%w: source shard %s is missing: %w", ErrBackupCorrupt, ref.Key, err))
+			}
+			return fail(fmt.Errorf("copy source shard %s: %w", ref.Key, err))
 		}
 		copiedKeys = append(copiedKeys, dstKey)
 		copied = append(copied, SnapshotShardMetadata{

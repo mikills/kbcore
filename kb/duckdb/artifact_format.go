@@ -55,9 +55,14 @@ type DuckDBArtifactDeps struct {
 	Budget       *budget.Manager
 	GraphBuilder func() *kb.GraphBuilder
 
-	EvictCacheIfNeeded         func(context.Context, string) error
-	ReserveCache               func(context.Context, int64) (func(), error)
-	LockFor                    func(string) *sync.Mutex
+	EvictCacheIfNeeded func(context.Context, string) error
+	ReserveCache       func(context.Context, int64) (func(), error)
+	LockFor            func(string) *sync.Mutex
+	// PinShardForRead/UnpinShardForRead hold a shard live across a query.
+	// Nil means queries run without explicit pins (the 2m grace window plus
+	// the pin-aware GC confirm remain the protection).
+	PinShardForRead            func(kbID, shardKey string)
+	UnpinShardForRead          func(kbID, shardKey string)
 	AcquireWriteLease          func(ctx context.Context, kbID string) (kb.WriteLeaseManager, *kb.WriteLease, error)
 	EnqueueReplacedShardsForGC func(kbID string, shards []kb.SnapshotShardMetadata, now time.Time)
 	ReconcileShardBlobs        func(ctx context.Context, kbID string, active []kb.SnapshotShardMetadata) error

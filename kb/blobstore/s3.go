@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -312,6 +313,134 @@ func (s *S3BlobStore) UploadIfNotExists(ctx context.Context, key, src string) (*
 	return nil, fmt.Errorf("put object %s after conditional conflicts: %w", key, lastErr)
 }
 
+// Copy server-side copies srcKey to dstKey with CopyObject so shard bytes
+// never transit the caller. CreateOnly maps to If-None-Match *, otherwise
+// ExpectedVersion maps to If-Match. A 412 response surfaces as
+// ErrVersionMismatch and a missing source as ErrNotFound.
+func (s *S3BlobStore) Copy(ctx context.Context, srcKey, dstKey string, opts CopyOptions) (*ObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(srcKey) == "" || strings.TrimSpace(dstKey) == "" {
+		return nil, errors.New("copy source and destination keys are required")
+	}
+	if srcKey == dstKey {
+		return nil, errors.New("copy source and destination must differ")
+	}
+	if opts.CreateOnly && opts.ExpectedVersion != "" {
+		return nil, errors.New("copy requires exactly one of create-only or an expected version")
+	}
+	input := &s3.CopyObjectInput{
+		Bucket:     aws.String(s.Bucket),
+		Key:        aws.String(s.fullKey(dstKey)),
+		CopySource: aws.String(s.Bucket + "/" + encodeCopySource(s.fullKey(srcKey))),
+	}
+	if opts.CreateOnly {
+		input.IfNoneMatch = aws.String("*")
+	} else if opts.ExpectedVersion != "" {
+		input.IfMatch = aws.String(opts.ExpectedVersion)
+	}
+	if _, err := s.Client.CopyObject(ctx, input); err != nil {
+		if isS3NotFound(err) {
+			return nil, fmt.Errorf("%w: copy source %s: %w", ErrNotFound, srcKey, err)
+		}
+		var responseErr *smithyhttp.ResponseError
+		if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == http.StatusPreconditionFailed {
+			return nil, fmt.Errorf("%w: copy precondition failed for %s", ErrVersionMismatch, dstKey)
+		}
+		return nil, fmt.Errorf("copy object %s to %s: %w", srcKey, dstKey, err)
+	}
+	head, err := s.Head(ctx, dstKey)
+	if err != nil {
+		return nil, fmt.Errorf("head copied object %s: %w", dstKey, err)
+	}
+	return head, nil
+}
+
+// CopyReplica server-side copies on the remote, preserving the fencing
+// contract: the destination carries the new OperationID/checksum metadata so
+// an uncertain response reconciles exactly like PutReplica.
+func (s *S3BlobStore) CopyReplica(ctx context.Context, request ReplicaCopy) (*ReplicaInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(request.SrcKey) == "" || strings.TrimSpace(request.DstKey) == "" {
+		return nil, errors.New("replica copy source and destination are required")
+	}
+	if request.SrcKey == request.DstKey {
+		return nil, errors.New("replica copy source and destination must differ")
+	}
+	if strings.TrimSpace(request.OperationID) == "" {
+		return nil, errors.New("replica copy requires an operation ID")
+	}
+	if request.CreateOnly && request.ExpectedVersion != "" {
+		return nil, errors.New("replica copy requires create-only or an expected remote version, not both")
+	}
+	if !request.CreateOnly && request.ExpectedVersion == "" {
+		return nil, errors.New("replica copy requires create-only or an expected remote version")
+	}
+	checksum := request.Checksum
+	if checksum == "" {
+		current, err := s.HeadReplica(ctx, request.SrcKey)
+		if err != nil {
+			return nil, err
+		}
+		checksum = current.Checksum
+	}
+	input := &s3.CopyObjectInput{
+		Bucket:            aws.String(s.Bucket),
+		Key:               aws.String(s.fullKey(request.DstKey)),
+		CopySource:        aws.String(s.Bucket + "/" + encodeCopySource(s.fullKey(request.SrcKey))),
+		MetadataDirective: types.MetadataDirectiveReplace,
+		Metadata: map[string]string{
+			replicaOperationMetadata: request.OperationID,
+			replicaChecksumMetadata:  checksum,
+		},
+	}
+	if request.CreateOnly {
+		input.IfNoneMatch = aws.String("*")
+	} else {
+		input.IfMatch = aws.String(request.ExpectedVersion)
+	}
+	result, err := s.Client.CopyObject(ctx, input)
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil, ErrNotFound
+		}
+		var responseErr *smithyhttp.ResponseError
+		if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == http.StatusPreconditionFailed {
+			return nil, fmt.Errorf("%w: replica copy precondition failed for %s", ErrVersionMismatch, request.DstKey)
+		}
+		return nil, fmt.Errorf("copy replica %s to %s: %w", request.SrcKey, request.DstKey, err)
+	}
+	version := ""
+	if result.CopyObjectResult != nil {
+		version = aws.ToString(result.CopyObjectResult.ETag)
+	}
+	if version == "" {
+		head, headErr := s.Head(ctx, request.DstKey)
+		if headErr != nil {
+			return nil, fmt.Errorf("head copied replica %s: %w", request.DstKey, headErr)
+		}
+		version = head.Version
+	}
+	head, err := s.Head(ctx, request.DstKey)
+	if err != nil {
+		return nil, err
+	}
+	return &ReplicaInfo{ObjectInfo: *head, OperationID: request.OperationID, Checksum: checksum}, nil
+}
+
+// encodeCopySource escapes a full S3 key for the CopySource parameter,
+// which is a URL path of the form bucket/key.
+func encodeCopySource(key string) string {
+	parts := strings.Split(key, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
+}
+
 // UploadBytesIfNotExists writes data only if the key does not already exist
 // (uses If-None-Match: * conditional). Returns ErrVersionMismatch if the
 // object already exists.
@@ -479,12 +608,12 @@ func (s *S3BlobStore) DeleteReplica(ctx context.Context, key, expectedVersion st
 		IfMatch: aws.String(expectedVersion),
 	})
 	if err != nil {
+		if isS3NotFound(err) {
+			return ErrNotFound
+		}
 		var responseErr *smithyhttp.ResponseError
 		if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == http.StatusPreconditionFailed {
 			return fmt.Errorf("%w: replica delete precondition failed for %s", ErrVersionMismatch, key)
-		}
-		if isS3NotFound(err) {
-			return ErrNotFound
 		}
 		return fmt.Errorf("delete replica %s: %w", key, err)
 	}
@@ -560,10 +689,20 @@ func (s *S3BlobStore) List(ctx context.Context, prefix string) ([]ObjectInfo, er
 	return items, nil
 }
 
-// isS3NotFound returns true for both HeadObject (NotFound) and GetObject
-// (NoSuchKey) 404 responses, which use different error types in the AWS SDK.
+// isS3NotFound returns true for HeadObject (NotFound), GetObject
+// (NoSuchKey), and CopyObject missing-source 404s. CopyObject surfaces a
+// missing source through several shapes depending on path and SDK version —
+// typed NotFound/NoSuchKey or a generic 404 ResponseError — so the generic
+// 404 check comes last and covers the untyped variants.
 func isS3NotFound(err error) bool {
 	var notFound *types.NotFound
 	var noSuchKey *types.NoSuchKey
-	return errors.As(err, &notFound) || errors.As(err, &noSuchKey)
+	if errors.As(err, &notFound) || errors.As(err, &noSuchKey) {
+		return true
+	}
+	var responseErr *smithyhttp.ResponseError
+	if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == http.StatusNotFound {
+		return true
+	}
+	return false
 }

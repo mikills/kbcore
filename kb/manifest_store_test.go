@@ -12,6 +12,7 @@ import (
 	"time"
 
 	. "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/blobstore"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -300,6 +301,10 @@ func (c *churnOnHeadBlobStore) UploadIfMatch(
 
 func (c *churnOnHeadBlobStore) Delete(ctx context.Context, key string) error {
 	return c.inner.Delete(ctx, key)
+}
+
+func (c *churnOnHeadBlobStore) Copy(ctx context.Context, srcKey, dstKey string, opts blobstore.CopyOptions) (*BlobObjectInfo, error) {
+	return c.inner.Copy(ctx, srcKey, dstKey, opts)
 }
 
 func (c *churnOnHeadBlobStore) List(ctx context.Context, prefix string) ([]BlobObjectInfo, error) {

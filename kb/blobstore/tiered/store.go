@@ -432,6 +432,70 @@ func (s *Store) UploadBytesIfNotExists(ctx context.Context, key string, data []b
 	return objectInfo(object), nil
 }
 
+// Copy duplicates srcKey to dstKey through the journal: the source bytes
+// are read from the local overlay (or the remote on a miss) and committed
+// as a normal journaled put, so the copy replicates in global order like
+// any other mutation. Fencing mirrors the put paths: CreateOnly rejects an
+// existing destination, otherwise ExpectedVersion is the CAS precondition
+// (empty means unconditional). There is no journal-level server-side copy;
+// the remote receives the bytes via the standard replication entry.
+func (s *Store) Copy(ctx context.Context, srcKey, dstKey string, opts blobstore.CopyOptions) (*blobstore.ObjectInfo, error) {
+	if strings.TrimSpace(srcKey) == "" || strings.TrimSpace(dstKey) == "" {
+		return nil, errors.New("copy source and destination keys are required")
+	}
+	if srcKey == dstKey {
+		return nil, errors.New("copy source and destination must differ")
+	}
+	if opts.CreateOnly && opts.ExpectedVersion != "" {
+		return nil, errors.New("copy requires exactly one of create-only or an expected version")
+	}
+	data, err := s.DownloadBytes(ctx, srcKey)
+	if err != nil {
+		return nil, err
+	}
+	finish, err := s.beginEnqueue(ctx, dstKey)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
+	var object journal.Object
+	var entry journal.Entry
+	if opts.CreateOnly {
+		object, entry, err = s.journal.CreateBytes(ctx, dstKey, data)
+	} else {
+		object, entry, err = s.journal.PutBytes(ctx, dstKey, data, opts.ExpectedVersion)
+	}
+	if err == nil {
+		err = validateMutationResult(dstKey, opts.ExpectedVersion, opts.CreateOnly, object, entry)
+	}
+	finish()
+	if err != nil {
+		return nil, mapJournalError(err)
+	}
+	if err := s.waitIfRemote(ctx, entry.Sequence); err != nil {
+		return nil, err
+	}
+	return objectInfo(object), nil
+}
+
+// UnreplicatedKeys returns journal keys under prefix with local bytes that
+// have not yet replicated. Shard GC treats these as live: a shard staged
+// locally but still awaiting upload must not be collected as an orphan.
+func (s *Store) UnreplicatedKeys(ctx context.Context, prefix string) ([]string, error) {
+	objects, err := s.journal.Scan(ctx, prefix)
+	if err != nil {
+		return nil, mapJournalError(err)
+	}
+	var keys []string
+	for _, object := range objects {
+		if object.Tombstone || object.Replicated {
+			continue
+		}
+		keys = append(keys, object.Key)
+	}
+	return keys, nil
+}
+
 func (s *Store) Delete(ctx context.Context, key string) error {
 	finish, err := s.beginEnqueue(ctx, key)
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	kb "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/blobstore"
 )
 
 // BlobFaults configures injected failures for FaultableBlobStore. Rates are
@@ -192,6 +193,18 @@ func (s *FaultableBlobStore) Delete(ctx context.Context, key string) error {
 	}
 	s.forgetWrite(key)
 	return nil
+}
+
+func (s *FaultableBlobStore) Copy(ctx context.Context, srcKey, dstKey string, opts blobstore.CopyOptions) (*blobstore.ObjectInfo, error) {
+	if s.rollFault(func(f BlobFaults) float64 { return f.UploadFailRate }) {
+		return nil, ErrInjected
+	}
+	info, err := s.inner.Copy(ctx, srcKey, dstKey, opts)
+	if err != nil {
+		return nil, err
+	}
+	s.recordWrite(dstKey)
+	return s.stamp(info), nil
 }
 
 func (s *FaultableBlobStore) List(ctx context.Context, prefix string) ([]kb.BlobObjectInfo, error) {
