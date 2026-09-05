@@ -73,6 +73,11 @@ type KB struct {
 
 	Clock Clock
 
+	// RetentionKeepLastN / RetentionMaxAge tune the scheduled retention
+	// sweep (retention.go). Zero KeepLastN means the default (7).
+	RetentionKeepLastN int
+	RetentionMaxAge    time.Duration
+
 	EventStore EventStore
 	EventInbox EventInbox
 
@@ -238,6 +243,14 @@ func WithMediaContentTypeAllowlist(list []string) KBOption {
 	return func(kb *KB) { kb.MediaContentTypeAllowlist = list }
 }
 
+// WithRetentionPolicy tunes the scheduled retention sweep: keep the newest
+// keepLastN valid backup descriptors per KB (<=0 selects the default) and
+// additionally expire valid descriptors older than maxAge (<=0 disables age
+// expiry). The newest valid descriptor is never deleted regardless.
+func WithRetentionPolicy(keepLastN int, maxAge time.Duration) KBOption {
+	return func(kb *KB) { kb.RetentionKeepLastN, kb.RetentionMaxAge = keepLastN, maxAge }
+}
+
 func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 	kb := &KB{
 		BlobStore:         bs,
@@ -245,9 +258,12 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 		WriteLeaseManager: NewInMemoryWriteLeaseManager(),
 		WriteLeaseTTL:     defaultWriteLeaseTTL,
 		ShardingPolicy:    NormalizeShardingPolicy(ShardingPolicy{}),
-		Clock:             RealClock,
-		formatRegistry:    make(map[string]ArtifactFormat),
-		shardMetrics:      metrics.NewShardRegistry(),
+		// Wall-clock production wiring only: tests inject FakeClock via
+		// WithClock (or loader.Clock) so retention/copy/ref-table/branch
+		// timestamps stay deterministic via clockNow.
+		Clock:          RealClock,
+		formatRegistry: make(map[string]ArtifactFormat),
+		shardMetrics:   metrics.NewShardRegistry(),
 	}
 
 	for _, opt := range opts {

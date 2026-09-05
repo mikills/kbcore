@@ -210,6 +210,19 @@ func nowFrom(c Clock) time.Time {
 	return c.Now()
 }
 
+// clockNow is the deterministic clock path for retention, copy-progress,
+// ref-table, and branch code. It fails closed on a nil Clock instead of
+// silently falling back to wall-clock so tests with FakeClock stay
+// deterministic. Production wiring defaults Clock to RealClock in NewKB
+// (wall-clock production wiring only); new callers in the four areas above
+// must use clockNow, never nowFrom.
+func (l *KB) clockNow() (time.Time, error) {
+	if l == nil || l.Clock == nil {
+		return time.Time{}, fmt.Errorf("kb clock is not configured")
+	}
+	return l.Clock.Now(), nil
+}
+
 type LocalEmbedder = localembedder.Embedder
 
 func NewLocalEmbedder(dim int) (*LocalEmbedder, error) {
@@ -575,7 +588,7 @@ const InboxRetention = 7 * 24 * time.Hour
 const EventRetention = 30 * 24 * time.Hour
 
 func (l *KB) RegisterDefaultJobs(s *Scheduler) error {
-	return schedulerpkg.RegisterDefaultNamedJobs(
+	if err := schedulerpkg.RegisterDefaultNamedJobs(
 		s,
 		schedulerpkg.JobIDs{
 			ShardGC:          ShardGCJobID,
@@ -608,7 +621,18 @@ func (l *KB) RegisterDefaultJobs(s *Scheduler) error {
 			SessionReap: l.CacheDir != "",
 		},
 		l.runScheduledJob,
-	)
+	); err != nil {
+		return err
+	}
+	// Retention is registered directly: the generic scheduler job set has no
+	// retention slot. The sweep uses the KB Clock (FakeClock-compatible) and
+	// the retention policy knobs, and deletes only expired-valid descriptors.
+	if l.BlobStore == nil {
+		return nil
+	}
+	return s.Register(RetentionJobID, RetentionJobExpr, func(ctx context.Context) error {
+		return l.runScheduledJob(ctx, RetentionJobID)
+	})
 }
 
 func (l *KB) runScheduledJob(ctx context.Context, jobID string) error {
@@ -643,6 +667,8 @@ func (l *KB) runScheduledJob(ctx context.Context, jobID string) error {
 	case SessionReapJobID:
 		_, err := l.ReapAbandonedSessions(ctx)
 		return err
+	case RetentionJobID:
+		return l.runRetentionScheduled(ctx)
 	default:
 		return fmt.Errorf("scheduler: unknown default job %q", jobID)
 	}

@@ -94,8 +94,9 @@ func TestBranch(t *testing.T) {
 		require.Equal(t, "b", second.SourceKBID)
 		require.Equal(t, "c", second.TargetKBID)
 
-		// b's manifest references a's keys, so c's pin fans out to a.
-		pinned, err := loader.GetBranch(ctx, "a", "b2")
+		// b's manifest references a's keys; the branch marker lives under the
+		// source prefix (b) while the global ref table pins a's keys for GC.
+		pinned, err := loader.GetBranch(ctx, "b", "b2")
 		require.NoError(t, err)
 		require.Equal(t, "c", pinned.TargetKBID)
 

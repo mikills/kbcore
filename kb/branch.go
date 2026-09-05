@@ -9,12 +9,12 @@
 //
 // Cross-prefix references (same-KB-only refs until a global ref table
 // exists): shard keys carry their owner's KB prefix, so a branch manifest in
-// the target prefix names keys under the source prefix. Per-prefix orphan
-// scans stay correct because every branch/restore fans its pin markers out
-// to each distinct key-owner prefix: the source's GC sees the marker under
-// its own prefix. A future global reference table would replace this
-// fan-out with one lookup; until then same-KB refs are the common case and
-// cross-prefix refs are explicit in the marker.
+// the target prefix names keys under the source prefix. Every branch/restore
+// writes ONE marker under the source prefix plus one owner entry per shard
+// key in the global ref table (ref_table.go); GC unions the ref table with
+// legacy per-owner fan-out markers on read. A future change could drop the
+// legacy read path once no old markers remain; until then same-KB refs are
+// the common case and cross-prefix refs are explicit in the ref table.
 //
 // Publish model is Write-Audit-Publish (WAP) like the snapshot path: the
 // pin marker is written first (audit: pins exist before the new manifest
@@ -202,10 +202,12 @@ func (l *KB) BranchKBFrom(ctx context.Context, srcKBID, branchID, dstKBID, paren
 		return nil, fmt.Errorf("%w: target manifest %q already exists: %w", ErrBackupExists, dstKBID, ErrBlobVersionMismatch)
 	}
 	refs := make([]BackupShardRef, 0, len(doc.Manifest.Shards))
-	keys := make([]string, 0, len(doc.Manifest.Shards))
 	for _, shard := range doc.Manifest.Shards {
 		refs = append(refs, BackupShardRef{Key: shard.Key, SizeBytes: shard.SizeBytes, SHA256: shard.SHA256, Version: shard.Version})
-		keys = append(keys, shard.Key)
+	}
+	now, err := l.clockNow()
+	if err != nil {
+		return nil, err
 	}
 	rec := &BranchRecord{
 		RecordVersion:         BranchRecordVersion,
@@ -214,7 +216,7 @@ func (l *KB) BranchKBFrom(ctx context.Context, srcKBID, branchID, dstKBID, paren
 		TargetKBID:            dstKBID,
 		ParentBranchID:        parentBranchID,
 		SourceManifestVersion: doc.Version,
-		CreatedAt:             nowFrom(l.Clock),
+		CreatedAt:             now,
 		Shards:                refs,
 	}
 	sum, err := branchRecordChecksum(rec)
@@ -224,7 +226,7 @@ func (l *KB) BranchKBFrom(ctx context.Context, srcKBID, branchID, dstKBID, paren
 	rec.RecordSHA256 = sum
 	// Marker-first: pins exist before the new manifest points at shared
 	// bytes, so no GC sweep can observe an unpinned reference.
-	written, err := l.writeBranchMarkers(ctx, branchKeyOwners(srcKBID, keys), rec)
+	written, err := l.writeBranchMarkers(ctx, rec)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +241,11 @@ func (l *KB) BranchKBFrom(ctx context.Context, srcKBID, branchID, dstKBID, paren
 	}
 	next := doc.Manifest
 	next.KBID = dstKBID
-	next.CreatedAt = nowFrom(l.Clock)
+	if now, err := l.clockNow(); err != nil {
+		return nil, rollback(err)
+	} else {
+		next.CreatedAt = now
+	}
 	if err := l.publishCloneManifestCreateOnly(ctx, dstKBID, next); err != nil {
 		return nil, rollback(err)
 	}
@@ -293,9 +299,9 @@ func (l *KB) RestoreBackupZeroCopy(ctx context.Context, srcKBID, backupID, dstKB
 	} else if occupied {
 		return nil, fmt.Errorf("%w: target manifest %q already exists: %w", ErrBackupExists, dstKBID, ErrBlobVersionMismatch)
 	}
-	keys := make([]string, 0, len(desc.Shards))
-	for _, ref := range desc.Shards {
-		keys = append(keys, ref.Key)
+	now, err := l.clockNow()
+	if err != nil {
+		return nil, err
 	}
 	rec := &BranchRecord{
 		RecordVersion:         BranchRecordVersion,
@@ -304,7 +310,7 @@ func (l *KB) RestoreBackupZeroCopy(ctx context.Context, srcKBID, backupID, dstKB
 		TargetKBID:            dstKBID,
 		ParentBranchID:        backupID,
 		SourceManifestVersion: desc.SourceManifestVersion,
-		CreatedAt:             nowFrom(l.Clock),
+		CreatedAt:             now,
 		Shards:                append([]BackupShardRef(nil), desc.Shards...),
 	}
 	sum, err := branchRecordChecksum(rec)
@@ -312,7 +318,7 @@ func (l *KB) RestoreBackupZeroCopy(ctx context.Context, srcKBID, backupID, dstKB
 		return nil, err
 	}
 	rec.RecordSHA256 = sum
-	written, err := l.writeBranchMarkers(ctx, branchKeyOwners(srcKBID, keys), rec)
+	written, err := l.writeBranchMarkers(ctx, rec)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +333,11 @@ func (l *KB) RestoreBackupZeroCopy(ctx context.Context, srcKBID, backupID, dstKB
 	}
 	next := desc.ManifestSnapshot
 	next.KBID = dstKBID
-	next.CreatedAt = nowFrom(l.Clock)
+	if now, err := l.clockNow(); err != nil {
+		return nil, rollback(err)
+	} else {
+		next.CreatedAt = now
+	}
 	if err := l.publishCloneManifestCreateOnly(ctx, dstKBID, next); err != nil {
 		return nil, rollback(err)
 	}
@@ -389,29 +399,32 @@ func (l *KB) verifyBackupSourceShards(ctx context.Context, refs []BackupShardRef
 	return nil
 }
 
-// writeBranchMarkers persists the record under every owner prefix with
-// CreateOnly semantics. A concurrent branch with the same id fails with
+// writeBranchMarkers persists ONE record under the source prefix with
+// CreateOnly semantics plus one owner entry per shard key in the global
+// ref table (ref_table.go). This replaces the old per-owner fan-out (one
+// marker under every key-owner prefix): GC consults the ref table instead
+// of requiring a marker under each prefix. Old fan-out markers are still
+// honored on read (backupPinnedShardKeys lists every marker); only new
+// writes go to the table. A concurrent branch with the same id fails with
 // ErrBackupExists (wrapping ErrBlobVersionMismatch) instead of overwriting.
-func (l *KB) writeBranchMarkers(ctx context.Context, owners []string, rec *BranchRecord) ([]string, error) {
+func (l *KB) writeBranchMarkers(ctx context.Context, rec *BranchRecord) ([]string, error) {
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return nil, err
 	}
-	written := make([]string, 0, len(owners))
-	for _, owner := range owners {
-		key := BranchRecordKey(owner, rec.BranchID)
-		if _, err := l.uploadBytesCreateOnly(ctx, key, data); err != nil {
-			errs := []error{err}
-			for _, prev := range written {
-				if delErr := l.BlobStore.Delete(ctx, prev); delErr != nil {
-					errs = append(errs, fmt.Errorf("rollback branch marker %s: %w", prev, delErr))
-				}
-			}
-			return nil, errors.Join(errs...)
-		}
-		written = append(written, key)
+	key := BranchRecordKey(rec.SourceKBID, rec.BranchID)
+	if _, err := l.uploadBytesCreateOnly(ctx, key, data); err != nil {
+		return nil, err
 	}
-	return written, nil
+	keys := make([]string, 0, len(rec.Shards))
+	for _, shard := range rec.Shards {
+		keys = append(keys, shard.Key)
+	}
+	if err := l.AddRefOwners(ctx, keys, branchRefOwner(rec)); err != nil {
+		_ = l.BlobStore.Delete(ctx, key)
+		return nil, fmt.Errorf("record shard references for branch %q: %w", rec.BranchID, err)
+	}
+	return []string{key}, nil
 }
 
 // GetBranch reads a branch marker and verifies its self-checksum.
@@ -470,12 +483,14 @@ func (l *KB) ListBranchIDs(ctx context.Context, ownerKBID string) ([]string, err
 	return ids, nil
 }
 
-// DeleteBranch removes every owner marker for one branch id. Markers fan
-// out per branchKeyOwners, so deleting a single owner key would leak pins
-// under the other owners. The record is read from the given owner to
-// discover the owner set; when it is unreadable the single key is still
-// removed best-effort. Shared shard bytes are untouched; GC reclaims them
-// once no live manifest, backup, or remaining branch names them.
+// DeleteBranch removes the branch marker and releases its global ref-table
+// entries. Legacy fan-out markers (one per key-owner prefix, written before
+// the ref table existed) are removed best-effort from every derived owner
+// prefix so migration leaves no leaked pins. When the record itself is
+// unreadable the ref-table owner is still released best-effort and every
+// owner prefix is swept by branch-ID suffix, so a corrupt marker cannot
+// leave other-owner legacy markers behind. Shared shard bytes are untouched; GC reclaims them once no
+// live manifest, backup, or remaining branch names them.
 func (l *KB) DeleteBranch(ctx context.Context, ownerKBID, branchID string) error {
 	if strings.TrimSpace(ownerKBID) == "" {
 		return fmt.Errorf("kb_id required")
@@ -489,12 +504,47 @@ func (l *KB) DeleteBranch(ctx context.Context, ownerKBID, branchID string) error
 	if rec, err := l.GetBranch(ctx, ownerKBID, branchID); err == nil && rec != nil {
 		return l.deleteBranchMarkers(ctx, ownerKBID, rec)
 	}
-	return l.BlobStore.Delete(ctx, BranchRecordKey(ownerKBID, branchID))
+	// Unreadable marker: still release the ref-table owner best-effort so a
+	// corrupt or concurrently-deleted marker cannot leak pins forever, and
+	// sweep every owner prefix for legacy fan-out markers with this branch
+	// ID (the record's shard keys are unavailable, so enumerate by suffix).
+	_, _ = l.RemoveRefOwner(ctx, legacyBranchRefOwner(ownerKBID, branchID))
+	sweepErr := l.sweepBranchMarkersByID(ctx, branchID)
+	delErr := l.BlobStore.Delete(ctx, BranchRecordKey(ownerKBID, branchID))
+	return errors.Join(sweepErr, delErr)
 }
 
-// deleteBranchMarkers removes the record under every owner prefix derived
-// from its shard keys, plus the lookup owner itself.
+// sweepBranchMarkersByID best-effort deletes every branch marker with the
+// given branch ID across all owner prefixes (legacy fan-out cleanup on the
+// corrupt path where the record's shard keys are unreadable). A list
+// failure is returned so the caller can surface it; per-key deletes are
+// best-effort and joined.
+func (l *KB) sweepBranchMarkersByID(ctx context.Context, branchID string) error {
+	suffix := branchKeyInfix + branchID + branchKeySuffix
+	objects, err := l.BlobStore.List(ctx, "")
+	if err != nil {
+		return fmt.Errorf("list branch markers for sweep %q: %w", branchID, err)
+	}
+	var errs []error
+	for _, obj := range objects {
+		if !strings.HasSuffix(obj.Key, suffix) {
+			continue
+		}
+		if err := l.BlobStore.Delete(ctx, obj.Key); err != nil {
+			errs = append(errs, fmt.Errorf("delete branch marker %s: %w", obj.Key, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// deleteBranchMarkers removes the source marker, releases the ref-table
+// owner, and best-effort deletes any legacy fan-out markers under the other
+// owner prefixes derived from the record's shard keys.
 func (l *KB) deleteBranchMarkers(ctx context.Context, lookupOwner string, rec *BranchRecord) error {
+	var errs []error
+	if _, err := l.RemoveRefOwner(ctx, branchRefOwner(rec)); err != nil {
+		errs = append(errs, fmt.Errorf("release shard references for branch %q: %w", rec.BranchID, err))
+	}
 	keys := make([]string, 0, len(rec.Shards))
 	for _, shard := range rec.Shards {
 		keys = append(keys, shard.Key)
@@ -505,7 +555,7 @@ func (l *KB) deleteBranchMarkers(ctx context.Context, lookupOwner string, rec *B
 		seen[owner] = struct{}{}
 	}
 	seen[lookupOwner] = struct{}{}
-	var errs []error
+	seen[rec.SourceKBID] = struct{}{}
 	for owner := range seen {
 		if err := l.BlobStore.Delete(ctx, BranchRecordKey(owner, rec.BranchID)); err != nil {
 			errs = append(errs, fmt.Errorf("delete branch marker %s: %w", BranchRecordKey(owner, rec.BranchID), err))
@@ -522,13 +572,17 @@ func (l *KB) recordBranchOrigin(ctx context.Context, dstKBID, srcKBID, branchID 
 	if err != nil {
 		head = ""
 	}
+	now, err := l.clockNow()
+	if err != nil {
+		return
+	}
 	rec := CloneOriginRecord{
 		RecordVersion:   1,
 		KBID:            dstKBID,
 		SourceKBID:      srcKBID,
 		SourceBackupID:  "",
 		SourceBranchID:  branchID,
-		CreatedAt:       nowFrom(l.Clock),
+		CreatedAt:       now,
 		ManifestVersion: head,
 	}
 	data, err := json.Marshal(rec)

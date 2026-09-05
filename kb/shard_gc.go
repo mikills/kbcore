@@ -357,7 +357,8 @@ func (l *KB) activeShardKeysForGC(
 
 // pinnedKeysForGC returns the cached reachability pin set for a KB, fetching
 // it once per sweep. The live set is the union of marker pins (backup
-// descriptors, snapshot records, branch markers), journal pendings
+// descriptors, snapshot records, branch markers — including legacy fan-out
+// markers), the global shard ref table, journal pendings
 // (unreplicated tiered bytes), and reader pins (in-flight reads). Marker or
 // journal list failures are returned so the entry retries; single unreadable
 // markers are skipped best-effort inside backupPinnedShardKeys.
@@ -374,6 +375,15 @@ func (l *KB) pinnedKeysForGC(
 	pinned, err := l.backupPinnedShardKeys(ctx, kbID)
 	if err != nil {
 		return nil, err
+	}
+	// Global ref table: single index replacing the per-owner fan-out.
+	// Legacy fan-out markers above are still honored (read both).
+	refPinned, err := l.refTablePinnedKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for key := range refPinned {
+		pinned[key] = struct{}{}
 	}
 	for key := range l.readerPinnedKeys(kbID) {
 		pinned[key] = struct{}{}

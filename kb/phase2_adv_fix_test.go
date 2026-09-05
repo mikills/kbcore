@@ -158,14 +158,18 @@ func TestPhase2AdvFix(t *testing.T) {
 		require.NoError(t, err)
 		_, err = loader.GetBranch(ctx, "src", "b1")
 		require.NoError(t, err)
+		// Cross-prefix pins now live in the global ref table, not in
+		// per-owner fan-out markers: only the source marker exists.
 		_, err = loader.GetBranch(ctx, "oth", "b1")
-		require.NoError(t, err, "cross-prefix branch must fan markers out to every owner")
+		require.ErrorIs(t, err, ErrBackupNotFound)
+		require.Contains(t, loader.refOwnersOf(ctx, keyB), "branch:src/b1",
+			"cross-prefix branch must pin every owner key in the ref table")
 
 		require.NoError(t, loader.DeleteBranch(ctx, "src", "b1"))
 		_, err = loader.GetBranch(ctx, "src", "b1")
 		require.ErrorIs(t, err, ErrBackupNotFound)
-		_, err = loader.GetBranch(ctx, "oth", "b1")
-		require.ErrorIs(t, err, ErrBackupNotFound, "one DeleteBranch must release every owner marker")
+		require.Empty(t, loader.refOwnersOf(ctx, keyA), "one DeleteBranch must release every ref-table entry")
+		require.Empty(t, loader.refOwnersOf(ctx, keyB))
 		ids, err := loader.ListBranchIDs(ctx, "oth")
 		require.NoError(t, err)
 		require.Empty(t, ids)

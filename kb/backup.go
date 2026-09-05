@@ -344,11 +344,18 @@ func snapshotRecordChecksum(rec *SnapshotRecord) (string, error) {
 //   - S3 / tiered: native UploadBytesIfNotExists (If-None-Match *) is atomic,
 //     so concurrent creators across processes resolve to exactly one winner.
 //   - Local: O_EXCL create via UploadIfNotExists is atomic on one host.
-//   - Generic Store fallback: Head-then-put is serialized with the KB key
-//     stripe, so concurrent creators in this process resolve to one winner.
-//     Concurrent creators in other processes can still race past the Head and
-//     the second put silently overwrites (last-writer-wins); generic stores
-//     therefore must not be relied on for cross-process CreateOnly fencing.
+//   - Generic Store fallback: Head-then-put fenced by the per-key write lease
+//     (AcquireWriteLease around Head-then-put) plus the in-process key stripe,
+//     so concurrent creators sharing the store AND the lease manager resolve
+//     to one winner across processes. A lease conflict itself reports
+//     ErrBackupExists (a rival is creating the same key).
+//
+// Residual risk: stores with neither a conditional put nor a shared
+// cross-process lease manager keep a Head-then-put race: two creators in
+// different processes (or sharing only the store, not the lease manager) can
+// both miss the Head and the second put silently overwrites (last-writer-
+// wins). Such stores must not be relied on for cross-process CreateOnly
+// fencing; pair them with a shared lease manager (file/S3/Redis) instead.
 //
 // Every ErrBackupExists returned here wraps ErrBlobVersionMismatch, so
 // errors.Is(err, ErrBackupExists) and errors.Is(err, ErrBlobVersionMismatch)
@@ -397,9 +404,43 @@ func (l *KB) uploadBytesCreateOnly(ctx context.Context, key string, data []byte)
 		}
 		return info, nil
 	}
-	// Serialize in-process creators for this key so two goroutines that both
-	// miss the Head cannot both put (which would silently let the second
-	// overwrite the first).
+	// Generic Store fallback: lease-fenced Head-then-put. The write lease
+	// serializes creators that share the lease manager (cross-process when
+	// the manager itself is shared, e.g. file/S3/Redis); the key stripe
+	// additionally serializes threads sharing this process. See the doc
+	// comment above for the residual risk without a shared lease.
+	mgr, lease, leaseErr := l.AcquireWriteLease(ctx, "backup-createonly/"+key)
+	if leaseErr != nil {
+		if errors.Is(leaseErr, ErrWriteLeaseConflict) {
+			return nil, fmt.Errorf("%w: %s: %w", ErrBackupExists, key, ErrBlobVersionMismatch)
+		}
+		// No lease available: degrade to the legacy in-process stripe
+		// rather than failing the write outright.
+		return l.uploadBytesCreateOnlyStriped(ctx, key, data)
+	}
+	defer func() { _ = mgr.Release(context.Background(), lease) }()
+	mu := l.LockFor("backup-createonly/" + key)
+	mu.Lock()
+	defer mu.Unlock()
+	if _, err := l.BlobStore.Head(ctx, key); err == nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrBackupExists, key, ErrBlobVersionMismatch)
+	} else if !errors.Is(err, ErrBlobNotFound) && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	info, err := l.BlobStore.UploadBytesIfMatch(ctx, key, data, "")
+	if err != nil {
+		if errors.Is(err, ErrBlobVersionMismatch) {
+			return nil, fmt.Errorf("%w: %s: %w", ErrBackupExists, key, err)
+		}
+		return nil, err
+	}
+	return info, nil
+}
+
+// uploadBytesCreateOnlyStriped is the legacy in-process-only fallback used
+// when no write lease can be acquired: safe against threads sharing this KB
+// instance, last-writer-wins across processes.
+func (l *KB) uploadBytesCreateOnlyStriped(ctx context.Context, key string, data []byte) (*BlobObjectInfo, error) {
 	mu := l.LockFor("backup-createonly/" + key)
 	mu.Lock()
 	defer mu.Unlock()
@@ -1108,10 +1149,21 @@ func (l *KB) publishCloneManifestCreateOnly(ctx context.Context, dstKBID string,
 			}
 			return nil
 		}
-		// Generic blob-backed manifest store: stripe-serialized Head-then-put.
-		// Safe against in-process rivals; a cross-process rival can still win
-		// the race, in which case the put below must surface the conflict
-		// instead of overwriting.
+		// Generic blob-backed manifest store: lease-fenced Head-then-put.
+		// The write lease serializes publishers sharing the lease manager
+		// (cross-process when the manager is shared); the stripe covers
+		// threads sharing this process. A cross-process rival can still win
+		// the race without a shared lease, in which case the put below must
+		// surface the conflict instead of overwriting (same residual as
+		// uploadBytesCreateOnly).
+		mgr, lease, leaseErr := l.AcquireWriteLease(ctx, "backup-createonly/"+key)
+		if leaseErr != nil {
+			if errors.Is(leaseErr, ErrWriteLeaseConflict) {
+				return fmt.Errorf("%w: target manifest %q already exists: %w", ErrBackupExists, dstKBID, ErrBlobVersionMismatch)
+			}
+			return fmt.Errorf("acquire publish lease for %q: %w", dstKBID, leaseErr)
+		}
+		defer func() { _ = mgr.Release(context.Background(), lease) }()
 		mu := l.LockFor("backup-createonly/" + key)
 		mu.Lock()
 		defer mu.Unlock()
