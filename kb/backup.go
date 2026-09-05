@@ -1,6 +1,6 @@
-// Phase 1 automated backups and constant-time KB branching.
+// Automated backups and snapshots for knowledge bases.
 //
-// What Phase 1 provides:
+// What this file provides:
 //   - Immutable backup descriptors (v1 JSON) stored at
 //     <kb>.backups/<backup-id>.backup.json via CreateOnly semantics.
 //   - Same-KB snapshots: a manifest copy under the same KBID prefix
@@ -10,7 +10,7 @@
 //     target KB prefix, then a CreateOnly manifest publish with
 //     verify-before-publish. The source KB is never mutated. Pointer
 //     sharing (referencing source shard keys from the clone manifest) is
-//     explicitly NOT done here; it is deferred to Phase 2.
+//     explicitly NOT done here; see branch.go.
 //
 // Format migration note (v1 -> v2):
 // manifests read through manifest/blob.go applyManifestReadDefaults default
@@ -21,7 +21,7 @@
 // this file REJECT v1 manifests with ErrBackupLegacyFormat instead of
 // silently migrating them. Operators migrate by re-ingesting/re-sealing,
 // which rebuilds every shard and publishes a v2 manifest. No automatic
-// migration happens in Phase 1.
+// migration happens here.
 //
 // SHA256 population prerequisite:
 // the seal path (kb/duckdb/snapshot_shards.go buildAndUploadOneSnapshotShard)
@@ -33,10 +33,10 @@
 // on the clone path re-checks Head size and re-hashes downloaded bytes, so
 // a corrupt object fails the restore before any manifest is published.
 //
-// Deferred to Phase 2 (not implemented here): zero-copy clones via
-// pointer-sharing, a server-side Store.Copy primitive, reachability GC that
-// understands shared shard references, and retention automation beyond the
-// SelectForRetention helper.
+// Related work lives elsewhere: zero-copy clones via pointer-sharing
+// (branch.go), a server-side Store.Copy primitive (kb/blobstore), GC that
+// understands shared shard references (shard_gc.go), and retention
+// automation beyond the SelectForRetention helper below (retention.go).
 package kb
 
 import (
@@ -57,10 +57,10 @@ import (
 )
 
 const (
-	// BackupDescriptorVersion is the only descriptor version Phase 1 writes.
+	// BackupDescriptorVersion is the only descriptor version currently written.
 	BackupDescriptorVersion = 1
 	// BackupMinReader advertises the minimum reader that understands v1.
-	BackupMinReader = "minnow>=phase1-backup-v1"
+	BackupMinReader = "minnow>=backup-v1"
 	// BackupSupportedFormatVersion is the only manifest format_version the
 	// backup/restore path accepts. See the package note on v1 -> v2.
 	BackupSupportedFormatVersion = 2
@@ -85,7 +85,7 @@ var (
 	// ErrBackupNotFound is returned when a named backup or snapshot is absent.
 	ErrBackupNotFound = errors.New("backup not found")
 	// ErrBackupLegacyFormat is returned when a manifest predates the
-	// supported format version. Re-ingest/re-seal to migrate; Phase 1 does
+	// supported format version. Re-ingest/re-seal to migrate; this path does
 	// not auto-migrate.
 	ErrBackupLegacyFormat = errors.New("manifest uses a legacy format version; re-ingest to migrate")
 	// ErrBackupCorrupt is returned when stored bytes fail validation.

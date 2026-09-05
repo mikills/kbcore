@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPhase2AdvFix(t *testing.T) {
+func TestBackupSafety(t *testing.T) {
 	t.Run("tombstone_rollback", func(t *testing.T) {
 		ctx := context.Background()
 		loader, _ := newOrphanKB(t)

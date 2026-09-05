@@ -11,17 +11,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// round1UnsupportedStore forces the copyShardServerSide fallback by
+// fallbackOnlyStore forces the copyShardServerSide fallback by
 // reporting Copy as unimplemented while delegating everything else.
-type round1UnsupportedStore struct {
+type fallbackOnlyStore struct {
 	BlobStore
 }
 
-func (s *round1UnsupportedStore) Copy(ctx context.Context, srcKey, dstKey string, opts blobstore.CopyOptions) (*blobstore.ObjectInfo, error) {
+func (s *fallbackOnlyStore) Copy(ctx context.Context, srcKey, dstKey string, opts blobstore.CopyOptions) (*blobstore.ObjectInfo, error) {
 	return nil, errors.New("Copy not supported by this store")
 }
 
-func TestRound1(t *testing.T) {
+func TestCopyDurability(t *testing.T) {
 	t.Run("nil_clock_fails_closed", func(t *testing.T) {
 		ctx := context.Background()
 		loader, _ := newOrphanKB(t)
@@ -50,7 +50,7 @@ func TestRound1(t *testing.T) {
 		ctx := context.Background()
 		loader, _ := newOrphanKB(t)
 		copyTestSeed(t, loader)
-		loader.BlobStore = &round1UnsupportedStore{BlobStore: loader.BlobStore}
+		loader.BlobStore = &fallbackOnlyStore{BlobStore: loader.BlobStore}
 		require.NoError(t, loader.CopyBackupWithProgress(ctx, "src", "b1", "dst", "c1"))
 		st, err := loader.CopyProgress(ctx, "dst", "c1")
 		require.NoError(t, err)

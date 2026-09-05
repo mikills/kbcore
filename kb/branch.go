@@ -1,4 +1,4 @@
-// Phase 2 zero-copy branch and restore.
+// Zero-copy branch and restore.
 //
 // A branch creates a new KB whose manifest references the source shard keys
 // verbatim: no shard bytes are copied. A zero-copy restore publishes a new
@@ -40,7 +40,7 @@ import (
 )
 
 const (
-	// BranchRecordVersion is the only branch marker version Phase 2 writes.
+	// BranchRecordVersion is the only branch marker version this file writes.
 	BranchRecordVersion = 1
 
 	branchKeyInfix  = ".branches/"
