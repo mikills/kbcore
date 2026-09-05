@@ -13,6 +13,14 @@ import (
 // DeleteKnowledgeBase removes the manifest and known shard/cache/media state for
 // a KB. Event history is intentionally retained for auditability.
 //
+// Guard limits: HasBackupsOrBranches runs before the manifest delete, so a
+// backup/snapshot created concurrently between the check and the delete is not
+// stopped (guard→delete TOCTOU) — quiesce backup writers before deleting a KB
+// when that matters. A direct ManifestStore.Delete bypasses the guard
+// entirely; only this method enforces it. Shard GC additionally consults
+// backup/snapshot markers before deleting any shard, so a marker that lands
+// in the race still pins its bytes in the GC confirm path.
+//
 // Ordering: the manifest is deleted FIRST so callers see a consistent "gone"
 // state even if downstream blob/cache/media cleanup partially fails. After the
 // manifest is deleted, shard, cache, and media cleanup are best-effort: every
@@ -30,6 +38,15 @@ func (l *KB) DeleteKnowledgeBase(ctx context.Context, kbID string) error {
 	manifest, err := l.ManifestStore.Get(ctx, kbID)
 	if err != nil && !errors.Is(err, ErrManifestNotFound) {
 		return fmt.Errorf("read manifest %q: %w", kbID, err)
+	}
+
+	// Backups and same-KB snapshots pin shard bytes by key. Deleting the KB
+	// while markers exist would orphan those records, so refuse until the
+	// operator deletes backups/snapshots first.
+	if blocked, guardErr := l.HasBackupsOrBranches(ctx, kbID); guardErr != nil {
+		return fmt.Errorf("check backups for %q: %w", kbID, guardErr)
+	} else if blocked {
+		return fmt.Errorf("%w: %q", ErrDeleteBlockedByBackups, kbID)
 	}
 
 	if err := l.ManifestStore.Delete(ctx, kbID); err != nil {

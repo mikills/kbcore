@@ -148,6 +148,7 @@ func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSwe
 	state := shardGCSweepState{
 		activeKeysByKB: make(map[string]map[string]struct{}),
 		freshKeysByKB:  make(map[string]map[string]struct{}),
+		pinnedKeysByKB: make(map[string]map[string]struct{}),
 		next:           make([]delayedShardGCEntry, 0, len(queue)),
 	}
 	for _, entry := range queue {
@@ -177,6 +178,7 @@ func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSwe
 type shardGCSweepState struct {
 	activeKeysByKB map[string]map[string]struct{}
 	freshKeysByKB  map[string]map[string]struct{}
+	pinnedKeysByKB map[string]map[string]struct{}
 	next           []delayedShardGCEntry
 	result         ShardGCSweepResult
 	firstErr       error
@@ -194,7 +196,7 @@ func (l *KB) sweepShardGCEntry(
 		state.next = append(state.next, entry)
 		return
 	}
-	activeKeys, err := l.activeShardKeysForGC(ctx, entry, state.activeKeysByKB)
+	activeKeys, err := l.activeShardKeysForGC(ctx, entry, state.activeKeysByKB, state.pinnedKeysByKB)
 	if err != nil {
 		state.retry(entry, now, err)
 		return
@@ -205,7 +207,7 @@ func (l *KB) sweepShardGCEntry(
 		state.retry(entry, now, nil)
 		return
 	}
-	reason, err := l.confirmShardDeletable(ctx, entry, now, state.freshKeysByKB)
+	reason, err := l.confirmShardDeletable(ctx, entry, now, state.freshKeysByKB, state.pinnedKeysByKB)
 	if err != nil {
 		state.retry(entry, now, err)
 		return
@@ -230,11 +232,18 @@ func (l *KB) sweepShardGCEntry(
 // confirmShardDeletable reports why an entry must not be deleted, or "" when it
 // may be. Content-addressed keys make a republish byte-identical, so only a
 // fresh manifest read and the object's write time can tell them apart.
+//
+// Backup descriptors and zero-copy snapshots pin shard bytes by key: a shard
+// referenced by any backup/snapshot marker is never deletable even when the
+// live manifest no longer names it, so the pinned set is consulted before the
+// object-age check. Marker list failures are returned (the entry is retried);
+// single unreadable markers are skipped best-effort by backupPinnedShardKeys.
 func (l *KB) confirmShardDeletable(
 	ctx context.Context,
 	entry delayedShardGCEntry,
 	now time.Time,
 	cache map[string]map[string]struct{},
+	pinnedCache map[string]map[string]struct{},
 ) (string, error) {
 	freshKeys, ok := cache[entry.KBID]
 	if !ok {
@@ -250,6 +259,13 @@ func (l *KB) confirmShardDeletable(
 	}
 	if _, referenced := freshKeys[entry.Shard.Key]; referenced {
 		return "republished", nil
+	}
+	pinned, err := l.pinnedKeysForGC(ctx, entry.KBID, pinnedCache)
+	if err != nil {
+		return "", fmt.Errorf("confirm pinned shards for gc: %w", err)
+	}
+	if _, ok := pinned[entry.Shard.Key]; ok {
+		return "pinned_by_backup", nil
 	}
 	if !entry.Reconciled {
 		return "", nil
@@ -283,6 +299,7 @@ func (l *KB) activeShardKeysForGC(
 	ctx context.Context,
 	entry delayedShardGCEntry,
 	cache map[string]map[string]struct{},
+	pinnedCache map[string]map[string]struct{},
 ) (map[string]struct{}, error) {
 	if activeKeys, ok := cache[entry.KBID]; ok {
 		return activeKeys, nil
@@ -298,8 +315,38 @@ func (l *KB) activeShardKeysForGC(
 		return nil, fmt.Errorf("download manifest for shard gc: %w", err)
 	}
 	activeKeys := activeShardKeys(doc.Manifest.Shards)
+	// Union the backup/snapshot pin set: sweep must not delete a shard the
+	// live manifest dropped but a backup or snapshot still pins.
+	pinned, err := l.pinnedKeysForGC(ctx, entry.KBID, pinnedCache)
+	if err != nil {
+		return nil, err
+	}
+	for key := range pinned {
+		activeKeys[key] = struct{}{}
+	}
 	cache[entry.KBID] = activeKeys
 	return activeKeys, nil
+}
+
+// pinnedKeysForGC returns the cached backup/snapshot pin set for a KB,
+// fetching it once per sweep.
+func (l *KB) pinnedKeysForGC(
+	ctx context.Context,
+	kbID string,
+	cache map[string]map[string]struct{},
+) (map[string]struct{}, error) {
+	if cache == nil {
+		return l.backupPinnedShardKeys(ctx, kbID)
+	}
+	if pinned, ok := cache[kbID]; ok {
+		return pinned, nil
+	}
+	pinned, err := l.backupPinnedShardKeys(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	cache[kbID] = pinned
+	return pinned, nil
 }
 
 func activeShardKeys(shards []SnapshotShardMetadata) map[string]struct{} {
@@ -425,6 +472,15 @@ func (l *KB) reconcileShardBlobs(
 	now time.Time,
 ) error {
 	cutoff := now.Add(-DefaultOrphanedShardGracePeriod)
+	// Backups and zero-copy snapshots pin shard bytes after the live manifest
+	// drops them; reconcile must not queue pinned shards as orphans. A marker
+	// list failure fails this reconcile (nothing is queued) rather than
+	// risking pinned data.
+	pinned, err := l.backupPinnedShardKeys(ctx, kbID)
+	if err != nil {
+		l.recordShardReconcileFailure(kbID)
+		return fmt.Errorf("read pinned shards for shard gc %q: %w", kbID, err)
+	}
 	var errs []error
 	for _, prefix := range shardBlobPrefixes(kbID) {
 		objects, err := l.BlobStore.List(ctx, prefix)
@@ -433,6 +489,16 @@ func (l *KB) reconcileShardBlobs(
 			continue
 		}
 		orphaned := orphanedShardBlobs(objects, active, cutoff, prefix)
+		if len(pinned) > 0 {
+			kept := orphaned[:0]
+			for _, shard := range orphaned {
+				if _, ok := pinned[shard.Key]; ok {
+					continue
+				}
+				kept = append(kept, shard)
+			}
+			orphaned = kept
+		}
 		if len(orphaned) > 0 {
 			l.enqueueUnqueuedShardsForGC(kbID, orphaned, now.Add(DefaultShardGCGraceWindow))
 		}
